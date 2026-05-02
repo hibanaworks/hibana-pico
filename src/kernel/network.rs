@@ -728,15 +728,9 @@ impl<const N: usize> NetworkObjectTable<N> {
         rights: NetworkRights,
         protocol: NetworkRoleProtocol,
     ) -> Result<NetworkObject, NetworkError> {
-        if self.slots.iter().flatten().any(|entry| {
-            !entry.revoked
-                && entry.target_node == target_node
-                && entry.lane == lane
-                && entry.route == route
-                && entry.session_generation == session_generation
-                && entry.policy_slot == policy_slot
-                && entry.protocol == protocol
-        }) {
+        let route_key =
+            NetworkRoute::with_policy(target_node, lane, route, session_generation, policy_slot);
+        if self.has_active_route_grant(route_key, protocol) {
             return Err(self.record_rejection(NetworkError::BadRoute));
         }
         let fd = match self.slots.iter().position(Option::is_none) {
@@ -841,18 +835,12 @@ impl<const N: usize> NetworkObjectTable<N> {
         generation: u16,
         session_generation: u16,
     ) -> NetworkObjectWriteRoute {
-        match self.resolve(fd, generation, NetworkRights::Send, session_generation) {
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Datagram => {
-                NetworkObjectWriteRoute::Datagram(entry)
-            }
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Stream => {
-                NetworkObjectWriteRoute::Stream(entry)
-            }
-            Ok(_) => NetworkObjectWriteRoute::Rejected(
-                self.record_rejection(NetworkError::WrongProtocol),
-            ),
-            Err(error) => NetworkObjectWriteRoute::Rejected(error),
-        }
+        Self::write_route_from_result(self.resolve(
+            fd,
+            generation,
+            NetworkRights::Send,
+            session_generation,
+        ))
     }
 
     pub fn route_fd_write_routed(
@@ -861,18 +849,12 @@ impl<const N: usize> NetworkObjectTable<N> {
         generation: u16,
         route: NetworkRoute,
     ) -> NetworkObjectWriteRoute {
-        match self.resolve_routed(fd, generation, NetworkRights::Send, route) {
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Datagram => {
-                NetworkObjectWriteRoute::Datagram(entry)
-            }
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Stream => {
-                NetworkObjectWriteRoute::Stream(entry)
-            }
-            Ok(_) => NetworkObjectWriteRoute::Rejected(
-                self.record_rejection(NetworkError::WrongProtocol),
-            ),
-            Err(error) => NetworkObjectWriteRoute::Rejected(error),
-        }
+        Self::write_route_from_result(self.resolve_routed(
+            fd,
+            generation,
+            NetworkRights::Send,
+            route,
+        ))
     }
 
     pub fn route_fd_write_authorized<const P: usize>(
@@ -896,18 +878,12 @@ impl<const N: usize> NetworkObjectTable<N> {
         generation: u16,
         session_generation: u16,
     ) -> NetworkObjectReadRoute {
-        match self.resolve(fd, generation, NetworkRights::Receive, session_generation) {
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Datagram => {
-                NetworkObjectReadRoute::Datagram(entry)
-            }
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Stream => {
-                NetworkObjectReadRoute::Stream(entry)
-            }
-            Ok(_) => {
-                NetworkObjectReadRoute::Rejected(self.record_rejection(NetworkError::WrongProtocol))
-            }
-            Err(error) => NetworkObjectReadRoute::Rejected(error),
-        }
+        Self::read_route_from_result(self.resolve(
+            fd,
+            generation,
+            NetworkRights::Receive,
+            session_generation,
+        ))
     }
 
     pub fn route_fd_read_routed(
@@ -916,33 +892,16 @@ impl<const N: usize> NetworkObjectTable<N> {
         generation: u16,
         route: NetworkRoute,
     ) -> NetworkObjectReadRoute {
-        match self.resolve_routed(fd, generation, NetworkRights::Receive, route) {
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Datagram => {
-                NetworkObjectReadRoute::Datagram(entry)
-            }
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Stream => {
-                NetworkObjectReadRoute::Stream(entry)
-            }
-            Ok(_) => {
-                NetworkObjectReadRoute::Rejected(self.record_rejection(NetworkError::WrongProtocol))
-            }
-            Err(error) => NetworkObjectReadRoute::Rejected(error),
-        }
+        Self::read_route_from_result(self.resolve_routed(
+            fd,
+            generation,
+            NetworkRights::Receive,
+            route,
+        ))
     }
 
     pub fn route_receive_routed(&self, route: NetworkRoute) -> NetworkObjectReadRoute {
-        match self.resolve_route(NetworkRights::Receive, route) {
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Datagram => {
-                NetworkObjectReadRoute::Datagram(entry)
-            }
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Stream => {
-                NetworkObjectReadRoute::Stream(entry)
-            }
-            Ok(_) => {
-                NetworkObjectReadRoute::Rejected(self.record_rejection(NetworkError::WrongProtocol))
-            }
-            Err(error) => NetworkObjectReadRoute::Rejected(error),
-        }
+        Self::read_route_from_result(self.resolve_route(NetworkRights::Receive, route))
     }
 
     pub fn route_fd_read_authorized<const P: usize>(
@@ -1027,6 +986,42 @@ impl<const N: usize> NetworkObjectTable<N> {
         telemetry.record(error);
         self.rejection_telemetry.set(telemetry);
         error
+    }
+
+    fn has_active_route_grant(
+        &self,
+        route_key: NetworkRoute,
+        protocol: NetworkRoleProtocol,
+    ) -> bool {
+        self.slots.iter().flatten().copied().any(|entry| {
+            !entry.revoked
+                && entry.protocol == protocol
+                && network_route_matches_object(entry, route_key)
+        })
+    }
+
+    fn write_route_from_result(
+        result: Result<NetworkObject, NetworkError>,
+    ) -> NetworkObjectWriteRoute {
+        match result {
+            Ok(entry) => match entry.protocol() {
+                NetworkRoleProtocol::Datagram => NetworkObjectWriteRoute::Datagram(entry),
+                NetworkRoleProtocol::Stream => NetworkObjectWriteRoute::Stream(entry),
+            },
+            Err(error) => NetworkObjectWriteRoute::Rejected(error),
+        }
+    }
+
+    fn read_route_from_result(
+        result: Result<NetworkObject, NetworkError>,
+    ) -> NetworkObjectReadRoute {
+        match result {
+            Ok(entry) => match entry.protocol() {
+                NetworkRoleProtocol::Datagram => NetworkObjectReadRoute::Datagram(entry),
+                NetworkRoleProtocol::Stream => NetworkObjectReadRoute::Stream(entry),
+            },
+            Err(error) => NetworkObjectReadRoute::Rejected(error),
+        }
     }
 
     fn validate_route(entry: NetworkObject, route: NetworkRoute) -> Result<(), NetworkError> {
