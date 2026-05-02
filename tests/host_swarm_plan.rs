@@ -4463,6 +4463,27 @@ fn production_qemu_swarm_routes_network_objects_over_swarm_transport() {
 }
 
 #[test]
+#[cfg(feature = "profile-host-qemu-swarm")]
+fn qemu_mesh_udp_source_ports_are_exclusive_node_bindings() {
+    let source = std::fs::read_to_string("qemu/overlay/hw/misc/cyw43439_wifi.c")
+        .expect("read QEMU CYW43439 overlay");
+
+    assert!(
+        source.contains("if (!cyw43439_radio_mesh_enabled(s)) {\n        socket_set_fast_reuse(s->radio_fd);\n    }"),
+        "mesh sockets must not enable fast reuse because source ports bind node identity"
+    );
+    assert!(
+        source.contains("s->radio_port_base > UINT16_MAX - s->node_count"),
+        "mesh port allocation must reject radio-port-base overflow"
+    );
+    assert!(
+        source.contains("source_node = source_port - s->radio_port_base;")
+            && source.contains("frame_src_node != source_node || frame_dst_node != s->node_id"),
+        "mesh receive must bind UDP source port, frame src, and frame dst before queueing"
+    );
+}
+
+#[test]
 fn one_choreography_connects_sensor_actuator_and_gateway_telemetry() {
     hibana_pico::substrate::exec::run_current_task(async {
         let medium: HostSwarmMedium<64> = HostSwarmMedium::new();

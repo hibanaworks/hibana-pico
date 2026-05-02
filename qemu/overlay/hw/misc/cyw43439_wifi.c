@@ -910,7 +910,14 @@ static void cyw43439_realize(SSIPeripheral *dev, Error **errp)
         return;
     }
 
-    socket_set_fast_reuse(s->radio_fd);
+    /*
+     * Mesh mode treats radio-port-base + node-id as the local node binding.
+     * Keep that bind exclusive so another localhost sender cannot claim a
+     * source node by choosing the same UDP source port.
+     */
+    if (!cyw43439_radio_mesh_enabled(s)) {
+        socket_set_fast_reuse(s->radio_fd);
+    }
 
     local_addr.sin_family = AF_INET;
     local_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
