@@ -574,7 +574,7 @@ fn expect_qemu_rx_meta(
     let Some(meta) = cyw43439::qemu_last_rx_meta(local_role) else {
         fail_closed(stage);
     };
-    if meta.src_node() != source_node || meta.dst_node() != local_node || meta.lane() != lane {
+    if !meta.matches(source_node, local_node, lane) {
         uart_hex_line("[rx] actual src 0x", meta.src_node().raw() as u32);
         uart_hex_line("[rx] expected src 0x", source_node.raw() as u32);
         uart_hex_line("[rx] actual dst 0x", meta.dst_node().raw() as u32);
