@@ -17,6 +17,11 @@ use hibana::{
         wire::{Payload, WireEncode, WirePayload},
     },
 };
+#[cfg(feature = "profile-host-qemu-swarm")]
+use hibana_pico::choreography::swarm::{
+    coordinator_program_6, role1_program_6, role2_program_6, role3_program_6, role4_program_6,
+    role5_program_6,
+};
 use hibana_pico::{
     choreography::protocol::{
         EngineLabelUniverse, EngineReq, EngineRet, FdError, FdErrorMsg, FdRead, FdReadDone,
@@ -95,6 +100,8 @@ const GATEWAY: NodeId = NodeId::new(4);
 const SESSION_GENERATION: u16 = 7;
 const SWARM_CREDENTIAL: SwarmCredential = SwarmCredential::new(0x4849_4241);
 const SECURE: SwarmSecurity = SwarmSecurity::Secure(SWARM_CREDENTIAL);
+#[cfg(feature = "profile-host-qemu-swarm")]
+const QEMU_REMOTE_ACTUATOR_FD: u8 = 21;
 const TEST_MEMORY_LEN: u32 = 4096;
 const TEST_MEMORY_EPOCH: u32 = 1;
 const TEST_STDOUT_PTR: u32 = 1024;
@@ -3338,6 +3345,398 @@ async fn exchange_swarm_aggregate<const ROLE: u8>(
     );
 }
 
+#[cfg(feature = "profile-host-qemu-swarm")]
+async fn exchange_swarm_remote_actuator<const ROLE: u8>(
+    coordinator: &mut Endpoint<'_, 0>,
+    actuator: &mut Endpoint<'_, ROLE>,
+    actuator_node: NodeId,
+    value: u32,
+) {
+    let command = RemoteActuateRequest::new(
+        QEMU_REMOTE_ACTUATOR_FD,
+        SESSION_GENERATION,
+        actuator_node.raw() as u8,
+        value,
+    );
+    (coordinator
+        .flow::<RemoteActuateReqMsg>()
+        .expect("coordinator flow<remote actuator>")
+        .send(&command))
+    .await
+    .expect("send remote actuator command over swarm");
+    assert_eq!(
+        (actuator.recv::<RemoteActuateReqMsg>())
+            .await
+            .expect("actuator recv remote command"),
+        command
+    );
+    let ack = RemoteActuateAck::new(actuator_node.raw() as u8, 0);
+    (actuator
+        .flow::<RemoteActuateRetMsg>()
+        .expect("actuator flow<remote ack>")
+        .send(&ack))
+    .await
+    .expect("send remote actuator ack");
+    assert_eq!(
+        (coordinator.recv::<RemoteActuateRetMsg>())
+            .await
+            .expect("coordinator recv remote actuator ack"),
+        ack
+    );
+}
+
+#[cfg(feature = "profile-host-qemu-swarm")]
+async fn exchange_swarm_gateway_telemetry<const SOURCE_ROLE: u8, const GATEWAY_ROLE: u8>(
+    coordinator: &mut Endpoint<'_, 0>,
+    source: &mut Endpoint<'_, SOURCE_ROLE>,
+    gateway: &mut Endpoint<'_, GATEWAY_ROLE>,
+    source_node: NodeId,
+) {
+    let telemetry = SwarmTelemetry::new(
+        source_node,
+        RoleMask::single(NodeRole::Actuator),
+        1,
+        0,
+        512,
+        23_500,
+        SESSION_GENERATION,
+    );
+    (source
+        .flow::<SwarmTelemetryMsg>()
+        .expect("source flow<gateway telemetry>")
+        .send(&telemetry))
+    .await
+    .expect("source sends gateway telemetry");
+    assert_eq!(
+        (gateway.recv::<SwarmTelemetryMsg>())
+            .await
+            .expect("gateway receives telemetry"),
+        telemetry
+    );
+    (gateway
+        .flow::<SwarmTelemetryMsg>()
+        .expect("gateway flow<telemetry acceptance>")
+        .send(&telemetry))
+    .await
+    .expect("gateway forwards telemetry acceptance");
+    assert_eq!(
+        (coordinator.recv::<SwarmTelemetryMsg>())
+            .await
+            .expect("coordinator receives telemetry acceptance"),
+        telemetry
+    );
+}
+
+#[cfg(feature = "profile-host-qemu-swarm")]
+async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
+    coordinator: &mut Endpoint<'_, 0>,
+    gateway: &mut Endpoint<'_, GATEWAY_ROLE>,
+    gateway_node: NodeId,
+) {
+    let mut fds: NetworkObjectTable<2> = NetworkObjectTable::new();
+    let datagram_fd = fds
+        .apply_cap_grant_datagram(
+            COORDINATOR,
+            SWARM_CREDENTIAL,
+            SESSION_GENERATION,
+            gateway_node,
+            22,
+            LABEL_NET_DATAGRAM_SEND,
+            NetworkRights::Send,
+        )
+        .expect("grant qemu datagram NetworkObject");
+    let stream_fd = fds
+        .apply_cap_grant_stream(
+            COORDINATOR,
+            SWARM_CREDENTIAL,
+            SESSION_GENERATION,
+            gateway_node,
+            23,
+            LABEL_NET_STREAM_WRITE,
+            NetworkRights::Send,
+        )
+        .expect("grant qemu stream NetworkObject");
+    let mut gateway_fds: NetworkObjectTable<3> = NetworkObjectTable::new();
+    let _gateway_dummy_fd = gateway_fds
+        .apply_cap_grant_datagram(
+            gateway_node,
+            SWARM_CREDENTIAL,
+            SESSION_GENERATION,
+            COORDINATOR,
+            21,
+            LABEL_NET_DATAGRAM_RECV,
+            NetworkRights::Receive,
+        )
+        .expect("pre-seed gateway table so inbound routing is not fd-order dependent");
+    let gateway_datagram_fd = gateway_fds
+        .apply_cap_grant_datagram(
+            gateway_node,
+            SWARM_CREDENTIAL,
+            SESSION_GENERATION,
+            COORDINATOR,
+            22,
+            LABEL_NET_DATAGRAM_SEND,
+            NetworkRights::Receive,
+        )
+        .expect("grant gateway datagram receive NetworkObject");
+    let gateway_stream_fd = gateway_fds
+        .apply_cap_grant_stream(
+            gateway_node,
+            SWARM_CREDENTIAL,
+            SESSION_GENERATION,
+            COORDINATOR,
+            23,
+            LABEL_NET_STREAM_WRITE,
+            NetworkRights::Receive,
+        )
+        .expect("grant gateway stream receive NetworkObject");
+
+    assert_ne!(
+        datagram_fd.generation(),
+        SESSION_GENERATION,
+        "NetworkObject generation is distinct from session generation"
+    );
+    let resolved_datagram = match fds.route_fd_write_routed(
+        datagram_fd.fd(),
+        datagram_fd.generation(),
+        datagram_fd.route_key(),
+    ) {
+        NetworkObjectWriteRoute::Datagram(fd) => fd,
+        other => panic!("datagram fd should choose datagram route: {other:?}"),
+    };
+    assert_eq!(resolved_datagram.target_node(), gateway_node);
+    assert_eq!(resolved_datagram.lane(), 22);
+    assert_eq!(resolved_datagram.route(), LABEL_NET_DATAGRAM_SEND);
+    assert_ne!(resolved_datagram.route(), gateway_node.raw() as u8);
+
+    (coordinator
+        .flow::<NetworkDatagramSendRouteControl>()
+        .expect("coordinator flow<qemu datagram route control>")
+        .send(()))
+    .await
+    .expect("coordinator selects qemu datagram route");
+    let datagram = DatagramSend::new(
+        resolved_datagram.fd(),
+        resolved_datagram.generation(),
+        resolved_datagram.route(),
+        b"qemu datagram fd",
+    )
+    .expect("qemu datagram send");
+    (coordinator
+        .flow::<DatagramSendMsg>()
+        .expect("coordinator flow<qemu datagram send>")
+        .send(&datagram))
+    .await
+    .expect("coordinator sends qemu datagram over swarm");
+    let gateway_branch = (gateway.offer())
+        .await
+        .expect("gateway offers qemu datagram route");
+    assert_eq!(
+        (gateway_branch.decode::<DatagramSendMsg>())
+            .await
+            .expect("gateway receives qemu datagram"),
+        datagram
+    );
+    let gateway_datagram = match gateway_fds.route_receive_routed(NetworkRoute::new(
+        COORDINATOR,
+        22,
+        LABEL_NET_DATAGRAM_SEND,
+        SESSION_GENERATION,
+    )) {
+        NetworkObjectReadRoute::Datagram(fd) => fd,
+        other => panic!("gateway datagram receive should choose datagram route: {other:?}"),
+    };
+    assert_eq!(gateway_datagram, gateway_datagram_fd);
+    assert_ne!(gateway_datagram.fd(), resolved_datagram.fd());
+    assert_ne!(
+        gateway_datagram.generation(),
+        resolved_datagram.generation()
+    );
+    assert_eq!(gateway_datagram.target_node(), COORDINATOR);
+    assert_eq!(gateway_datagram.route(), datagram.route());
+    assert_eq!(
+        gateway_fds.route_receive_routed(NetworkRoute::new(
+            COORDINATOR,
+            22,
+            LABEL_NET_STREAM_WRITE,
+            SESSION_GENERATION,
+        )),
+        NetworkObjectReadRoute::Rejected(NetworkError::BadRoute)
+    );
+    let datagram_ack = DatagramAck::new(datagram.fd(), datagram.generation(), true);
+    assert!(datagram_ack.accepted_for(resolved_datagram.fd(), resolved_datagram.generation()));
+    assert!(
+        !DatagramAck::new(
+            resolved_datagram.fd() ^ 1,
+            resolved_datagram.generation(),
+            true
+        )
+        .accepted_for(resolved_datagram.fd(), resolved_datagram.generation())
+    );
+    assert!(
+        !DatagramAck::new(
+            resolved_datagram.fd(),
+            resolved_datagram.generation().wrapping_add(1),
+            true,
+        )
+        .accepted_for(resolved_datagram.fd(), resolved_datagram.generation())
+    );
+    assert!(
+        !DatagramAck::new(
+            resolved_datagram.fd(),
+            resolved_datagram.generation(),
+            false
+        )
+        .accepted_for(resolved_datagram.fd(), resolved_datagram.generation())
+    );
+    (gateway
+        .flow::<DatagramAckMsg>()
+        .expect("gateway flow<qemu datagram ack>")
+        .send(&datagram_ack))
+    .await
+    .expect("gateway sends qemu datagram ack");
+    assert_eq!(
+        (coordinator.recv::<DatagramAckMsg>())
+            .await
+            .expect("coordinator receives qemu datagram ack"),
+        datagram_ack
+    );
+
+    let resolved_stream = match fds.route_fd_write_routed(
+        stream_fd.fd(),
+        stream_fd.generation(),
+        stream_fd.route_key(),
+    ) {
+        NetworkObjectWriteRoute::Stream(fd) => fd,
+        other => panic!("stream fd should choose stream route: {other:?}"),
+    };
+    assert_eq!(resolved_stream.target_node(), gateway_node);
+    assert_eq!(resolved_stream.lane(), 23);
+    assert_eq!(resolved_stream.route(), LABEL_NET_STREAM_WRITE);
+    assert_ne!(resolved_stream.route(), gateway_node.raw() as u8);
+
+    (coordinator
+        .flow::<NetworkStreamWriteRouteControl>()
+        .expect("coordinator flow<qemu stream route control>")
+        .send(()))
+    .await
+    .expect("coordinator selects qemu stream route");
+    let stream = StreamWrite::new(
+        resolved_stream.fd(),
+        resolved_stream.generation(),
+        resolved_stream.route(),
+        0,
+        NET_STREAM_FLAG_FIN,
+        b"qemu stream fd",
+    )
+    .expect("qemu stream write");
+    (coordinator
+        .flow::<StreamWriteMsg>()
+        .expect("coordinator flow<qemu stream write>")
+        .send(&stream))
+    .await
+    .expect("coordinator sends qemu stream over swarm");
+    assert_eq!(
+        (gateway.recv::<StreamWriteMsg>())
+            .await
+            .expect("gateway receives qemu stream"),
+        stream
+    );
+    let gateway_stream = match gateway_fds.route_receive_routed(NetworkRoute::new(
+        COORDINATOR,
+        23,
+        LABEL_NET_STREAM_WRITE,
+        SESSION_GENERATION,
+    )) {
+        NetworkObjectReadRoute::Stream(fd) => fd,
+        other => panic!("gateway stream receive should choose stream route: {other:?}"),
+    };
+    assert_eq!(gateway_stream, gateway_stream_fd);
+    assert_ne!(gateway_stream.fd(), resolved_stream.fd());
+    assert_ne!(gateway_stream.generation(), resolved_stream.generation());
+    assert_eq!(gateway_stream.target_node(), COORDINATOR);
+    assert_eq!(gateway_stream.route(), stream.route());
+    assert_eq!(
+        gateway_fds.route_receive_routed(NetworkRoute::new(
+            COORDINATOR,
+            23,
+            LABEL_NET_DATAGRAM_SEND,
+            SESSION_GENERATION,
+        )),
+        NetworkObjectReadRoute::Rejected(NetworkError::BadRoute)
+    );
+    let stream_ack = StreamAck::new(stream.fd(), stream.generation(), stream.sequence(), true);
+    assert!(stream_ack.accepted_for(
+        resolved_stream.fd(),
+        resolved_stream.generation(),
+        stream.sequence()
+    ));
+    assert!(
+        !StreamAck::new(
+            resolved_stream.fd() ^ 1,
+            resolved_stream.generation(),
+            stream.sequence(),
+            true,
+        )
+        .accepted_for(
+            resolved_stream.fd(),
+            resolved_stream.generation(),
+            stream.sequence()
+        )
+    );
+    assert!(
+        !StreamAck::new(
+            resolved_stream.fd(),
+            resolved_stream.generation().wrapping_add(1),
+            stream.sequence(),
+            true,
+        )
+        .accepted_for(
+            resolved_stream.fd(),
+            resolved_stream.generation(),
+            stream.sequence()
+        )
+    );
+    assert!(
+        !StreamAck::new(
+            resolved_stream.fd(),
+            resolved_stream.generation(),
+            stream.sequence().wrapping_add(1),
+            true,
+        )
+        .accepted_for(
+            resolved_stream.fd(),
+            resolved_stream.generation(),
+            stream.sequence()
+        )
+    );
+    assert!(
+        !StreamAck::new(
+            resolved_stream.fd(),
+            resolved_stream.generation(),
+            stream.sequence(),
+            false,
+        )
+        .accepted_for(
+            resolved_stream.fd(),
+            resolved_stream.generation(),
+            stream.sequence()
+        )
+    );
+    (gateway
+        .flow::<StreamAckMsg>()
+        .expect("gateway flow<qemu stream ack>")
+        .send(&stream_ack))
+    .await
+    .expect("gateway sends qemu stream ack");
+    assert_eq!(
+        (coordinator.recv::<StreamAckMsg>())
+            .await
+            .expect("coordinator receives qemu stream ack"),
+        stream_ack
+    );
+}
+
 #[test]
 fn one_choreography_connects_all_swarm_nodes_with_sample_wasi_and_aggregate() {
     hibana_pico::substrate::exec::run_current_task(async {
@@ -3823,6 +4222,243 @@ fn six_process_swarm_choreography_connects_coordinator_and_five_sensors() {
         exchange_swarm_aggregate(&mut coordinator, &mut sensor3, node4, aggregate).await;
         exchange_swarm_aggregate(&mut coordinator, &mut sensor4, node5, aggregate).await;
         exchange_swarm_aggregate(&mut coordinator, &mut sensor5, node6, aggregate).await;
+    });
+}
+
+#[test]
+#[cfg(feature = "profile-host-qemu-swarm")]
+fn production_qemu_swarm_routes_network_objects_over_swarm_transport() {
+    hibana_pico::substrate::exec::run_current_task(async {
+        let module = Wasip1StdoutModule::parse(WASIP1_STDOUT_GUEST).expect("parse stdout guest");
+        let chunk = module.demo_stdout_chunk().expect("stdout chunk");
+        assert_eq!(chunk.as_bytes(), WASIP1_STDOUT_DEMO_TEXT);
+
+        let medium: HostSwarmMedium<192> = HostSwarmMedium::new();
+        let node2 = NodeId::new(2);
+        let node3 = NodeId::new(3);
+        let node4 = NodeId::new(4);
+        let node5 = NodeId::new(5);
+        let node6 = NodeId::new(6);
+        let role_nodes = [COORDINATOR, node2, node3, node4, node5, node6];
+
+        let clock0 = CounterClock::new();
+        let mut tap0 = [TapEvent::zero(); 128];
+        let mut slab0 = vec![0u8; 262_144];
+        let cluster0 = SwarmSixRoleTestKit::new(&clock0);
+        let rv0 = cluster0
+            .add_rendezvous_from_config(
+                Config::new(&mut tap0, slab0.as_mut_slice())
+                    .with_lane_range(0..25)
+                    .with_universe(EngineLabelUniverse),
+                HostSwarmRoleTransport::new(
+                    &medium,
+                    COORDINATOR,
+                    role_nodes,
+                    6,
+                    SESSION_GENERATION,
+                    SECURE,
+                ),
+            )
+            .expect("register qemu coordinator rendezvous");
+
+        let clock1 = CounterClock::new();
+        let mut tap1 = [TapEvent::zero(); 128];
+        let mut slab1 = vec![0u8; 262_144];
+        let cluster1 = SwarmSixRoleTestKit::new(&clock1);
+        let rv1 = cluster1
+            .add_rendezvous_from_config(
+                Config::new(&mut tap1, slab1.as_mut_slice())
+                    .with_lane_range(0..25)
+                    .with_universe(EngineLabelUniverse),
+                HostSwarmRoleTransport::new(
+                    &medium,
+                    node2,
+                    role_nodes,
+                    6,
+                    SESSION_GENERATION,
+                    SECURE,
+                ),
+            )
+            .expect("register qemu node2 rendezvous");
+
+        let clock2 = CounterClock::new();
+        let mut tap2 = [TapEvent::zero(); 128];
+        let mut slab2 = vec![0u8; 262_144];
+        let cluster2 = SwarmSixRoleTestKit::new(&clock2);
+        let rv2 = cluster2
+            .add_rendezvous_from_config(
+                Config::new(&mut tap2, slab2.as_mut_slice())
+                    .with_lane_range(0..25)
+                    .with_universe(EngineLabelUniverse),
+                HostSwarmRoleTransport::new(
+                    &medium,
+                    node3,
+                    role_nodes,
+                    6,
+                    SESSION_GENERATION,
+                    SECURE,
+                ),
+            )
+            .expect("register qemu node3 rendezvous");
+
+        let clock3 = CounterClock::new();
+        let mut tap3 = [TapEvent::zero(); 128];
+        let mut slab3 = vec![0u8; 262_144];
+        let cluster3 = SwarmSixRoleTestKit::new(&clock3);
+        let rv3 = cluster3
+            .add_rendezvous_from_config(
+                Config::new(&mut tap3, slab3.as_mut_slice())
+                    .with_lane_range(0..25)
+                    .with_universe(EngineLabelUniverse),
+                HostSwarmRoleTransport::new(
+                    &medium,
+                    node4,
+                    role_nodes,
+                    6,
+                    SESSION_GENERATION,
+                    SECURE,
+                ),
+            )
+            .expect("register qemu node4 rendezvous");
+
+        let clock4 = CounterClock::new();
+        let mut tap4 = [TapEvent::zero(); 128];
+        let mut slab4 = vec![0u8; 262_144];
+        let cluster4 = SwarmSixRoleTestKit::new(&clock4);
+        let rv4 = cluster4
+            .add_rendezvous_from_config(
+                Config::new(&mut tap4, slab4.as_mut_slice())
+                    .with_lane_range(0..25)
+                    .with_universe(EngineLabelUniverse),
+                HostSwarmRoleTransport::new(
+                    &medium,
+                    node5,
+                    role_nodes,
+                    6,
+                    SESSION_GENERATION,
+                    SECURE,
+                ),
+            )
+            .expect("register qemu node5 rendezvous");
+
+        let clock5 = CounterClock::new();
+        let mut tap5 = [TapEvent::zero(); 128];
+        let mut slab5 = vec![0u8; 262_144];
+        let cluster5 = SwarmSixRoleTestKit::new(&clock5);
+        let rv5 = cluster5
+            .add_rendezvous_from_config(
+                Config::new(&mut tap5, slab5.as_mut_slice())
+                    .with_lane_range(0..25)
+                    .with_universe(EngineLabelUniverse),
+                HostSwarmRoleTransport::new(
+                    &medium,
+                    node6,
+                    role_nodes,
+                    6,
+                    SESSION_GENERATION,
+                    SECURE,
+                ),
+            )
+            .expect("register qemu node6 rendezvous");
+
+        let mut coordinator = cluster0
+            .enter(
+                rv0,
+                SessionId::new(2361),
+                coordinator_program_6(),
+                NoBinding,
+            )
+            .expect("attach production coordinator");
+        let mut sensor1 = cluster1
+            .enter(rv1, SessionId::new(2361), role1_program_6(), NoBinding)
+            .expect("attach production node2");
+        let mut sensor2 = cluster2
+            .enter(rv2, SessionId::new(2361), role2_program_6(), NoBinding)
+            .expect("attach production node3");
+        let mut sensor3 = cluster3
+            .enter(rv3, SessionId::new(2361), role3_program_6(), NoBinding)
+            .expect("attach production node4");
+        let mut sensor4 = cluster4
+            .enter(rv4, SessionId::new(2361), role4_program_6(), NoBinding)
+            .expect("attach production node5");
+        let mut sensor5 = cluster5
+            .enter(rv5, SessionId::new(2361), role5_program_6(), NoBinding)
+            .expect("attach production node6");
+
+        let samples = [
+            exchange_swarm_sample(
+                &mut coordinator,
+                &mut sensor1,
+                node2,
+                pico2w_swarm_sample_value(node2.raw()),
+                2360,
+            )
+            .await,
+            exchange_swarm_sample(
+                &mut coordinator,
+                &mut sensor2,
+                node3,
+                pico2w_swarm_sample_value(node3.raw()),
+                2361,
+            )
+            .await,
+            exchange_swarm_sample(
+                &mut coordinator,
+                &mut sensor3,
+                node4,
+                pico2w_swarm_sample_value(node4.raw()),
+                2362,
+            )
+            .await,
+            exchange_swarm_sample(
+                &mut coordinator,
+                &mut sensor4,
+                node5,
+                pico2w_swarm_sample_value(node5.raw()),
+                2363,
+            )
+            .await,
+            exchange_swarm_sample(
+                &mut coordinator,
+                &mut sensor5,
+                node6,
+                pico2w_swarm_sample_value(node6.raw()),
+                2364,
+            )
+            .await,
+        ];
+
+        exchange_swarm_wasip1_fd_write(&mut coordinator, &mut sensor1, node2, chunk.as_bytes())
+            .await;
+        exchange_swarm_wasip1_fd_write(&mut coordinator, &mut sensor2, node3, chunk.as_bytes())
+            .await;
+        exchange_swarm_wasip1_fd_write(&mut coordinator, &mut sensor3, node4, chunk.as_bytes())
+            .await;
+        exchange_swarm_wasip1_fd_write(&mut coordinator, &mut sensor4, node5, chunk.as_bytes())
+            .await;
+        exchange_swarm_wasip1_fd_write(&mut coordinator, &mut sensor5, node6, chunk.as_bytes())
+            .await;
+
+        let aggregate = samples
+            .iter()
+            .fold(0u32, |sum, sample| sum.wrapping_add(sample.value()));
+        assert_eq!(aggregate, PICO2W_SWARM_DEFAULT_AGGREGATE);
+
+        exchange_swarm_aggregate(&mut coordinator, &mut sensor1, node2, aggregate).await;
+        exchange_swarm_aggregate(&mut coordinator, &mut sensor2, node3, aggregate).await;
+        exchange_swarm_aggregate(&mut coordinator, &mut sensor3, node4, aggregate).await;
+        exchange_swarm_aggregate(&mut coordinator, &mut sensor4, node5, aggregate).await;
+        exchange_swarm_aggregate(&mut coordinator, &mut sensor5, node6, aggregate).await;
+
+        exchange_swarm_remote_actuator(
+            &mut coordinator,
+            &mut sensor2,
+            node3,
+            aggregate ^ 0x0000_a5a5,
+        )
+        .await;
+        exchange_swarm_gateway_telemetry(&mut coordinator, &mut sensor2, &mut sensor3, node3).await;
+        exchange_qemu_network_object_route(&mut coordinator, &mut sensor3, node4).await;
     });
 }
 

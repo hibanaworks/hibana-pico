@@ -6,11 +6,12 @@ use hibana::{
 
 use crate::{
     choreography::protocol::{
-        EngineReq, EngineRet, LABEL_MEM_BORROW_READ, LABEL_MEM_RELEASE, LABEL_MGMT_IMAGE_ACTIVATE,
-        LABEL_MGMT_IMAGE_BEGIN, LABEL_MGMT_IMAGE_CHUNK, LABEL_MGMT_IMAGE_END,
-        LABEL_MGMT_IMAGE_STATUS, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET, MemBorrow,
-        MemReadGrantControl, MemRelease, MgmtImageActivate, MgmtImageBegin, MgmtImageChunk,
-        MgmtImageEnd, MgmtStatus,
+        EngineReq, EngineRet, FdErrorMsg, LABEL_MEM_BORROW_READ, LABEL_MEM_RELEASE,
+        LABEL_MGMT_IMAGE_ACTIVATE, LABEL_MGMT_IMAGE_BEGIN, LABEL_MGMT_IMAGE_CHUNK,
+        LABEL_MGMT_IMAGE_END, LABEL_MGMT_IMAGE_STATUS, LABEL_WASI_FD_WRITE,
+        LABEL_WASI_FD_WRITE_RET, MemBorrow, MemReadGrantControl, MemRelease, MgmtImageActivate,
+        MgmtImageBegin, MgmtImageChunk, MgmtImageEnd, MgmtStatus, NetworkDatagramSendRouteControl,
+        NetworkRejectRouteControl, NetworkStreamWriteRouteControl,
     },
     kernel::network::{DatagramAckMsg, DatagramSendMsg, StreamAckMsg, StreamWriteMsg},
     kernel::policy::{NodeImageUpdatedMsg, SwarmTelemetryMsg},
@@ -93,11 +94,19 @@ macro_rules! gateway_telemetry_program {
 
 macro_rules! network_object_program {
     ($gateway:literal) => {
-        seq_chain!(
-            g::send::<Role<0>, Role<$gateway>, DatagramSendMsg, 22>(),
-            g::send::<Role<$gateway>, Role<0>, DatagramAckMsg, 22>(),
-            g::send::<Role<0>, Role<$gateway>, StreamWriteMsg, 23>(),
-            g::send::<Role<$gateway>, Role<0>, StreamAckMsg, 23>(),
+        g::route(
+            seq_chain!(
+                g::send::<Role<0>, Role<0>, NetworkDatagramSendRouteControl, 22>(),
+                g::send::<Role<0>, Role<$gateway>, DatagramSendMsg, 22>(),
+                g::send::<Role<$gateway>, Role<0>, DatagramAckMsg, 22>(),
+                g::send::<Role<0>, Role<0>, NetworkStreamWriteRouteControl, 23>(),
+                g::send::<Role<0>, Role<$gateway>, StreamWriteMsg, 23>(),
+                g::send::<Role<$gateway>, Role<0>, StreamAckMsg, 23>(),
+            ),
+            seq_chain!(
+                g::send::<Role<0>, Role<0>, NetworkRejectRouteControl, 22>(),
+                g::send::<Role<0>, Role<$gateway>, FdErrorMsg, 22>(),
+            ),
         )
     };
 }

@@ -736,6 +736,41 @@ impl<const N: usize> NetworkObjectTable<N> {
         Ok(entry)
     }
 
+    pub fn resolve_route(
+        &self,
+        required: NetworkRights,
+        route: NetworkRoute,
+    ) -> Result<NetworkObject, NetworkError> {
+        let mut saw_revoked = false;
+        let mut saw_wrong_rights = false;
+
+        for entry in self.slots.iter().flatten().copied() {
+            if entry.session_generation != route.session_generation {
+                continue;
+            }
+            if Self::validate_route(entry, route).is_err() {
+                continue;
+            }
+            if entry.revoked {
+                saw_revoked = true;
+                continue;
+            }
+            if !entry.rights.allows(required) {
+                saw_wrong_rights = true;
+                continue;
+            }
+            return Ok(entry);
+        }
+
+        if saw_revoked {
+            return Err(self.record_rejection(NetworkError::Revoked));
+        }
+        if saw_wrong_rights {
+            return Err(self.record_rejection(NetworkError::PermissionDenied));
+        }
+        Err(self.record_rejection(NetworkError::BadRoute))
+    }
+
     pub fn route_fd_write(
         &self,
         fd: u8,
@@ -818,6 +853,21 @@ impl<const N: usize> NetworkObjectTable<N> {
         route: NetworkRoute,
     ) -> NetworkObjectReadRoute {
         match self.resolve_routed(fd, generation, NetworkRights::Receive, route) {
+            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Datagram => {
+                NetworkObjectReadRoute::Datagram(entry)
+            }
+            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Stream => {
+                NetworkObjectReadRoute::Stream(entry)
+            }
+            Ok(_) => {
+                NetworkObjectReadRoute::Rejected(self.record_rejection(NetworkError::WrongProtocol))
+            }
+            Err(error) => NetworkObjectReadRoute::Rejected(error),
+        }
+    }
+
+    pub fn route_receive_routed(&self, route: NetworkRoute) -> NetworkObjectReadRoute {
+        match self.resolve_route(NetworkRights::Receive, route) {
             Ok(entry) if entry.protocol() == NetworkRoleProtocol::Datagram => {
                 NetworkObjectReadRoute::Datagram(entry)
             }
@@ -1052,8 +1102,20 @@ impl DatagramAck {
         }
     }
 
+    pub const fn fd(&self) -> u8 {
+        self.fd
+    }
+
+    pub const fn generation(&self) -> u16 {
+        self.generation
+    }
+
     pub const fn accepted(&self) -> bool {
         self.accepted
+    }
+
+    pub const fn accepted_for(&self, fd: u8, generation: u16) -> bool {
+        self.accepted && self.fd == fd && self.generation == generation
     }
 }
 
@@ -1385,12 +1447,24 @@ impl StreamAck {
         }
     }
 
+    pub const fn fd(&self) -> u8 {
+        self.fd
+    }
+
+    pub const fn generation(&self) -> u16 {
+        self.generation
+    }
+
     pub const fn sequence(&self) -> u16 {
         self.sequence
     }
 
     pub const fn accepted(&self) -> bool {
         self.accepted
+    }
+
+    pub const fn accepted_for(&self, fd: u8, generation: u16, sequence: u16) -> bool {
+        self.accepted && self.fd == fd && self.generation == generation && self.sequence == sequence
     }
 }
 
@@ -1668,6 +1742,94 @@ mod tests {
         assert_eq!(
             StreamReadRet::new(3, 11, 8, 0b1000_0000, b"bad"),
             Err(NetworkError::BadFlags)
+        );
+    }
+
+    #[test]
+    fn network_acks_are_bound_to_materialized_fd_generation_and_sequence() {
+        let datagram_ack = DatagramAck::new(3, 11, true);
+        assert_eq!(datagram_ack.fd(), 3);
+        assert_eq!(datagram_ack.generation(), 11);
+        assert!(datagram_ack.accepted_for(3, 11));
+        assert!(!datagram_ack.accepted_for(4, 11));
+        assert!(!datagram_ack.accepted_for(3, 12));
+        assert!(!DatagramAck::new(3, 11, false).accepted_for(3, 11));
+
+        let stream_ack = StreamAck::new(5, 13, 8, true);
+        assert_eq!(stream_ack.fd(), 5);
+        assert_eq!(stream_ack.generation(), 13);
+        assert!(stream_ack.accepted_for(5, 13, 8));
+        assert!(!stream_ack.accepted_for(6, 13, 8));
+        assert!(!stream_ack.accepted_for(5, 14, 8));
+        assert!(!stream_ack.accepted_for(5, 13, 9));
+        assert!(!StreamAck::new(5, 13, 8, false).accepted_for(5, 13, 8));
+    }
+
+    #[test]
+    fn inbound_routes_are_authorized_by_route_not_peer_fd_generation() {
+        let mut fds: NetworkObjectTable<3> = NetworkObjectTable::new();
+        let _dummy = fds
+            .apply_cap_grant_datagram(
+                GATEWAY,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                COORDINATOR,
+                21,
+                LABEL_NET_DATAGRAM_RECV,
+                NetworkRights::Receive,
+            )
+            .expect("pre-seed table");
+        let datagram = fds
+            .apply_cap_grant_datagram(
+                GATEWAY,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                COORDINATOR,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                NetworkRights::Receive,
+            )
+            .expect("install datagram receive route");
+        let stream = fds
+            .apply_cap_grant_stream(
+                GATEWAY,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                COORDINATOR,
+                23,
+                LABEL_NET_STREAM_WRITE,
+                NetworkRights::Receive,
+            )
+            .expect("install stream receive route");
+
+        assert_ne!(datagram.fd(), 0);
+        assert_ne!(datagram.generation(), 1);
+        assert_eq!(
+            fds.route_receive_routed(NetworkRoute::new(
+                COORDINATOR,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                SESSION_GENERATION,
+            )),
+            NetworkObjectReadRoute::Datagram(datagram)
+        );
+        assert_eq!(
+            fds.route_receive_routed(NetworkRoute::new(
+                COORDINATOR,
+                23,
+                LABEL_NET_STREAM_WRITE,
+                SESSION_GENERATION,
+            )),
+            NetworkObjectReadRoute::Stream(stream)
+        );
+        assert_eq!(
+            fds.route_receive_routed(NetworkRoute::new(
+                COORDINATOR,
+                22,
+                LABEL_NET_STREAM_WRITE,
+                SESSION_GENERATION,
+            )),
+            NetworkObjectReadRoute::Rejected(NetworkError::BadRoute)
         );
     }
 

@@ -1,5 +1,6 @@
 use core::{
     cell::UnsafeCell,
+    sync::atomic::{AtomicU32, Ordering},
     task::{Context, Poll},
 };
 
@@ -473,6 +474,74 @@ pub struct QemuCyw43439Transport {
 
 pub const QEMU_CYW43439_MAX_ROLES: usize = 6;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QemuCyw43439RxMeta {
+    src_node: NodeId,
+    dst_node: NodeId,
+    lane: u8,
+}
+
+impl QemuCyw43439RxMeta {
+    pub const fn new(src_node: NodeId, dst_node: NodeId, lane: u8) -> Self {
+        Self {
+            src_node,
+            dst_node,
+            lane,
+        }
+    }
+
+    pub const fn src_node(self) -> NodeId {
+        self.src_node
+    }
+
+    pub const fn dst_node(self) -> NodeId {
+        self.dst_node
+    }
+
+    pub const fn lane(self) -> u8 {
+        self.lane
+    }
+}
+
+const QEMU_RX_META_VALID: u32 = 1 << 31;
+const QEMU_RX_META_NODE_MASK: u32 = 0xff;
+const QEMU_RX_META_DST_SHIFT: u32 = 8;
+const QEMU_RX_META_LANE_SHIFT: u32 = 16;
+
+static QEMU_CYW43439_RX_META: [AtomicU32; QEMU_CYW43439_MAX_ROLES] =
+    [const { AtomicU32::new(0) }; QEMU_CYW43439_MAX_ROLES];
+
+pub fn qemu_last_rx_meta(local_role: u8) -> Option<QemuCyw43439RxMeta> {
+    let index = local_role as usize;
+    if index >= QEMU_CYW43439_MAX_ROLES {
+        return None;
+    }
+    let encoded = QEMU_CYW43439_RX_META[index].load(Ordering::Relaxed);
+    if encoded & QEMU_RX_META_VALID == 0 {
+        return None;
+    }
+    Some(QemuCyw43439RxMeta::new(
+        NodeId::new((encoded & QEMU_RX_META_NODE_MASK) as u16),
+        NodeId::new(((encoded >> QEMU_RX_META_DST_SHIFT) & QEMU_RX_META_NODE_MASK) as u16),
+        ((encoded >> QEMU_RX_META_LANE_SHIFT) & QEMU_RX_META_NODE_MASK) as u8,
+    ))
+}
+
+fn set_qemu_last_rx_meta(local_role: u8, meta: QemuCyw43439RxMeta) {
+    let index = local_role as usize;
+    if index >= QEMU_CYW43439_MAX_ROLES
+        || meta.src_node.raw() > QEMU_RX_META_NODE_MASK as u16
+        || meta.dst_node.raw() > QEMU_RX_META_NODE_MASK as u16
+    {
+        return;
+    }
+    let encoded = QEMU_RX_META_VALID
+        | meta.src_node.raw() as u32
+        | ((meta.dst_node.raw() as u32) << QEMU_RX_META_DST_SHIFT)
+        | ((meta.lane as u32) << QEMU_RX_META_LANE_SHIFT);
+    QEMU_CYW43439_RX_META[index].store(encoded, Ordering::Relaxed);
+}
+
 impl QemuCyw43439Transport {
     pub const fn new(
         role0_node: NodeId,
@@ -526,6 +595,17 @@ impl QemuCyw43439Transport {
         self.node_for_role(role).unwrap_or(self.role_nodes[0])
     }
 
+    fn role_for_node(&self, node: NodeId) -> Result<u8, Cyw43439Error> {
+        let mut role = 0usize;
+        while role < self.role_count as usize && role < self.role_nodes.len() {
+            if self.role_nodes[role] == node {
+                return Ok(role as u8);
+            }
+            role += 1;
+        }
+        Err(Cyw43439Error::Swarm(SwarmError::BadNode))
+    }
+
     fn alloc_seq(&self) -> u32 {
         unsafe {
             let current = *self.next_seq.get();
@@ -545,6 +625,7 @@ pub struct CywTx {
 }
 
 pub struct CywRx {
+    local_role: u8,
     session_id: u32,
     local_node: NodeId,
     current: Option<SwarmFrame>,
@@ -604,6 +685,7 @@ impl Transport for QemuCyw43439Transport {
                 local_node,
             },
             CywRx {
+                local_role,
                 session_id,
                 local_node,
                 current: None,
@@ -666,6 +748,16 @@ impl Transport for QemuCyw43439Transport {
             SwarmFrame::decode(&wire[..len])?
         };
 
+        if frame.dst_node() != rx.local_node {
+            self.record_drop(SwarmError::BadNode);
+            return Poll::Ready(Err(Cyw43439Error::Swarm(SwarmError::BadNode)));
+        }
+        if let Err(error) = self.role_for_node(frame.src_node()) {
+            if let Cyw43439Error::Swarm(swarm_error) = error {
+                self.record_drop(swarm_error);
+            }
+            return Poll::Ready(Err(error));
+        }
         if frame.session_id() != rx.session_id
             || frame.session_generation() != self.session_generation
         {
@@ -692,6 +784,10 @@ impl Transport for QemuCyw43439Transport {
             .current
             .as_ref()
             .expect("current frame was just installed");
+        set_qemu_last_rx_meta(
+            rx.local_role,
+            QemuCyw43439RxMeta::new(frame.src_node(), frame.dst_node(), frame.lane()),
+        );
         let bytes: &'a [u8] = unsafe { &*(frame.payload() as *const [u8]) };
         Poll::Ready(Ok(Payload::new(bytes)))
     }
