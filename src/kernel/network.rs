@@ -997,12 +997,19 @@ pub struct DatagramSend {
     fd: u8,
     generation: u16,
     route: u8,
+    operation_id: u32,
     len: u8,
     payload: [u8; NET_DATAGRAM_PAYLOAD_CAPACITY],
 }
 
 impl DatagramSend {
-    pub fn new(fd: u8, generation: u16, route: u8, payload: &[u8]) -> Result<Self, NetworkError> {
+    pub fn new(
+        fd: u8,
+        generation: u16,
+        route: u8,
+        operation_id: u32,
+        payload: &[u8],
+    ) -> Result<Self, NetworkError> {
         if payload.len() > NET_DATAGRAM_PAYLOAD_CAPACITY {
             return Err(NetworkError::PayloadTooLarge);
         }
@@ -1010,6 +1017,7 @@ impl DatagramSend {
             fd,
             generation,
             route,
+            operation_id,
             len: payload.len() as u8,
             payload: [0; NET_DATAGRAM_PAYLOAD_CAPACITY],
         };
@@ -1029,6 +1037,10 @@ impl DatagramSend {
         self.route
     }
 
+    pub const fn operation_id(&self) -> u32 {
+        self.operation_id
+    }
+
     pub const fn len(&self) -> usize {
         self.len as usize
     }
@@ -1044,20 +1056,21 @@ impl DatagramSend {
 
 impl WireEncode for DatagramSend {
     fn encoded_len(&self) -> Option<usize> {
-        Some(5 + self.len())
+        Some(9 + self.len())
     }
 
     fn encode_into(&self, out: &mut [u8]) -> Result<usize, CodecError> {
         let len = self.len();
-        if out.len() < 5 + len {
+        if out.len() < 9 + len {
             return Err(CodecError::Truncated);
         }
         out[0] = self.fd;
         out[1..3].copy_from_slice(&self.generation.to_be_bytes());
         out[3] = self.route;
-        out[4] = self.len;
-        out[5..5 + len].copy_from_slice(self.payload());
-        Ok(5 + len)
+        out[4..8].copy_from_slice(&self.operation_id.to_be_bytes());
+        out[8] = self.len;
+        out[9..9 + len].copy_from_slice(self.payload());
+        Ok(9 + len)
     }
 }
 
@@ -1066,21 +1079,22 @@ impl WirePayload for DatagramSend {
 
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
-        if bytes.len() < 5 {
+        if bytes.len() < 9 {
             return Err(CodecError::Truncated);
         }
-        let len = bytes[4] as usize;
+        let len = bytes[8] as usize;
         if len > NET_DATAGRAM_PAYLOAD_CAPACITY {
             return Err(CodecError::Invalid("datagram send payload too large"));
         }
-        if bytes.len() != 5 + len {
+        if bytes.len() != 9 + len {
             return Err(CodecError::Invalid("datagram send length mismatch"));
         }
         Self::new(
             bytes[0],
             u16::from_be_bytes([bytes[1], bytes[2]]),
             bytes[3],
-            &bytes[5..],
+            u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            &bytes[9..],
         )
         .map_err(|_| CodecError::Invalid("datagram send payload too large"))
     }
@@ -1090,14 +1104,16 @@ impl WirePayload for DatagramSend {
 pub struct DatagramAck {
     fd: u8,
     generation: u16,
+    operation_id: u32,
     accepted: bool,
 }
 
 impl DatagramAck {
-    pub const fn new(fd: u8, generation: u16, accepted: bool) -> Self {
+    pub const fn new(fd: u8, generation: u16, operation_id: u32, accepted: bool) -> Self {
         Self {
             fd,
             generation,
+            operation_id,
             accepted,
         }
     }
@@ -1110,28 +1126,36 @@ impl DatagramAck {
         self.generation
     }
 
+    pub const fn operation_id(&self) -> u32 {
+        self.operation_id
+    }
+
     pub const fn accepted(&self) -> bool {
         self.accepted
     }
 
-    pub const fn accepted_for(&self, fd: u8, generation: u16) -> bool {
-        self.accepted && self.fd == fd && self.generation == generation
+    pub const fn accepted_for(&self, fd: u8, generation: u16, operation_id: u32) -> bool {
+        self.accepted
+            && self.fd == fd
+            && self.generation == generation
+            && self.operation_id == operation_id
     }
 }
 
 impl WireEncode for DatagramAck {
     fn encoded_len(&self) -> Option<usize> {
-        Some(4)
+        Some(8)
     }
 
     fn encode_into(&self, out: &mut [u8]) -> Result<usize, CodecError> {
-        if out.len() < 4 {
+        if out.len() < 8 {
             return Err(CodecError::Truncated);
         }
         out[0] = self.fd;
         out[1..3].copy_from_slice(&self.generation.to_be_bytes());
-        out[3] = u8::from(self.accepted);
-        Ok(4)
+        out[3..7].copy_from_slice(&self.operation_id.to_be_bytes());
+        out[7] = u8::from(self.accepted);
+        Ok(8)
     }
 }
 
@@ -1140,10 +1164,10 @@ impl WirePayload for DatagramAck {
 
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
-        if bytes.len() != 4 {
-            return Err(CodecError::Invalid("datagram ack carries four bytes"));
+        if bytes.len() != 8 {
+            return Err(CodecError::Invalid("datagram ack carries eight bytes"));
         }
-        let accepted = match bytes[3] {
+        let accepted = match bytes[7] {
             0 => false,
             1 => true,
             _ => return Err(CodecError::Invalid("datagram ack boolean")),
@@ -1151,6 +1175,7 @@ impl WirePayload for DatagramAck {
         Ok(Self::new(
             bytes[0],
             u16::from_be_bytes([bytes[1], bytes[2]]),
+            u32::from_be_bytes([bytes[3], bytes[4], bytes[5], bytes[6]]),
             accepted,
         ))
     }
@@ -1307,6 +1332,7 @@ pub struct StreamWrite {
     fd: u8,
     generation: u16,
     route: u8,
+    operation_id: u32,
     sequence: u16,
     flags: u8,
     len: u8,
@@ -1318,6 +1344,7 @@ impl StreamWrite {
         fd: u8,
         generation: u16,
         route: u8,
+        operation_id: u32,
         sequence: u16,
         flags: u8,
         payload: &[u8],
@@ -1332,6 +1359,7 @@ impl StreamWrite {
             fd,
             generation,
             route,
+            operation_id,
             sequence,
             flags,
             len: payload.len() as u8,
@@ -1351,6 +1379,10 @@ impl StreamWrite {
 
     pub const fn route(&self) -> u8 {
         self.route
+    }
+
+    pub const fn operation_id(&self) -> u32 {
+        self.operation_id
     }
 
     pub const fn sequence(&self) -> u16 {
@@ -1380,22 +1412,23 @@ impl StreamWrite {
 
 impl WireEncode for StreamWrite {
     fn encoded_len(&self) -> Option<usize> {
-        Some(8 + self.len())
+        Some(12 + self.len())
     }
 
     fn encode_into(&self, out: &mut [u8]) -> Result<usize, CodecError> {
         let len = self.len();
-        if out.len() < 8 + len {
+        if out.len() < 12 + len {
             return Err(CodecError::Truncated);
         }
         out[0] = self.fd;
         out[1..3].copy_from_slice(&self.generation.to_be_bytes());
         out[3] = self.route;
-        out[4..6].copy_from_slice(&self.sequence.to_be_bytes());
-        out[6] = self.flags;
-        out[7] = self.len;
-        out[8..8 + len].copy_from_slice(self.payload());
-        Ok(8 + len)
+        out[4..8].copy_from_slice(&self.operation_id.to_be_bytes());
+        out[8..10].copy_from_slice(&self.sequence.to_be_bytes());
+        out[10] = self.flags;
+        out[11] = self.len;
+        out[12..12 + len].copy_from_slice(self.payload());
+        Ok(12 + len)
     }
 }
 
@@ -1404,23 +1437,24 @@ impl WirePayload for StreamWrite {
 
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
-        if bytes.len() < 8 {
+        if bytes.len() < 12 {
             return Err(CodecError::Truncated);
         }
-        let len = bytes[7] as usize;
+        let len = bytes[11] as usize;
         if len > NET_STREAM_PAYLOAD_CAPACITY {
             return Err(CodecError::Invalid("stream write payload too large"));
         }
-        if bytes.len() != 8 + len {
+        if bytes.len() != 12 + len {
             return Err(CodecError::Invalid("stream write length mismatch"));
         }
         Self::new(
             bytes[0],
             u16::from_be_bytes([bytes[1], bytes[2]]),
             bytes[3],
-            u16::from_be_bytes([bytes[4], bytes[5]]),
-            bytes[6],
-            &bytes[8..],
+            u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            u16::from_be_bytes([bytes[8], bytes[9]]),
+            bytes[10],
+            &bytes[12..],
         )
         .map_err(|error| match error {
             NetworkError::BadFlags => CodecError::Invalid("stream write flags"),
@@ -1433,15 +1467,23 @@ impl WirePayload for StreamWrite {
 pub struct StreamAck {
     fd: u8,
     generation: u16,
+    operation_id: u32,
     sequence: u16,
     accepted: bool,
 }
 
 impl StreamAck {
-    pub const fn new(fd: u8, generation: u16, sequence: u16, accepted: bool) -> Self {
+    pub const fn new(
+        fd: u8,
+        generation: u16,
+        operation_id: u32,
+        sequence: u16,
+        accepted: bool,
+    ) -> Self {
         Self {
             fd,
             generation,
+            operation_id,
             sequence,
             accepted,
         }
@@ -1455,6 +1497,10 @@ impl StreamAck {
         self.generation
     }
 
+    pub const fn operation_id(&self) -> u32 {
+        self.operation_id
+    }
+
     pub const fn sequence(&self) -> u16 {
         self.sequence
     }
@@ -1463,25 +1509,36 @@ impl StreamAck {
         self.accepted
     }
 
-    pub const fn accepted_for(&self, fd: u8, generation: u16, sequence: u16) -> bool {
-        self.accepted && self.fd == fd && self.generation == generation && self.sequence == sequence
+    pub const fn accepted_for(
+        &self,
+        fd: u8,
+        generation: u16,
+        operation_id: u32,
+        sequence: u16,
+    ) -> bool {
+        self.accepted
+            && self.fd == fd
+            && self.generation == generation
+            && self.operation_id == operation_id
+            && self.sequence == sequence
     }
 }
 
 impl WireEncode for StreamAck {
     fn encoded_len(&self) -> Option<usize> {
-        Some(6)
+        Some(10)
     }
 
     fn encode_into(&self, out: &mut [u8]) -> Result<usize, CodecError> {
-        if out.len() < 6 {
+        if out.len() < 10 {
             return Err(CodecError::Truncated);
         }
         out[0] = self.fd;
         out[1..3].copy_from_slice(&self.generation.to_be_bytes());
-        out[3..5].copy_from_slice(&self.sequence.to_be_bytes());
-        out[5] = u8::from(self.accepted);
-        Ok(6)
+        out[3..7].copy_from_slice(&self.operation_id.to_be_bytes());
+        out[7..9].copy_from_slice(&self.sequence.to_be_bytes());
+        out[9] = u8::from(self.accepted);
+        Ok(10)
     }
 }
 
@@ -1490,10 +1547,10 @@ impl WirePayload for StreamAck {
 
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
-        if bytes.len() != 6 {
-            return Err(CodecError::Invalid("stream ack carries six bytes"));
+        if bytes.len() != 10 {
+            return Err(CodecError::Invalid("stream ack carries ten bytes"));
         }
-        let accepted = match bytes[5] {
+        let accepted = match bytes[9] {
             0 => false,
             1 => true,
             _ => return Err(CodecError::Invalid("stream ack boolean")),
@@ -1501,7 +1558,8 @@ impl WirePayload for StreamAck {
         Ok(Self::new(
             bytes[0],
             u16::from_be_bytes([bytes[1], bytes[2]]),
-            u16::from_be_bytes([bytes[3], bytes[4]]),
+            u32::from_be_bytes([bytes[3], bytes[4], bytes[5], bytes[6]]),
+            u16::from_be_bytes([bytes[7], bytes[8]]),
             accepted,
         ))
     }
@@ -1703,8 +1761,8 @@ mod tests {
 
     #[test]
     fn stream_payloads_round_trip_and_reject_unknown_flags() {
-        let write =
-            StreamWrite::new(3, 11, 114, 7, NET_STREAM_FLAG_FIN, b"stream").expect("stream write");
+        let write = StreamWrite::new(3, 11, 114, 0x1112_1314, 7, NET_STREAM_FLAG_FIN, b"stream")
+            .expect("stream write");
         let mut wire = [0u8; 64];
         let len = write.encode_into(&mut wire).expect("encode stream write");
         assert_eq!(
@@ -1712,7 +1770,7 @@ mod tests {
             write
         );
 
-        let ack = StreamAck::new(3, 11, 7, true);
+        let ack = StreamAck::new(3, 11, write.operation_id(), 7, true);
         let len = ack.encode_into(&mut wire).expect("encode stream ack");
         assert_eq!(
             StreamAck::decode_payload(Payload::new(&wire[..len])).expect("decode stream ack"),
@@ -1736,7 +1794,7 @@ mod tests {
         );
 
         assert_eq!(
-            StreamWrite::new(3, 11, 114, 7, 0b1000_0000, b"bad"),
+            StreamWrite::new(3, 11, 114, 0x1112_1314, 7, 0b1000_0000, b"bad"),
             Err(NetworkError::BadFlags)
         );
         assert_eq!(
@@ -1747,22 +1805,51 @@ mod tests {
 
     #[test]
     fn network_acks_are_bound_to_materialized_fd_generation_and_sequence() {
-        let datagram_ack = DatagramAck::new(3, 11, true);
+        let datagram =
+            DatagramSend::new(3, 11, 114, 0x0102_0304, b"datagram").expect("datagram send");
+        assert_eq!(datagram.operation_id(), 0x0102_0304);
+        let datagram_ack = DatagramAck::new(3, 11, datagram.operation_id(), true);
         assert_eq!(datagram_ack.fd(), 3);
         assert_eq!(datagram_ack.generation(), 11);
-        assert!(datagram_ack.accepted_for(3, 11));
-        assert!(!datagram_ack.accepted_for(4, 11));
-        assert!(!datagram_ack.accepted_for(3, 12));
-        assert!(!DatagramAck::new(3, 11, false).accepted_for(3, 11));
+        assert_eq!(datagram_ack.operation_id(), datagram.operation_id());
+        assert!(datagram_ack.accepted_for(3, 11, datagram.operation_id()));
+        assert!(!datagram_ack.accepted_for(4, 11, datagram.operation_id()));
+        assert!(!datagram_ack.accepted_for(3, 12, datagram.operation_id()));
+        assert!(
+            !DatagramAck::new(3, 11, datagram.operation_id() ^ 1, true).accepted_for(
+                3,
+                11,
+                datagram.operation_id()
+            )
+        );
+        assert!(
+            !DatagramAck::new(3, 11, datagram.operation_id(), false).accepted_for(
+                3,
+                11,
+                datagram.operation_id()
+            )
+        );
 
-        let stream_ack = StreamAck::new(5, 13, 8, true);
+        let stream = StreamWrite::new(5, 13, 115, 0x0506_0708, 8, NET_STREAM_FLAG_FIN, b"stream")
+            .expect("stream write");
+        assert_eq!(stream.operation_id(), 0x0506_0708);
+        let stream_ack = StreamAck::new(5, 13, stream.operation_id(), stream.sequence(), true);
         assert_eq!(stream_ack.fd(), 5);
         assert_eq!(stream_ack.generation(), 13);
-        assert!(stream_ack.accepted_for(5, 13, 8));
-        assert!(!stream_ack.accepted_for(6, 13, 8));
-        assert!(!stream_ack.accepted_for(5, 14, 8));
-        assert!(!stream_ack.accepted_for(5, 13, 9));
-        assert!(!StreamAck::new(5, 13, 8, false).accepted_for(5, 13, 8));
+        assert_eq!(stream_ack.operation_id(), stream.operation_id());
+        assert!(stream_ack.accepted_for(5, 13, stream.operation_id(), stream.sequence()));
+        assert!(!stream_ack.accepted_for(6, 13, stream.operation_id(), stream.sequence()));
+        assert!(!stream_ack.accepted_for(5, 14, stream.operation_id(), stream.sequence()));
+        assert!(!stream_ack.accepted_for(5, 13, stream.operation_id() ^ 1, stream.sequence()));
+        assert!(!stream_ack.accepted_for(5, 13, stream.operation_id(), stream.sequence() ^ 1));
+        assert!(
+            !StreamAck::new(5, 13, stream.operation_id(), stream.sequence(), false).accepted_for(
+                5,
+                13,
+                stream.operation_id(),
+                stream.sequence()
+            )
+        );
     }
 
     #[test]

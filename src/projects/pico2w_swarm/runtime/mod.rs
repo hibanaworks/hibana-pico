@@ -205,6 +205,10 @@ const QEMU_MGMT_IMAGE_GENERATION: u32 = 7;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const QEMU_MGMT_FENCE_EPOCH: u32 = 2;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
+const QEMU_NET_DATAGRAM_OPERATION_ID: u32 = 0x5144_474d;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const QEMU_NET_STREAM_OPERATION_ID: u32 = 0x5153_5452;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
 const QEMU_MGMT_IMAGE: &[u8] = b"\0asm\x01\0\0\0wasi_snapshot_preview1";
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -938,6 +942,7 @@ async fn core0_network_object(
         datagram_fd.fd(),
         datagram_fd.generation(),
         datagram_fd.route(),
+        QEMU_NET_DATAGRAM_OPERATION_ID,
         datagram_payload,
     )
     .unwrap_or_else(|_| fail_closed("[core0] make datagram fd send"));
@@ -961,7 +966,11 @@ async fn core0_network_object(
         22,
         "[core0] datagram ack source",
     );
-    if !datagram_ack.accepted_for(datagram_fd.fd(), datagram_fd.generation()) {
+    if !datagram_ack.accepted_for(
+        datagram_fd.fd(),
+        datagram_fd.generation(),
+        datagram.operation_id(),
+    ) {
         fail_closed("[core0] datagram ack mismatch");
     }
     uart_hex_line(
@@ -994,6 +1003,7 @@ async fn core0_network_object(
         stream_fd.fd(),
         stream_fd.generation(),
         stream_fd.route(),
+        QEMU_NET_STREAM_OPERATION_ID,
         sequence,
         NET_STREAM_FLAG_FIN,
         b"qemu stream fd",
@@ -1019,7 +1029,12 @@ async fn core0_network_object(
         23,
         "[core0] stream ack source",
     );
-    if !stream_ack.accepted_for(stream_fd.fd(), stream_fd.generation(), sequence) {
+    if !stream_ack.accepted_for(
+        stream_fd.fd(),
+        stream_fd.generation(),
+        stream.operation_id(),
+        sequence,
+    ) {
         fail_closed("[core0] stream ack mismatch");
     }
     uart_hex_line(
@@ -1489,7 +1504,12 @@ async fn core1_network_object<const ROLE: u8>(
     {
         fail_closed("[core1] datagram fd mismatch");
     }
-    let ack = DatagramAck::new(datagram.fd(), datagram.generation(), true);
+    let ack = DatagramAck::new(
+        datagram.fd(),
+        datagram.generation(),
+        datagram.operation_id(),
+        true,
+    );
     match endpoint
         .flow::<DatagramAckMsg>()
         .expect("core1 flow<datagram ack>")
@@ -1531,7 +1551,13 @@ async fn core1_network_object<const ROLE: u8>(
     {
         fail_closed("[core1] stream fd mismatch");
     }
-    let ack = StreamAck::new(stream.fd(), stream.generation(), stream.sequence(), true);
+    let ack = StreamAck::new(
+        stream.fd(),
+        stream.generation(),
+        stream.operation_id(),
+        stream.sequence(),
+        true,
+    );
     match endpoint
         .flow::<StreamAckMsg>()
         .expect("core1 flow<stream ack>")

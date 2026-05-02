@@ -3515,10 +3515,12 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         .send(()))
     .await
     .expect("coordinator selects qemu datagram route");
+    let datagram_operation = 0x4454_474d;
     let datagram = DatagramSend::new(
         resolved_datagram.fd(),
         resolved_datagram.generation(),
         resolved_datagram.route(),
+        datagram_operation,
         b"qemu datagram fd",
     )
     .expect("qemu datagram send");
@@ -3563,31 +3565,68 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         )),
         NetworkObjectReadRoute::Rejected(NetworkError::BadRoute)
     );
-    let datagram_ack = DatagramAck::new(datagram.fd(), datagram.generation(), true);
-    assert!(datagram_ack.accepted_for(resolved_datagram.fd(), resolved_datagram.generation()));
+    let datagram_ack = DatagramAck::new(
+        datagram.fd(),
+        datagram.generation(),
+        datagram.operation_id(),
+        true,
+    );
+    assert!(datagram_ack.accepted_for(
+        resolved_datagram.fd(),
+        resolved_datagram.generation(),
+        datagram.operation_id()
+    ));
     assert!(
         !DatagramAck::new(
             resolved_datagram.fd() ^ 1,
             resolved_datagram.generation(),
+            datagram.operation_id(),
             true
         )
-        .accepted_for(resolved_datagram.fd(), resolved_datagram.generation())
+        .accepted_for(
+            resolved_datagram.fd(),
+            resolved_datagram.generation(),
+            datagram.operation_id()
+        )
     );
     assert!(
         !DatagramAck::new(
             resolved_datagram.fd(),
             resolved_datagram.generation().wrapping_add(1),
+            datagram.operation_id(),
             true,
         )
-        .accepted_for(resolved_datagram.fd(), resolved_datagram.generation())
+        .accepted_for(
+            resolved_datagram.fd(),
+            resolved_datagram.generation(),
+            datagram.operation_id()
+        )
     );
     assert!(
         !DatagramAck::new(
             resolved_datagram.fd(),
             resolved_datagram.generation(),
+            datagram.operation_id() ^ 1,
+            true,
+        )
+        .accepted_for(
+            resolved_datagram.fd(),
+            resolved_datagram.generation(),
+            datagram.operation_id()
+        )
+    );
+    assert!(
+        !DatagramAck::new(
+            resolved_datagram.fd(),
+            resolved_datagram.generation(),
+            datagram.operation_id(),
             false
         )
-        .accepted_for(resolved_datagram.fd(), resolved_datagram.generation())
+        .accepted_for(
+            resolved_datagram.fd(),
+            resolved_datagram.generation(),
+            datagram.operation_id()
+        )
     );
     (gateway
         .flow::<DatagramAckMsg>()
@@ -3621,10 +3660,12 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         .send(()))
     .await
     .expect("coordinator selects qemu stream route");
+    let stream_operation = 0x5354_524d;
     let stream = StreamWrite::new(
         resolved_stream.fd(),
         resolved_stream.generation(),
         resolved_stream.route(),
+        stream_operation,
         0,
         NET_STREAM_FLAG_FIN,
         b"qemu stream fd",
@@ -3665,22 +3706,31 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         )),
         NetworkObjectReadRoute::Rejected(NetworkError::BadRoute)
     );
-    let stream_ack = StreamAck::new(stream.fd(), stream.generation(), stream.sequence(), true);
+    let stream_ack = StreamAck::new(
+        stream.fd(),
+        stream.generation(),
+        stream.operation_id(),
+        stream.sequence(),
+        true,
+    );
     assert!(stream_ack.accepted_for(
         resolved_stream.fd(),
         resolved_stream.generation(),
+        stream.operation_id(),
         stream.sequence()
     ));
     assert!(
         !StreamAck::new(
             resolved_stream.fd() ^ 1,
             resolved_stream.generation(),
+            stream.operation_id(),
             stream.sequence(),
             true,
         )
         .accepted_for(
             resolved_stream.fd(),
             resolved_stream.generation(),
+            stream.operation_id(),
             stream.sequence()
         )
     );
@@ -3688,12 +3738,14 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         !StreamAck::new(
             resolved_stream.fd(),
             resolved_stream.generation().wrapping_add(1),
+            stream.operation_id(),
             stream.sequence(),
             true,
         )
         .accepted_for(
             resolved_stream.fd(),
             resolved_stream.generation(),
+            stream.operation_id(),
             stream.sequence()
         )
     );
@@ -3701,12 +3753,29 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         !StreamAck::new(
             resolved_stream.fd(),
             resolved_stream.generation(),
+            stream.operation_id() ^ 1,
+            stream.sequence(),
+            true,
+        )
+        .accepted_for(
+            resolved_stream.fd(),
+            resolved_stream.generation(),
+            stream.operation_id(),
+            stream.sequence()
+        )
+    );
+    assert!(
+        !StreamAck::new(
+            resolved_stream.fd(),
+            resolved_stream.generation(),
+            stream.operation_id(),
             stream.sequence().wrapping_add(1),
             true,
         )
         .accepted_for(
             resolved_stream.fd(),
             resolved_stream.generation(),
+            stream.operation_id(),
             stream.sequence()
         )
     );
@@ -3714,12 +3783,14 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         !StreamAck::new(
             resolved_stream.fd(),
             resolved_stream.generation(),
+            stream.operation_id(),
             stream.sequence(),
             false,
         )
         .accepted_for(
             resolved_stream.fd(),
             resolved_stream.generation(),
+            stream.operation_id(),
             stream.sequence()
         )
     );
@@ -4854,6 +4925,7 @@ fn datagram_fd_protocol_is_bounded_and_wired_through_hibana_messages() {
                 fd.fd(),
                 fd.generation(),
                 fd.route(),
+                0x5150_4c44,
                 &[0u8; NET_DATAGRAM_PAYLOAD_CAPACITY + 1],
             ),
             Err(NetworkError::PayloadTooLarge)
@@ -4888,8 +4960,9 @@ fn datagram_fd_protocol_is_bounded_and_wired_through_hibana_messages() {
             .enter(rv1, SessionId::new(202), &network_program, NoBinding)
             .expect("attach network");
 
-        let outbound = DatagramSend::new(fd.fd(), fd.generation(), fd.route(), b"hello")
-            .expect("datagram send");
+        let outbound =
+            DatagramSend::new(fd.fd(), fd.generation(), fd.route(), 0x4447_524d, b"hello")
+                .expect("datagram send");
         let resolved = fds
             .resolve(
                 outbound.fd(),
@@ -4910,7 +4983,7 @@ fn datagram_fd_protocol_is_bounded_and_wired_through_hibana_messages() {
                 .expect("network recv datagram"),
             outbound
         );
-        let ack = DatagramAck::new(fd.fd(), fd.generation(), true);
+        let ack = DatagramAck::new(fd.fd(), fd.generation(), outbound.operation_id(), true);
         (network
             .flow::<DatagramAckMsg>()
             .expect("network flow<ack>")
@@ -5193,6 +5266,7 @@ fn wasi_fd_selects_network_datagram_route_without_p2_or_bridge() {
             resolved_write.fd(),
             resolved_write.generation(),
             resolved_write.route(),
+            0x5744_474d,
             received_write.as_bytes(),
         )
         .expect("datagram send request");
@@ -5209,7 +5283,12 @@ fn wasi_fd_selects_network_datagram_route_without_p2_or_bridge() {
                 .expect("network decodes datagram send"),
             datagram_send
         );
-        let ack = DatagramAck::new(resolved_write.fd(), resolved_write.generation(), true);
+        let ack = DatagramAck::new(
+            resolved_write.fd(),
+            resolved_write.generation(),
+            datagram_send.operation_id(),
+            true,
+        );
         (network
             .flow::<DatagramAckMsg>()
             .expect("network flow<datagram ack>")
@@ -5573,6 +5652,7 @@ fn wasi_fd_selects_network_stream_route_without_p2_or_bridge() {
             resolved_write.fd(),
             resolved_write.generation(),
             resolved_write.route(),
+            0x5753_5452,
             0,
             NET_STREAM_FLAG_FIN,
             received_write.as_bytes(),
@@ -5595,7 +5675,13 @@ fn wasi_fd_selects_network_stream_route_without_p2_or_bridge() {
                 .expect("network decodes stream write"),
             stream_write
         );
-        let ack = StreamAck::new(resolved_write.fd(), resolved_write.generation(), 0, true);
+        let ack = StreamAck::new(
+            resolved_write.fd(),
+            resolved_write.generation(),
+            stream_write.operation_id(),
+            0,
+            true,
+        );
         (network
             .flow::<StreamAckMsg>()
             .expect("network flow<stream ack>")

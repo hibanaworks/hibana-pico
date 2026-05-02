@@ -95,6 +95,7 @@ fi
 RUN_TIMEOUT="${HIBANA_PICO_QEMU_TIMEOUT:-10s}"
 PORT_BASE="${HIBANA_PICO_PORT_BASE:-39000}"
 SENSOR_BOOT_WAIT="${HIBANA_PICO_SENSOR_BOOT_WAIT:-0.5}"
+MESH_SPOOF_PROBE="${HIBANA_PICO_QEMU_MESH_SPOOF_PROBE:-1}"
 LOG_DIR="${HIBANA_PICO_LOG_DIR:-$(mktemp -d /tmp/hibana-pico2w-swarm.XXXXXX)}"
 mkdir -p "$LOG_DIR"
 
@@ -106,8 +107,15 @@ run_node() {
   local node_id="$2"
   local log="$3"
   local kernel="$4"
+  local qemu_log_args=()
+
+  if [[ "$MESH_SPOOF_PROBE" == 1 ]]; then
+    qemu_log_args=(-d guest_errors -D "$log.qemu")
+    : > "$log.qemu"
+  fi
 
   "$TIMEOUT_BIN" "$RUN_TIMEOUT" "$QEMU_BIN" \
+    "${qemu_log_args[@]}" \
     -display none \
     -serial stdio \
     -monitor none \
@@ -118,6 +126,41 @@ run_node() {
     -global "cyw43439-wifi.node-count=$NODE_COUNT" \
     -kernel "$kernel" \
     > "$log" 2>&1
+}
+
+inject_mesh_spoof_probe() {
+  if [[ "$MESH_SPOOF_PROBE" != 1 || "$NODE_COUNT" -lt 4 ]]; then
+    return
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 is required for QEMU mesh spoof probe" >&2
+    exit 1
+  fi
+
+  if ! python3 - "$PORT_BASE" <<'PY'
+import socket
+import sys
+import time
+
+port_base = int(sys.argv[1])
+dst_node = 4
+packet = bytes([
+    dst_node, 6,
+    0, 0,
+    0, 1,
+    0, dst_node,
+])
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("127.0.0.2", port_base + 1))
+for _ in range(8):
+    sock.sendto(packet, ("127.0.0.1", port_base + dst_node))
+    time.sleep(0.05)
+PY
+  then
+    echo "failed to inject QEMU mesh spoof probe" >&2
+    exit 1
+  fi
 }
 
 sensor_kernel_for() {
@@ -147,6 +190,7 @@ for node_id in $(seq 2 "$NODE_COUNT"); do
   sensor_pids+=("$!")
 done
 sleep "$SENSOR_BOOT_WAIT"
+inject_mesh_spoof_probe
 run_node 0 1 "$COORD_LOG" "$COORD_KERNEL" &
 coord_pid=$!
 wait "$coord_pid"
@@ -259,6 +303,12 @@ if [[ "$NODE_COUNT" == 6 ]]; then
   if ! grep -q "network stream fd accepted" "$LOG_DIR/sensor-4.log"; then
     echo "missing sensor-4 network stream fd line" >&2
     exit 1
+  fi
+  if [[ "$MESH_SPOOF_PROBE" == 1 ]]; then
+    if ! grep -q "mesh source address is not loopback peer" "$LOG_DIR/sensor-4.log.qemu"; then
+      echo "missing sensor-4 QEMU mesh spoof rejection line" >&2
+      exit 1
+    fi
   fi
   if ! grep -q "remote management image activated" "$LOG_DIR/sensor-5.log"; then
     echo "missing sensor-5 remote management activation line" >&2
