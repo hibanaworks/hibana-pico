@@ -4477,9 +4477,37 @@ fn qemu_mesh_udp_source_ports_are_exclusive_node_bindings() {
         "mesh port allocation must reject radio-port-base overflow"
     );
     assert!(
+        source.contains("source_addr.sin_addr.s_addr != htonl(INADDR_LOOPBACK)"),
+        "mesh receive must reject non-127.0.0.1 loopback aliases before trusting source ports"
+    );
+    assert!(
         source.contains("source_node = source_port - s->radio_port_base;")
             && source.contains("frame_src_node != source_node || frame_dst_node != s->node_id"),
         "mesh receive must bind UDP source port, frame src, and frame dst before queueing"
+    );
+}
+
+#[test]
+#[cfg(feature = "profile-host-qemu-swarm")]
+fn qemu_swarm_runtime_checks_transport_rx_metadata_for_network_objects() {
+    let source = std::fs::read_to_string("src/projects/pico2w_swarm/runtime/mod.rs")
+        .expect("read Pico 2 W swarm runtime");
+
+    assert!(
+        source.contains("if !meta.matches(source_node, local_node, lane)"),
+        "QEMU RX metadata checks must bind source node, destination node, and lane"
+    );
+    assert!(
+        source.contains(
+            "expect_qemu_rx_meta(\n        ROLE,\n        local_node,\n        datagram_route.target_node(),\n        datagram_route.lane(),"
+        ),
+        "datagram NetworkObject receive must verify the transport source and lane"
+    );
+    assert!(
+        source.contains(
+            "expect_qemu_rx_meta(\n        ROLE,\n        local_node,\n        stream_route.target_node(),\n        stream_route.lane(),"
+        ),
+        "stream NetworkObject receive must verify the transport source and lane"
     );
 }
 

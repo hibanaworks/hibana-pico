@@ -431,6 +431,11 @@ static void cyw43439_radio_poll(CYW43439WifiState *s)
                               "cyw43439: malformed mesh source address\n");
                 continue;
             }
+            if (source_addr.sin_addr.s_addr != htonl(INADDR_LOOPBACK)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "cyw43439: mesh source address is not loopback peer\n");
+                continue;
+            }
             source_port = ntohs(source_addr.sin_port);
             if (source_port <= s->radio_port_base) {
                 qemu_log_mask(LOG_GUEST_ERROR,
