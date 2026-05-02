@@ -571,7 +571,7 @@ fn expect_qemu_rx_meta(
     lane: u8,
     stage: &str,
 ) {
-    let Some(meta) = cyw43439::qemu_last_rx_meta(local_role) else {
+    let Some(meta) = cyw43439::qemu_take_last_rx_meta(local_role) else {
         fail_closed(stage);
     };
     if !meta.matches(source_node, local_node, lane) {

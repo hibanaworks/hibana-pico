@@ -728,6 +728,17 @@ impl<const N: usize> NetworkObjectTable<N> {
         rights: NetworkRights,
         protocol: NetworkRoleProtocol,
     ) -> Result<NetworkObject, NetworkError> {
+        if self.slots.iter().flatten().any(|entry| {
+            !entry.revoked
+                && entry.target_node == target_node
+                && entry.lane == lane
+                && entry.route == route
+                && entry.session_generation == session_generation
+                && entry.policy_slot == policy_slot
+                && entry.protocol == protocol
+        }) {
+            return Err(self.record_rejection(NetworkError::BadRoute));
+        }
         let fd = match self.slots.iter().position(Option::is_none) {
             Some(fd) => fd as u8,
             None => return Err(self.record_rejection(NetworkError::TableFull)),
@@ -2183,6 +2194,50 @@ mod tests {
         assert_eq!(
             fds.route_receive_routed(receive.route_key()),
             NetworkObjectReadRoute::Rejected(NetworkError::Revoked)
+        );
+    }
+
+    #[test]
+    fn network_object_table_rejects_duplicate_active_route_grants() {
+        let mut fds: NetworkObjectTable<2> = NetworkObjectTable::new();
+        let first = fds
+            .apply_cap_grant_datagram(
+                GATEWAY,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                COORDINATOR,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                NetworkRights::Receive,
+            )
+            .expect("install first receive route");
+
+        assert_eq!(
+            fds.apply_cap_grant_datagram(
+                GATEWAY,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                COORDINATOR,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                NetworkRights::SendReceive,
+            ),
+            Err(NetworkError::BadRoute)
+        );
+
+        fds.revoke_fd(first.fd())
+            .expect("revoke first receive route");
+        assert!(
+            fds.apply_cap_grant_datagram(
+                GATEWAY,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                COORDINATOR,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                NetworkRights::Receive,
+            )
+            .is_ok()
         );
     }
 

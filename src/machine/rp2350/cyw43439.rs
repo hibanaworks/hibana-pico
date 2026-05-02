@@ -517,12 +517,12 @@ const QEMU_RX_META_LANE_SHIFT: u32 = 16;
 static QEMU_CYW43439_RX_META: [AtomicU32; QEMU_CYW43439_MAX_ROLES] =
     [const { AtomicU32::new(0) }; QEMU_CYW43439_MAX_ROLES];
 
-pub fn qemu_last_rx_meta(local_role: u8) -> Option<QemuCyw43439RxMeta> {
+pub fn qemu_take_last_rx_meta(local_role: u8) -> Option<QemuCyw43439RxMeta> {
     let index = local_role as usize;
     if index >= QEMU_CYW43439_MAX_ROLES {
         return None;
     }
-    let encoded = QEMU_CYW43439_RX_META[index].load(Ordering::Relaxed);
+    let encoded = QEMU_CYW43439_RX_META[index].swap(0, Ordering::Relaxed);
     if encoded & QEMU_RX_META_VALID == 0 {
         return None;
     }
@@ -872,6 +872,18 @@ mod tests {
         assert!(!meta.matches(NodeId::new(2), gateway, 22));
         assert!(!meta.matches(coordinator, NodeId::new(5), 22));
         assert!(!meta.matches(coordinator, gateway, 23));
+    }
+
+    #[test]
+    fn qemu_rx_meta_is_consumed_once() {
+        let coordinator = NodeId::new(1);
+        let gateway = NodeId::new(4);
+        let meta = QemuCyw43439RxMeta::new(coordinator, gateway, 22);
+
+        set_qemu_last_rx_meta(0, meta);
+
+        assert_eq!(qemu_take_last_rx_meta(0), Some(meta));
+        assert_eq!(qemu_take_last_rx_meta(0), None);
     }
 
     #[test]
