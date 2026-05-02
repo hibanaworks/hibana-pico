@@ -1,5 +1,6 @@
 use core::{
     cell::UnsafeCell,
+    sync::atomic::{AtomicU32, Ordering},
     task::{Context, Poll},
 };
 
@@ -473,6 +474,80 @@ pub struct QemuCyw43439Transport {
 
 pub const QEMU_CYW43439_MAX_ROLES: usize = 6;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QemuCyw43439RxMeta {
+    src_node: NodeId,
+    dst_node: NodeId,
+    lane: u8,
+}
+
+impl QemuCyw43439RxMeta {
+    pub const fn new(src_node: NodeId, dst_node: NodeId, lane: u8) -> Self {
+        Self {
+            src_node,
+            dst_node,
+            lane,
+        }
+    }
+
+    pub const fn src_node(self) -> NodeId {
+        self.src_node
+    }
+
+    pub const fn dst_node(self) -> NodeId {
+        self.dst_node
+    }
+
+    pub const fn lane(self) -> u8 {
+        self.lane
+    }
+
+    pub const fn matches(self, src_node: NodeId, dst_node: NodeId, lane: u8) -> bool {
+        self.src_node.raw() == src_node.raw()
+            && self.dst_node.raw() == dst_node.raw()
+            && self.lane == lane
+    }
+}
+
+const QEMU_RX_META_VALID: u32 = 1 << 31;
+const QEMU_RX_META_NODE_MASK: u32 = 0xff;
+const QEMU_RX_META_DST_SHIFT: u32 = 8;
+const QEMU_RX_META_LANE_SHIFT: u32 = 16;
+
+static QEMU_CYW43439_RX_META: [AtomicU32; QEMU_CYW43439_MAX_ROLES] =
+    [const { AtomicU32::new(0) }; QEMU_CYW43439_MAX_ROLES];
+
+pub fn qemu_take_last_rx_meta(local_role: u8) -> Option<QemuCyw43439RxMeta> {
+    let index = local_role as usize;
+    if index >= QEMU_CYW43439_MAX_ROLES {
+        return None;
+    }
+    let encoded = QEMU_CYW43439_RX_META[index].swap(0, Ordering::Relaxed);
+    if encoded & QEMU_RX_META_VALID == 0 {
+        return None;
+    }
+    Some(QemuCyw43439RxMeta::new(
+        NodeId::new((encoded & QEMU_RX_META_NODE_MASK) as u16),
+        NodeId::new(((encoded >> QEMU_RX_META_DST_SHIFT) & QEMU_RX_META_NODE_MASK) as u16),
+        ((encoded >> QEMU_RX_META_LANE_SHIFT) & QEMU_RX_META_NODE_MASK) as u8,
+    ))
+}
+
+fn set_qemu_last_rx_meta(local_role: u8, meta: QemuCyw43439RxMeta) {
+    let index = local_role as usize;
+    if index >= QEMU_CYW43439_MAX_ROLES
+        || meta.src_node.raw() > QEMU_RX_META_NODE_MASK as u16
+        || meta.dst_node.raw() > QEMU_RX_META_NODE_MASK as u16
+    {
+        return;
+    }
+    let encoded = QEMU_RX_META_VALID
+        | meta.src_node.raw() as u32
+        | ((meta.dst_node.raw() as u32) << QEMU_RX_META_DST_SHIFT)
+        | ((meta.lane as u32) << QEMU_RX_META_LANE_SHIFT);
+    QEMU_CYW43439_RX_META[index].store(encoded, Ordering::Relaxed);
+}
+
 impl QemuCyw43439Transport {
     pub const fn new(
         role0_node: NodeId,
@@ -526,6 +601,17 @@ impl QemuCyw43439Transport {
         self.node_for_role(role).unwrap_or(self.role_nodes[0])
     }
 
+    fn role_for_node(&self, node: NodeId) -> Result<u8, Cyw43439Error> {
+        let mut role = 0usize;
+        while role < self.role_count as usize && role < self.role_nodes.len() {
+            if self.role_nodes[role] == node {
+                return Ok(role as u8);
+            }
+            role += 1;
+        }
+        Err(Cyw43439Error::Swarm(SwarmError::BadNode))
+    }
+
     fn alloc_seq(&self) -> u32 {
         unsafe {
             let current = *self.next_seq.get();
@@ -537,6 +623,30 @@ impl QemuCyw43439Transport {
             current
         }
     }
+
+    fn validate_received_frame(&self, rx: &CywRx, frame: &SwarmFrame) -> Result<(), Cyw43439Error> {
+        if frame.dst_node() != rx.local_node {
+            self.record_drop(SwarmError::BadNode);
+            return Err(Cyw43439Error::Swarm(SwarmError::BadNode));
+        }
+        if let Err(error) = self.role_for_node(frame.src_node()) {
+            if let Cyw43439Error::Swarm(swarm_error) = error {
+                self.record_drop(swarm_error);
+            }
+            return Err(error);
+        }
+        if frame.session_id() != rx.session_id
+            || frame.session_generation() != self.session_generation
+        {
+            self.record_drop(SwarmError::BadGeneration);
+            return Err(Cyw43439Error::Swarm(SwarmError::BadGeneration));
+        }
+        if let Err(error) = frame.verify(self.security) {
+            self.record_drop(error);
+            return Err(Cyw43439Error::Swarm(error));
+        }
+        Ok(())
+    }
 }
 
 pub struct CywTx {
@@ -545,6 +655,7 @@ pub struct CywTx {
 }
 
 pub struct CywRx {
+    local_role: u8,
     session_id: u32,
     local_node: NodeId,
     current: Option<SwarmFrame>,
@@ -604,6 +715,7 @@ impl Transport for QemuCyw43439Transport {
                 local_node,
             },
             CywRx {
+                local_role,
                 session_id,
                 local_node,
                 current: None,
@@ -666,15 +778,8 @@ impl Transport for QemuCyw43439Transport {
             SwarmFrame::decode(&wire[..len])?
         };
 
-        if frame.session_id() != rx.session_id
-            || frame.session_generation() != self.session_generation
-        {
-            self.record_drop(SwarmError::BadGeneration);
-            return Poll::Ready(Err(Cyw43439Error::Swarm(SwarmError::BadGeneration)));
-        }
-        if let Err(error) = frame.verify(self.security) {
-            self.record_drop(error);
-            return Poll::Ready(Err(Cyw43439Error::Swarm(error)));
+        if let Err(error) = self.validate_received_frame(rx, &frame) {
+            return Poll::Ready(Err(error));
         }
         let (slot, previous) = match accept_replay(&mut rx.replay, &frame) {
             Ok(accepted) => accepted,
@@ -692,6 +797,10 @@ impl Transport for QemuCyw43439Transport {
             .current
             .as_ref()
             .expect("current frame was just installed");
+        set_qemu_last_rx_meta(
+            rx.local_role,
+            QemuCyw43439RxMeta::new(frame.src_node(), frame.dst_node(), frame.lane()),
+        );
         let bytes: &'a [u8] = unsafe { &*(frame.payload() as *const [u8]) };
         Poll::Ready(Ok(Payload::new(bytes)))
     }
@@ -724,6 +833,12 @@ impl Transport for QemuCyw43439Transport {
 mod tests {
     use super::*;
 
+    const TEST_SESSION_ID: u32 = 42;
+    const TEST_SESSION_GENERATION: u16 = 7;
+    const TEST_CREDENTIAL: crate::kernel::swarm::SwarmCredential =
+        crate::kernel::swarm::SwarmCredential::new(0x4849_4241);
+    const TEST_SECURITY: SwarmSecurity = SwarmSecurity::Secure(TEST_CREDENTIAL);
+
     #[test]
     fn cyw43439_status_bits_are_driver_visible_readiness_evidence() {
         let status = Cyw43439Status::from_bits(
@@ -745,6 +860,125 @@ mod tests {
         assert!(status.queue_overflow());
         assert!(!status.rx_ready());
         assert!(!status.tx_ready());
+    }
+
+    #[test]
+    fn qemu_rx_meta_matches_only_exact_source_destination_and_lane() {
+        let coordinator = NodeId::new(1);
+        let gateway = NodeId::new(4);
+        let meta = QemuCyw43439RxMeta::new(coordinator, gateway, 22);
+
+        assert!(meta.matches(coordinator, gateway, 22));
+        assert!(!meta.matches(NodeId::new(2), gateway, 22));
+        assert!(!meta.matches(coordinator, NodeId::new(5), 22));
+        assert!(!meta.matches(coordinator, gateway, 23));
+    }
+
+    #[test]
+    fn qemu_rx_meta_is_consumed_once() {
+        let coordinator = NodeId::new(1);
+        let gateway = NodeId::new(4);
+        let meta = QemuCyw43439RxMeta::new(coordinator, gateway, 22);
+
+        set_qemu_last_rx_meta(0, meta);
+
+        assert_eq!(qemu_take_last_rx_meta(0), Some(meta));
+        assert_eq!(qemu_take_last_rx_meta(0), None);
+    }
+
+    #[test]
+    fn qemu_transport_rejects_bad_rx_frame_metadata_before_payload_authority() {
+        let coordinator = NodeId::new(1);
+        let gateway = NodeId::new(4);
+        let outside_route = NodeId::new(6);
+        let role_nodes = [
+            coordinator,
+            gateway,
+            NodeId::new(0),
+            NodeId::new(0),
+            NodeId::new(0),
+            NodeId::new(0),
+        ];
+        let transport = QemuCyw43439Transport::new_role_map(
+            role_nodes,
+            2,
+            TEST_SESSION_GENERATION,
+            TEST_SECURITY,
+        );
+        let (_, rx) = transport.open(1, TEST_SESSION_ID);
+
+        let valid = SwarmFrame::new(
+            coordinator,
+            gateway,
+            TEST_SESSION_ID,
+            TEST_SESSION_GENERATION,
+            22,
+            44,
+            1,
+            0,
+            b"ok",
+            TEST_SECURITY,
+        )
+        .expect("valid qemu frame");
+        assert_eq!(transport.validate_received_frame(&rx, &valid), Ok(()));
+
+        let wrong_destination = SwarmFrame::new(
+            coordinator,
+            outside_route,
+            TEST_SESSION_ID,
+            TEST_SESSION_GENERATION,
+            22,
+            44,
+            2,
+            0,
+            b"wrong dst",
+            TEST_SECURITY,
+        )
+        .expect("wrong destination frame");
+        assert_eq!(
+            transport.validate_received_frame(&rx, &wrong_destination),
+            Err(Cyw43439Error::Swarm(SwarmError::BadNode))
+        );
+
+        let unknown_source = SwarmFrame::new(
+            outside_route,
+            gateway,
+            TEST_SESSION_ID,
+            TEST_SESSION_GENERATION,
+            22,
+            44,
+            3,
+            0,
+            b"wrong src",
+            TEST_SECURITY,
+        )
+        .expect("unknown source frame");
+        assert_eq!(
+            transport.validate_received_frame(&rx, &unknown_source),
+            Err(Cyw43439Error::Swarm(SwarmError::BadNode))
+        );
+
+        let stale_generation = SwarmFrame::new(
+            coordinator,
+            gateway,
+            TEST_SESSION_ID,
+            TEST_SESSION_GENERATION.wrapping_add(1),
+            22,
+            44,
+            4,
+            0,
+            b"stale",
+            TEST_SECURITY,
+        )
+        .expect("stale generation frame");
+        assert_eq!(
+            transport.validate_received_frame(&rx, &stale_generation),
+            Err(Cyw43439Error::Swarm(SwarmError::BadGeneration))
+        );
+
+        let telemetry = transport.drop_telemetry();
+        assert_eq!(telemetry.other(), 2);
+        assert_eq!(telemetry.bad_generation(), 1);
     }
 
     #[test]

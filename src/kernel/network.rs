@@ -269,6 +269,14 @@ impl NetworkObject {
     }
 }
 
+const fn network_route_matches_object(object: NetworkObject, route: NetworkRoute) -> bool {
+    object.target_node().raw() == route.target_node().raw()
+        && object.lane() == route.lane()
+        && object.route() == route.route()
+        && object.session_generation() == route.session_generation()
+        && object.policy_slot() == route.policy_slot()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NetworkGrant {
     node_id: NodeId,
@@ -498,6 +506,7 @@ impl NetworkControl {
 pub struct NetworkObjectTable<const N: usize> {
     slots: [Option<NetworkObject>; N],
     next_generation: u16,
+    next_operation_id: Cell<u32>,
     rejection_telemetry: Cell<NetworkObjectRejectionTelemetry>,
 }
 
@@ -520,7 +529,51 @@ impl<const N: usize> NetworkObjectTable<N> {
         Self {
             slots: [None; N],
             next_generation: 1,
+            next_operation_id: Cell::new(1),
             rejection_telemetry: Cell::new(NetworkObjectRejectionTelemetry::new()),
+        }
+    }
+
+    pub fn allocate_operation_id(&self) -> u32 {
+        let operation_id = match self.next_operation_id.get() {
+            0 => 1,
+            operation_id => operation_id,
+        };
+        let mut next = operation_id.wrapping_add(1);
+        if next == 0 {
+            next = 1;
+        }
+        self.next_operation_id.set(next);
+
+        operation_id
+    }
+
+    pub fn datagram_ack_accepted_for_route(
+        &self,
+        object: NetworkObject,
+        ack: DatagramAck,
+        operation_id: u32,
+    ) -> bool {
+        match self.route_fd_write_routed(object.fd(), object.generation(), object.route_key()) {
+            NetworkObjectWriteRoute::Datagram(live_object) => {
+                ack.accepted_for_route(live_object, operation_id, object.route_key())
+            }
+            NetworkObjectWriteRoute::Stream(_) | NetworkObjectWriteRoute::Rejected(_) => false,
+        }
+    }
+
+    pub fn stream_ack_accepted_for_route(
+        &self,
+        object: NetworkObject,
+        ack: StreamAck,
+        operation_id: u32,
+        sequence: u16,
+    ) -> bool {
+        match self.route_fd_write_routed(object.fd(), object.generation(), object.route_key()) {
+            NetworkObjectWriteRoute::Stream(live_object) => {
+                ack.accepted_for_route(live_object, operation_id, sequence, object.route_key())
+            }
+            NetworkObjectWriteRoute::Datagram(_) | NetworkObjectWriteRoute::Rejected(_) => false,
         }
     }
 
@@ -675,6 +728,11 @@ impl<const N: usize> NetworkObjectTable<N> {
         rights: NetworkRights,
         protocol: NetworkRoleProtocol,
     ) -> Result<NetworkObject, NetworkError> {
+        let route_key =
+            NetworkRoute::with_policy(target_node, lane, route, session_generation, policy_slot);
+        if self.has_active_route_grant(route_key, protocol) {
+            return Err(self.record_rejection(NetworkError::BadRoute));
+        }
         let fd = match self.slots.iter().position(Option::is_none) {
             Some(fd) => fd as u8,
             None => return Err(self.record_rejection(NetworkError::TableFull)),
@@ -736,24 +794,53 @@ impl<const N: usize> NetworkObjectTable<N> {
         Ok(entry)
     }
 
+    pub fn resolve_route(
+        &self,
+        required: NetworkRights,
+        route: NetworkRoute,
+    ) -> Result<NetworkObject, NetworkError> {
+        let mut saw_revoked = false;
+        let mut saw_wrong_rights = false;
+
+        for entry in self.slots.iter().flatten().copied() {
+            if entry.session_generation != route.session_generation {
+                continue;
+            }
+            if Self::validate_route(entry, route).is_err() {
+                continue;
+            }
+            if entry.revoked {
+                saw_revoked = true;
+                continue;
+            }
+            if !entry.rights.allows(required) {
+                saw_wrong_rights = true;
+                continue;
+            }
+            return Ok(entry);
+        }
+
+        if saw_revoked {
+            return Err(self.record_rejection(NetworkError::Revoked));
+        }
+        if saw_wrong_rights {
+            return Err(self.record_rejection(NetworkError::PermissionDenied));
+        }
+        Err(self.record_rejection(NetworkError::BadRoute))
+    }
+
     pub fn route_fd_write(
         &self,
         fd: u8,
         generation: u16,
         session_generation: u16,
     ) -> NetworkObjectWriteRoute {
-        match self.resolve(fd, generation, NetworkRights::Send, session_generation) {
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Datagram => {
-                NetworkObjectWriteRoute::Datagram(entry)
-            }
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Stream => {
-                NetworkObjectWriteRoute::Stream(entry)
-            }
-            Ok(_) => NetworkObjectWriteRoute::Rejected(
-                self.record_rejection(NetworkError::WrongProtocol),
-            ),
-            Err(error) => NetworkObjectWriteRoute::Rejected(error),
-        }
+        Self::write_route_from_result(self.resolve(
+            fd,
+            generation,
+            NetworkRights::Send,
+            session_generation,
+        ))
     }
 
     pub fn route_fd_write_routed(
@@ -762,18 +849,12 @@ impl<const N: usize> NetworkObjectTable<N> {
         generation: u16,
         route: NetworkRoute,
     ) -> NetworkObjectWriteRoute {
-        match self.resolve_routed(fd, generation, NetworkRights::Send, route) {
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Datagram => {
-                NetworkObjectWriteRoute::Datagram(entry)
-            }
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Stream => {
-                NetworkObjectWriteRoute::Stream(entry)
-            }
-            Ok(_) => NetworkObjectWriteRoute::Rejected(
-                self.record_rejection(NetworkError::WrongProtocol),
-            ),
-            Err(error) => NetworkObjectWriteRoute::Rejected(error),
-        }
+        Self::write_route_from_result(self.resolve_routed(
+            fd,
+            generation,
+            NetworkRights::Send,
+            route,
+        ))
     }
 
     pub fn route_fd_write_authorized<const P: usize>(
@@ -797,18 +878,12 @@ impl<const N: usize> NetworkObjectTable<N> {
         generation: u16,
         session_generation: u16,
     ) -> NetworkObjectReadRoute {
-        match self.resolve(fd, generation, NetworkRights::Receive, session_generation) {
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Datagram => {
-                NetworkObjectReadRoute::Datagram(entry)
-            }
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Stream => {
-                NetworkObjectReadRoute::Stream(entry)
-            }
-            Ok(_) => {
-                NetworkObjectReadRoute::Rejected(self.record_rejection(NetworkError::WrongProtocol))
-            }
-            Err(error) => NetworkObjectReadRoute::Rejected(error),
-        }
+        Self::read_route_from_result(self.resolve(
+            fd,
+            generation,
+            NetworkRights::Receive,
+            session_generation,
+        ))
     }
 
     pub fn route_fd_read_routed(
@@ -817,18 +892,16 @@ impl<const N: usize> NetworkObjectTable<N> {
         generation: u16,
         route: NetworkRoute,
     ) -> NetworkObjectReadRoute {
-        match self.resolve_routed(fd, generation, NetworkRights::Receive, route) {
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Datagram => {
-                NetworkObjectReadRoute::Datagram(entry)
-            }
-            Ok(entry) if entry.protocol() == NetworkRoleProtocol::Stream => {
-                NetworkObjectReadRoute::Stream(entry)
-            }
-            Ok(_) => {
-                NetworkObjectReadRoute::Rejected(self.record_rejection(NetworkError::WrongProtocol))
-            }
-            Err(error) => NetworkObjectReadRoute::Rejected(error),
-        }
+        Self::read_route_from_result(self.resolve_routed(
+            fd,
+            generation,
+            NetworkRights::Receive,
+            route,
+        ))
+    }
+
+    pub fn route_receive_routed(&self, route: NetworkRoute) -> NetworkObjectReadRoute {
+        Self::read_route_from_result(self.resolve_route(NetworkRights::Receive, route))
     }
 
     pub fn route_fd_read_authorized<const P: usize>(
@@ -915,6 +988,42 @@ impl<const N: usize> NetworkObjectTable<N> {
         error
     }
 
+    fn has_active_route_grant(
+        &self,
+        route_key: NetworkRoute,
+        protocol: NetworkRoleProtocol,
+    ) -> bool {
+        self.slots.iter().flatten().copied().any(|entry| {
+            !entry.revoked
+                && entry.protocol == protocol
+                && network_route_matches_object(entry, route_key)
+        })
+    }
+
+    fn write_route_from_result(
+        result: Result<NetworkObject, NetworkError>,
+    ) -> NetworkObjectWriteRoute {
+        match result {
+            Ok(entry) => match entry.protocol() {
+                NetworkRoleProtocol::Datagram => NetworkObjectWriteRoute::Datagram(entry),
+                NetworkRoleProtocol::Stream => NetworkObjectWriteRoute::Stream(entry),
+            },
+            Err(error) => NetworkObjectWriteRoute::Rejected(error),
+        }
+    }
+
+    fn read_route_from_result(
+        result: Result<NetworkObject, NetworkError>,
+    ) -> NetworkObjectReadRoute {
+        match result {
+            Ok(entry) => match entry.protocol() {
+                NetworkRoleProtocol::Datagram => NetworkObjectReadRoute::Datagram(entry),
+                NetworkRoleProtocol::Stream => NetworkObjectReadRoute::Stream(entry),
+            },
+            Err(error) => NetworkObjectReadRoute::Rejected(error),
+        }
+    }
+
     fn validate_route(entry: NetworkObject, route: NetworkRoute) -> Result<(), NetworkError> {
         if entry.target_node != route.target_node
             || entry.lane != route.lane
@@ -947,12 +1056,19 @@ pub struct DatagramSend {
     fd: u8,
     generation: u16,
     route: u8,
+    operation_id: u32,
     len: u8,
     payload: [u8; NET_DATAGRAM_PAYLOAD_CAPACITY],
 }
 
 impl DatagramSend {
-    pub fn new(fd: u8, generation: u16, route: u8, payload: &[u8]) -> Result<Self, NetworkError> {
+    pub fn new(
+        fd: u8,
+        generation: u16,
+        route: u8,
+        operation_id: u32,
+        payload: &[u8],
+    ) -> Result<Self, NetworkError> {
         if payload.len() > NET_DATAGRAM_PAYLOAD_CAPACITY {
             return Err(NetworkError::PayloadTooLarge);
         }
@@ -960,6 +1076,7 @@ impl DatagramSend {
             fd,
             generation,
             route,
+            operation_id,
             len: payload.len() as u8,
             payload: [0; NET_DATAGRAM_PAYLOAD_CAPACITY],
         };
@@ -979,6 +1096,10 @@ impl DatagramSend {
         self.route
     }
 
+    pub const fn operation_id(&self) -> u32 {
+        self.operation_id
+    }
+
     pub const fn len(&self) -> usize {
         self.len as usize
     }
@@ -994,20 +1115,21 @@ impl DatagramSend {
 
 impl WireEncode for DatagramSend {
     fn encoded_len(&self) -> Option<usize> {
-        Some(5 + self.len())
+        Some(9 + self.len())
     }
 
     fn encode_into(&self, out: &mut [u8]) -> Result<usize, CodecError> {
         let len = self.len();
-        if out.len() < 5 + len {
+        if out.len() < 9 + len {
             return Err(CodecError::Truncated);
         }
         out[0] = self.fd;
         out[1..3].copy_from_slice(&self.generation.to_be_bytes());
         out[3] = self.route;
-        out[4] = self.len;
-        out[5..5 + len].copy_from_slice(self.payload());
-        Ok(5 + len)
+        out[4..8].copy_from_slice(&self.operation_id.to_be_bytes());
+        out[8] = self.len;
+        out[9..9 + len].copy_from_slice(self.payload());
+        Ok(9 + len)
     }
 }
 
@@ -1016,21 +1138,22 @@ impl WirePayload for DatagramSend {
 
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
-        if bytes.len() < 5 {
+        if bytes.len() < 9 {
             return Err(CodecError::Truncated);
         }
-        let len = bytes[4] as usize;
+        let len = bytes[8] as usize;
         if len > NET_DATAGRAM_PAYLOAD_CAPACITY {
             return Err(CodecError::Invalid("datagram send payload too large"));
         }
-        if bytes.len() != 5 + len {
+        if bytes.len() != 9 + len {
             return Err(CodecError::Invalid("datagram send length mismatch"));
         }
         Self::new(
             bytes[0],
             u16::from_be_bytes([bytes[1], bytes[2]]),
             bytes[3],
-            &bytes[5..],
+            u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            &bytes[9..],
         )
         .map_err(|_| CodecError::Invalid("datagram send payload too large"))
     }
@@ -1040,36 +1163,69 @@ impl WirePayload for DatagramSend {
 pub struct DatagramAck {
     fd: u8,
     generation: u16,
+    operation_id: u32,
     accepted: bool,
 }
 
 impl DatagramAck {
-    pub const fn new(fd: u8, generation: u16, accepted: bool) -> Self {
+    pub const fn new(fd: u8, generation: u16, operation_id: u32, accepted: bool) -> Self {
         Self {
             fd,
             generation,
+            operation_id,
             accepted,
         }
+    }
+
+    pub const fn fd(&self) -> u8 {
+        self.fd
+    }
+
+    pub const fn generation(&self) -> u16 {
+        self.generation
+    }
+
+    pub const fn operation_id(&self) -> u32 {
+        self.operation_id
     }
 
     pub const fn accepted(&self) -> bool {
         self.accepted
     }
+
+    pub const fn accepted_for(&self, fd: u8, generation: u16, operation_id: u32) -> bool {
+        self.accepted
+            && self.fd == fd
+            && self.generation == generation
+            && self.operation_id == operation_id
+    }
+
+    pub const fn accepted_for_route(
+        &self,
+        object: NetworkObject,
+        operation_id: u32,
+        observed_route: NetworkRoute,
+    ) -> bool {
+        object.protocol().code() == NetworkRoleProtocol::Datagram.code()
+            && network_route_matches_object(object, observed_route)
+            && self.accepted_for(object.fd(), object.generation(), operation_id)
+    }
 }
 
 impl WireEncode for DatagramAck {
     fn encoded_len(&self) -> Option<usize> {
-        Some(4)
+        Some(8)
     }
 
     fn encode_into(&self, out: &mut [u8]) -> Result<usize, CodecError> {
-        if out.len() < 4 {
+        if out.len() < 8 {
             return Err(CodecError::Truncated);
         }
         out[0] = self.fd;
         out[1..3].copy_from_slice(&self.generation.to_be_bytes());
-        out[3] = u8::from(self.accepted);
-        Ok(4)
+        out[3..7].copy_from_slice(&self.operation_id.to_be_bytes());
+        out[7] = u8::from(self.accepted);
+        Ok(8)
     }
 }
 
@@ -1078,10 +1234,10 @@ impl WirePayload for DatagramAck {
 
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
-        if bytes.len() != 4 {
-            return Err(CodecError::Invalid("datagram ack carries four bytes"));
+        if bytes.len() != 8 {
+            return Err(CodecError::Invalid("datagram ack carries eight bytes"));
         }
-        let accepted = match bytes[3] {
+        let accepted = match bytes[7] {
             0 => false,
             1 => true,
             _ => return Err(CodecError::Invalid("datagram ack boolean")),
@@ -1089,6 +1245,7 @@ impl WirePayload for DatagramAck {
         Ok(Self::new(
             bytes[0],
             u16::from_be_bytes([bytes[1], bytes[2]]),
+            u32::from_be_bytes([bytes[3], bytes[4], bytes[5], bytes[6]]),
             accepted,
         ))
     }
@@ -1245,6 +1402,7 @@ pub struct StreamWrite {
     fd: u8,
     generation: u16,
     route: u8,
+    operation_id: u32,
     sequence: u16,
     flags: u8,
     len: u8,
@@ -1256,6 +1414,7 @@ impl StreamWrite {
         fd: u8,
         generation: u16,
         route: u8,
+        operation_id: u32,
         sequence: u16,
         flags: u8,
         payload: &[u8],
@@ -1270,6 +1429,7 @@ impl StreamWrite {
             fd,
             generation,
             route,
+            operation_id,
             sequence,
             flags,
             len: payload.len() as u8,
@@ -1289,6 +1449,10 @@ impl StreamWrite {
 
     pub const fn route(&self) -> u8 {
         self.route
+    }
+
+    pub const fn operation_id(&self) -> u32 {
+        self.operation_id
     }
 
     pub const fn sequence(&self) -> u16 {
@@ -1318,22 +1482,23 @@ impl StreamWrite {
 
 impl WireEncode for StreamWrite {
     fn encoded_len(&self) -> Option<usize> {
-        Some(8 + self.len())
+        Some(12 + self.len())
     }
 
     fn encode_into(&self, out: &mut [u8]) -> Result<usize, CodecError> {
         let len = self.len();
-        if out.len() < 8 + len {
+        if out.len() < 12 + len {
             return Err(CodecError::Truncated);
         }
         out[0] = self.fd;
         out[1..3].copy_from_slice(&self.generation.to_be_bytes());
         out[3] = self.route;
-        out[4..6].copy_from_slice(&self.sequence.to_be_bytes());
-        out[6] = self.flags;
-        out[7] = self.len;
-        out[8..8 + len].copy_from_slice(self.payload());
-        Ok(8 + len)
+        out[4..8].copy_from_slice(&self.operation_id.to_be_bytes());
+        out[8..10].copy_from_slice(&self.sequence.to_be_bytes());
+        out[10] = self.flags;
+        out[11] = self.len;
+        out[12..12 + len].copy_from_slice(self.payload());
+        Ok(12 + len)
     }
 }
 
@@ -1342,23 +1507,24 @@ impl WirePayload for StreamWrite {
 
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
-        if bytes.len() < 8 {
+        if bytes.len() < 12 {
             return Err(CodecError::Truncated);
         }
-        let len = bytes[7] as usize;
+        let len = bytes[11] as usize;
         if len > NET_STREAM_PAYLOAD_CAPACITY {
             return Err(CodecError::Invalid("stream write payload too large"));
         }
-        if bytes.len() != 8 + len {
+        if bytes.len() != 12 + len {
             return Err(CodecError::Invalid("stream write length mismatch"));
         }
         Self::new(
             bytes[0],
             u16::from_be_bytes([bytes[1], bytes[2]]),
             bytes[3],
-            u16::from_be_bytes([bytes[4], bytes[5]]),
-            bytes[6],
-            &bytes[8..],
+            u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            u16::from_be_bytes([bytes[8], bytes[9]]),
+            bytes[10],
+            &bytes[12..],
         )
         .map_err(|error| match error {
             NetworkError::BadFlags => CodecError::Invalid("stream write flags"),
@@ -1371,18 +1537,38 @@ impl WirePayload for StreamWrite {
 pub struct StreamAck {
     fd: u8,
     generation: u16,
+    operation_id: u32,
     sequence: u16,
     accepted: bool,
 }
 
 impl StreamAck {
-    pub const fn new(fd: u8, generation: u16, sequence: u16, accepted: bool) -> Self {
+    pub const fn new(
+        fd: u8,
+        generation: u16,
+        operation_id: u32,
+        sequence: u16,
+        accepted: bool,
+    ) -> Self {
         Self {
             fd,
             generation,
+            operation_id,
             sequence,
             accepted,
         }
+    }
+
+    pub const fn fd(&self) -> u8 {
+        self.fd
+    }
+
+    pub const fn generation(&self) -> u16 {
+        self.generation
+    }
+
+    pub const fn operation_id(&self) -> u32 {
+        self.operation_id
     }
 
     pub const fn sequence(&self) -> u16 {
@@ -1392,22 +1578,49 @@ impl StreamAck {
     pub const fn accepted(&self) -> bool {
         self.accepted
     }
+
+    pub const fn accepted_for(
+        &self,
+        fd: u8,
+        generation: u16,
+        operation_id: u32,
+        sequence: u16,
+    ) -> bool {
+        self.accepted
+            && self.fd == fd
+            && self.generation == generation
+            && self.operation_id == operation_id
+            && self.sequence == sequence
+    }
+
+    pub const fn accepted_for_route(
+        &self,
+        object: NetworkObject,
+        operation_id: u32,
+        sequence: u16,
+        observed_route: NetworkRoute,
+    ) -> bool {
+        object.protocol().code() == NetworkRoleProtocol::Stream.code()
+            && network_route_matches_object(object, observed_route)
+            && self.accepted_for(object.fd(), object.generation(), operation_id, sequence)
+    }
 }
 
 impl WireEncode for StreamAck {
     fn encoded_len(&self) -> Option<usize> {
-        Some(6)
+        Some(10)
     }
 
     fn encode_into(&self, out: &mut [u8]) -> Result<usize, CodecError> {
-        if out.len() < 6 {
+        if out.len() < 10 {
             return Err(CodecError::Truncated);
         }
         out[0] = self.fd;
         out[1..3].copy_from_slice(&self.generation.to_be_bytes());
-        out[3..5].copy_from_slice(&self.sequence.to_be_bytes());
-        out[5] = u8::from(self.accepted);
-        Ok(6)
+        out[3..7].copy_from_slice(&self.operation_id.to_be_bytes());
+        out[7..9].copy_from_slice(&self.sequence.to_be_bytes());
+        out[9] = u8::from(self.accepted);
+        Ok(10)
     }
 }
 
@@ -1416,10 +1629,10 @@ impl WirePayload for StreamAck {
 
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
-        if bytes.len() != 6 {
-            return Err(CodecError::Invalid("stream ack carries six bytes"));
+        if bytes.len() != 10 {
+            return Err(CodecError::Invalid("stream ack carries ten bytes"));
         }
-        let accepted = match bytes[5] {
+        let accepted = match bytes[9] {
             0 => false,
             1 => true,
             _ => return Err(CodecError::Invalid("stream ack boolean")),
@@ -1427,7 +1640,8 @@ impl WirePayload for StreamAck {
         Ok(Self::new(
             bytes[0],
             u16::from_be_bytes([bytes[1], bytes[2]]),
-            u16::from_be_bytes([bytes[3], bytes[4]]),
+            u32::from_be_bytes([bytes[3], bytes[4], bytes[5], bytes[6]]),
+            u16::from_be_bytes([bytes[7], bytes[8]]),
             accepted,
         ))
     }
@@ -1629,8 +1843,8 @@ mod tests {
 
     #[test]
     fn stream_payloads_round_trip_and_reject_unknown_flags() {
-        let write =
-            StreamWrite::new(3, 11, 114, 7, NET_STREAM_FLAG_FIN, b"stream").expect("stream write");
+        let write = StreamWrite::new(3, 11, 114, 0x1112_1314, 7, NET_STREAM_FLAG_FIN, b"stream")
+            .expect("stream write");
         let mut wire = [0u8; 64];
         let len = write.encode_into(&mut wire).expect("encode stream write");
         assert_eq!(
@@ -1638,7 +1852,7 @@ mod tests {
             write
         );
 
-        let ack = StreamAck::new(3, 11, 7, true);
+        let ack = StreamAck::new(3, 11, write.operation_id(), 7, true);
         let len = ack.encode_into(&mut wire).expect("encode stream ack");
         assert_eq!(
             StreamAck::decode_payload(Payload::new(&wire[..len])).expect("decode stream ack"),
@@ -1662,12 +1876,363 @@ mod tests {
         );
 
         assert_eq!(
-            StreamWrite::new(3, 11, 114, 7, 0b1000_0000, b"bad"),
+            StreamWrite::new(3, 11, 114, 0x1112_1314, 7, 0b1000_0000, b"bad"),
             Err(NetworkError::BadFlags)
         );
         assert_eq!(
             StreamReadRet::new(3, 11, 8, 0b1000_0000, b"bad"),
             Err(NetworkError::BadFlags)
+        );
+    }
+
+    #[test]
+    fn network_acks_are_bound_to_materialized_fd_generation_route_and_sequence() {
+        let datagram =
+            DatagramSend::new(3, 11, 114, 0x0102_0304, b"datagram").expect("datagram send");
+        assert_eq!(datagram.operation_id(), 0x0102_0304);
+        let datagram_ack = DatagramAck::new(3, 11, datagram.operation_id(), true);
+        assert_eq!(datagram_ack.fd(), 3);
+        assert_eq!(datagram_ack.generation(), 11);
+        assert_eq!(datagram_ack.operation_id(), datagram.operation_id());
+        assert!(datagram_ack.accepted_for(3, 11, datagram.operation_id()));
+        assert!(!datagram_ack.accepted_for(4, 11, datagram.operation_id()));
+        assert!(!datagram_ack.accepted_for(3, 12, datagram.operation_id()));
+        assert!(
+            !DatagramAck::new(3, 11, datagram.operation_id() ^ 1, true).accepted_for(
+                3,
+                11,
+                datagram.operation_id()
+            )
+        );
+        assert!(
+            !DatagramAck::new(3, 11, datagram.operation_id(), false).accepted_for(
+                3,
+                11,
+                datagram.operation_id()
+            )
+        );
+
+        let stream = StreamWrite::new(5, 13, 115, 0x0506_0708, 8, NET_STREAM_FLAG_FIN, b"stream")
+            .expect("stream write");
+        assert_eq!(stream.operation_id(), 0x0506_0708);
+        let stream_ack = StreamAck::new(5, 13, stream.operation_id(), stream.sequence(), true);
+        assert_eq!(stream_ack.fd(), 5);
+        assert_eq!(stream_ack.generation(), 13);
+        assert_eq!(stream_ack.operation_id(), stream.operation_id());
+        assert!(stream_ack.accepted_for(5, 13, stream.operation_id(), stream.sequence()));
+        assert!(!stream_ack.accepted_for(6, 13, stream.operation_id(), stream.sequence()));
+        assert!(!stream_ack.accepted_for(5, 14, stream.operation_id(), stream.sequence()));
+        assert!(!stream_ack.accepted_for(5, 13, stream.operation_id() ^ 1, stream.sequence()));
+        assert!(!stream_ack.accepted_for(5, 13, stream.operation_id(), stream.sequence() ^ 1));
+        assert!(
+            !StreamAck::new(5, 13, stream.operation_id(), stream.sequence(), false).accepted_for(
+                5,
+                13,
+                stream.operation_id(),
+                stream.sequence()
+            )
+        );
+    }
+
+    #[test]
+    fn network_acks_are_bound_to_observed_route_metadata() {
+        let mut fds: NetworkObjectTable<2> = NetworkObjectTable::new();
+        let datagram = fds
+            .apply_cap_grant_datagram(
+                COORDINATOR,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                GATEWAY,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                NetworkRights::Send,
+            )
+            .expect("install datagram route");
+        let stream = fds
+            .apply_cap_grant_stream(
+                COORDINATOR,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                GATEWAY,
+                23,
+                LABEL_NET_STREAM_WRITE,
+                NetworkRights::Send,
+            )
+            .expect("install stream route");
+        let datagram_operation = fds.allocate_operation_id();
+        let stream_operation = fds.allocate_operation_id();
+        let datagram_ack = DatagramAck::new(
+            datagram.fd(),
+            datagram.generation(),
+            datagram_operation,
+            true,
+        );
+        let stream_ack =
+            StreamAck::new(stream.fd(), stream.generation(), stream_operation, 9, true);
+
+        assert!(datagram_ack.accepted_for_route(
+            datagram,
+            datagram_operation,
+            datagram.route_key()
+        ));
+        assert!(!datagram_ack.accepted_for_route(
+            datagram,
+            datagram_operation,
+            NetworkRoute::new(GATEWAY, 23, LABEL_NET_DATAGRAM_SEND, SESSION_GENERATION)
+        ));
+        assert!(!datagram_ack.accepted_for_route(
+            datagram,
+            datagram_operation,
+            NetworkRoute::new(GATEWAY, 22, LABEL_NET_STREAM_WRITE, SESSION_GENERATION)
+        ));
+        assert!(!datagram_ack.accepted_for_route(stream, datagram_operation, datagram.route_key()));
+
+        assert!(stream_ack.accepted_for_route(stream, stream_operation, 9, stream.route_key()));
+        assert!(!stream_ack.accepted_for_route(
+            stream,
+            stream_operation,
+            9,
+            NetworkRoute::new(GATEWAY, 22, LABEL_NET_STREAM_WRITE, SESSION_GENERATION)
+        ));
+        assert!(!stream_ack.accepted_for_route(stream, stream_operation, 10, stream.route_key()));
+        assert!(!stream_ack.accepted_for_route(datagram, stream_operation, 9, stream.route_key()));
+    }
+
+    #[test]
+    fn network_ack_acceptance_rechecks_table_liveness() {
+        let mut fds: NetworkObjectTable<2> = NetworkObjectTable::new();
+        let datagram = fds
+            .apply_cap_grant_datagram(
+                COORDINATOR,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                GATEWAY,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                NetworkRights::Send,
+            )
+            .expect("install datagram send route");
+        let stream = fds
+            .apply_cap_grant_stream(
+                COORDINATOR,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                GATEWAY,
+                23,
+                LABEL_NET_STREAM_WRITE,
+                NetworkRights::Send,
+            )
+            .expect("install stream send route");
+        let datagram_operation = fds.allocate_operation_id();
+        let stream_operation = fds.allocate_operation_id();
+        let datagram_ack = DatagramAck::new(
+            datagram.fd(),
+            datagram.generation(),
+            datagram_operation,
+            true,
+        );
+        let stream_ack =
+            StreamAck::new(stream.fd(), stream.generation(), stream_operation, 4, true);
+
+        assert!(fds.datagram_ack_accepted_for_route(datagram, datagram_ack, datagram_operation));
+        assert!(fds.stream_ack_accepted_for_route(stream, stream_ack, stream_operation, 4));
+
+        fds.revoke_fd(datagram.fd()).expect("revoke datagram route");
+        assert!(!fds.datagram_ack_accepted_for_route(datagram, datagram_ack, datagram_operation));
+
+        assert_eq!(fds.quiesce_all(), 1);
+        assert!(!fds.stream_ack_accepted_for_route(stream, stream_ack, stream_operation, 4));
+    }
+
+    #[test]
+    fn network_operation_ids_are_table_allocated_and_not_reused() {
+        let mut fds: NetworkObjectTable<2> = NetworkObjectTable::new();
+        let datagram = fds
+            .apply_cap_grant_datagram(
+                COORDINATOR,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                GATEWAY,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                NetworkRights::Send,
+            )
+            .expect("install datagram route");
+        let _stream = fds
+            .apply_cap_grant_stream(
+                COORDINATOR,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                GATEWAY,
+                23,
+                LABEL_NET_STREAM_WRITE,
+                NetworkRights::Send,
+            )
+            .expect("install stream route");
+
+        fds.next_operation_id.set(
+            ((datagram.fd() as u32) << 24)
+                ^ ((datagram.generation() as u32) << 8)
+                ^ datagram.route() as u32,
+        );
+        let first = fds.allocate_operation_id();
+        let second = fds.allocate_operation_id();
+        let third = fds.allocate_operation_id();
+
+        assert_ne!(first, 0);
+        assert_ne!(second, 0);
+        assert_ne!(third, 0);
+        assert_ne!(first, second);
+        assert_ne!(second, third);
+    }
+
+    #[test]
+    fn inbound_routes_are_authorized_by_route_not_peer_fd_generation() {
+        let mut fds: NetworkObjectTable<3> = NetworkObjectTable::new();
+        let _dummy = fds
+            .apply_cap_grant_datagram(
+                GATEWAY,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                COORDINATOR,
+                21,
+                LABEL_NET_DATAGRAM_RECV,
+                NetworkRights::Receive,
+            )
+            .expect("pre-seed table");
+        let datagram = fds
+            .apply_cap_grant_datagram(
+                GATEWAY,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                COORDINATOR,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                NetworkRights::Receive,
+            )
+            .expect("install datagram receive route");
+        let stream = fds
+            .apply_cap_grant_stream(
+                GATEWAY,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                COORDINATOR,
+                23,
+                LABEL_NET_STREAM_WRITE,
+                NetworkRights::Receive,
+            )
+            .expect("install stream receive route");
+
+        assert_ne!(datagram.fd(), 0);
+        assert_ne!(datagram.generation(), 1);
+        assert_eq!(
+            fds.route_receive_routed(NetworkRoute::new(
+                COORDINATOR,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                SESSION_GENERATION,
+            )),
+            NetworkObjectReadRoute::Datagram(datagram)
+        );
+        assert_eq!(
+            fds.route_receive_routed(NetworkRoute::new(
+                COORDINATOR,
+                23,
+                LABEL_NET_STREAM_WRITE,
+                SESSION_GENERATION,
+            )),
+            NetworkObjectReadRoute::Stream(stream)
+        );
+        assert_eq!(
+            fds.route_receive_routed(NetworkRoute::new(
+                COORDINATOR,
+                22,
+                LABEL_NET_STREAM_WRITE,
+                SESSION_GENERATION,
+            )),
+            NetworkObjectReadRoute::Rejected(NetworkError::BadRoute)
+        );
+    }
+
+    #[test]
+    fn route_receive_routed_rejects_revoked_and_send_only_objects() {
+        let mut fds: NetworkObjectTable<3> = NetworkObjectTable::new();
+        let receive = fds
+            .apply_cap_grant_datagram(
+                GATEWAY,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                COORDINATOR,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                NetworkRights::Receive,
+            )
+            .expect("install receive route");
+        let send_only = fds
+            .apply_cap_grant_stream(
+                GATEWAY,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                COORDINATOR,
+                23,
+                LABEL_NET_STREAM_WRITE,
+                NetworkRights::Send,
+            )
+            .expect("install send-only stream route");
+
+        assert_eq!(
+            fds.route_receive_routed(send_only.route_key()),
+            NetworkObjectReadRoute::Rejected(NetworkError::PermissionDenied)
+        );
+
+        fds.revoke_fd(receive.fd()).expect("revoke receive route");
+        assert_eq!(
+            fds.route_receive_routed(receive.route_key()),
+            NetworkObjectReadRoute::Rejected(NetworkError::Revoked)
+        );
+    }
+
+    #[test]
+    fn network_object_table_rejects_duplicate_active_route_grants() {
+        let mut fds: NetworkObjectTable<2> = NetworkObjectTable::new();
+        let first = fds
+            .apply_cap_grant_datagram(
+                GATEWAY,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                COORDINATOR,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                NetworkRights::Receive,
+            )
+            .expect("install first receive route");
+
+        assert_eq!(
+            fds.apply_cap_grant_datagram(
+                GATEWAY,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                COORDINATOR,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                NetworkRights::SendReceive,
+            ),
+            Err(NetworkError::BadRoute)
+        );
+
+        fds.revoke_fd(first.fd())
+            .expect("revoke first receive route");
+        assert!(
+            fds.apply_cap_grant_datagram(
+                GATEWAY,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                COORDINATOR,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                NetworkRights::Receive,
+            )
+            .is_ok()
         );
     }
 

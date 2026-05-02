@@ -105,6 +105,11 @@ static uint32_t cyw43439_read_le32(const uint8_t bytes[4])
            ((uint32_t)bytes[3] << 24);
 }
 
+static uint16_t cyw43439_read_be16(const uint8_t bytes[2])
+{
+    return ((uint16_t)bytes[0] << 8) | (uint16_t)bytes[1];
+}
+
 static uint32_t cyw43439_fnv1a32_update(uint32_t hash, uint8_t byte)
 {
     hash ^= byte;
@@ -381,15 +386,20 @@ static void cyw43439_queue_push(CYW43439WifiState *s, uint8_t dst_node,
 static void cyw43439_radio_poll(CYW43439WifiState *s)
 {
     uint8_t packet[2 + CYW43439_WIFI_FRAME_SIZE];
+    struct sockaddr_in source_addr;
+    socklen_t source_len;
 
     if (!s->fw_ready || !cyw43439_radio_enabled(s)) {
         return;
     }
 
     for (;;) {
-        ssize_t got = recvfrom(s->radio_fd, packet, sizeof(packet), 0, NULL, 0);
+        ssize_t got;
         uint8_t frame_len;
 
+        source_len = sizeof(source_addr);
+        got = recvfrom(s->radio_fd, packet, sizeof(packet), 0,
+                       (struct sockaddr *)&source_addr, &source_len);
         if (got < 0) {
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
                 qemu_log_mask(LOG_GUEST_ERROR,
@@ -408,6 +418,59 @@ static void cyw43439_radio_poll(CYW43439WifiState *s)
                           "cyw43439: malformed UDP frame length %zd/%u\n",
                           got, frame_len);
             continue;
+        }
+        if (cyw43439_radio_mesh_enabled(s)) {
+            uint16_t source_port;
+            uint16_t source_node;
+            uint16_t frame_src_node;
+            uint16_t frame_dst_node;
+
+            if (source_len < sizeof(source_addr) ||
+                source_addr.sin_family != AF_INET) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "cyw43439: malformed mesh source address\n");
+                continue;
+            }
+            if (source_addr.sin_addr.s_addr != htonl(INADDR_LOOPBACK)) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "cyw43439: mesh source address is not loopback peer\n");
+                continue;
+            }
+            source_port = ntohs(source_addr.sin_port);
+            if (source_port <= s->radio_port_base) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "cyw43439: mesh source port below base %u\n",
+                              source_port);
+                continue;
+            }
+            source_node = source_port - s->radio_port_base;
+            if (source_node == 0 || source_node > s->node_count) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "cyw43439: mesh source node outside range %u\n",
+                              source_node);
+                continue;
+            }
+            if (packet[0] != s->node_id) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "cyw43439: mesh packet dst %u does not match local node %u\n",
+                              packet[0], s->node_id);
+                continue;
+            }
+            if (frame_len < 6) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "cyw43439: mesh frame too short for node binding %u\n",
+                              frame_len);
+                continue;
+            }
+            frame_src_node = cyw43439_read_be16(&packet[4]);
+            frame_dst_node = cyw43439_read_be16(&packet[6]);
+            if (frame_src_node != source_node || frame_dst_node != s->node_id) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "cyw43439: mesh frame node mismatch src %u/%u dst %u/%u\n",
+                              frame_src_node, source_node,
+                              frame_dst_node, s->node_id);
+                continue;
+            }
         }
 
         cyw43439_queue_push(s, packet[0], &packet[2], frame_len);
@@ -440,6 +503,8 @@ static void cyw43439_radio_send(CYW43439WifiState *s, uint8_t dst_node,
     }
 
     if (cyw43439_radio_mesh_enabled(s)) {
+        uint32_t peer_port;
+
         if (dst_node == s->node_id) {
             cyw43439_queue_push(s, dst_node, bytes, len);
             return;
@@ -451,10 +516,18 @@ static void cyw43439_radio_send(CYW43439WifiState *s, uint8_t dst_node,
             s->overflow = true;
             return;
         }
+        peer_port = (uint32_t)s->radio_port_base + dst_node;
+        if (peer_port > UINT16_MAX) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "cyw43439: mesh destination port overflow %u\n",
+                          peer_port);
+            s->overflow = true;
+            return;
+        }
         memset(&peer_addr, 0, sizeof(peer_addr));
         peer_addr.sin_family = AF_INET;
         peer_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        peer_addr.sin_port = htons(s->radio_port_base + dst_node);
+        peer_addr.sin_port = htons((uint16_t)peer_port);
         peer_addr_ptr = &peer_addr;
     }
 
@@ -797,7 +870,7 @@ static void cyw43439_realize(SSIPeripheral *dev, Error **errp)
 {
     CYW43439WifiState *s = CYW43439_WIFI(dev);
     struct sockaddr_in local_addr = { 0 };
-    uint16_t local_port;
+    uint32_t local_port;
 
     if ((s->radio_local_port == 0) != (s->radio_peer_port == 0)) {
         error_setg(errp,
@@ -821,6 +894,13 @@ static void cyw43439_realize(SSIPeripheral *dev, Error **errp)
                    s->node_id, s->node_count);
         return;
     }
+    if (s->radio_port_base != 0 &&
+        s->radio_port_base > UINT16_MAX - s->node_count) {
+        error_setg(errp,
+                   "cyw43439: radio-port-base %u exceeds mesh port range for node-count %u",
+                   s->radio_port_base, s->node_count);
+        return;
+    }
     if (s->radio_local_port == 0 && s->radio_port_base == 0) {
         return;
     }
@@ -835,11 +915,18 @@ static void cyw43439_realize(SSIPeripheral *dev, Error **errp)
         return;
     }
 
-    socket_set_fast_reuse(s->radio_fd);
+    /*
+     * Mesh mode treats radio-port-base + node-id as the local node binding.
+     * Keep that bind exclusive so another localhost sender cannot claim a
+     * source node by choosing the same UDP source port.
+     */
+    if (!cyw43439_radio_mesh_enabled(s)) {
+        socket_set_fast_reuse(s->radio_fd);
+    }
 
     local_addr.sin_family = AF_INET;
     local_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    local_addr.sin_port = htons(local_port);
+    local_addr.sin_port = htons((uint16_t)local_port);
     if (bind(s->radio_fd, (struct sockaddr *)&local_addr,
              sizeof(local_addr)) < 0) {
         error_setg_errno(errp, errno,

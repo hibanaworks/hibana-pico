@@ -23,10 +23,11 @@ use hibana_pico::{
     choreography::protocol::{
         EngineLabelUniverse, EngineReq, EngineRet, FdWrite, FdWriteDone, LABEL_MEM_BORROW_READ,
         LABEL_MEM_RELEASE, LABEL_MGMT_IMAGE_ACTIVATE, LABEL_MGMT_IMAGE_BEGIN,
-        LABEL_MGMT_IMAGE_CHUNK, LABEL_MGMT_IMAGE_END, LABEL_MGMT_IMAGE_STATUS, LABEL_WASI_FD_WRITE,
+        LABEL_MGMT_IMAGE_CHUNK, LABEL_MGMT_IMAGE_END, LABEL_MGMT_IMAGE_STATUS,
+        LABEL_NET_DATAGRAM_SEND, LABEL_NET_STREAM_WRITE, LABEL_WASI_FD_WRITE,
         LABEL_WASI_FD_WRITE_RET, MemBorrow, MemReadGrantControl, MemRelease, MemRights,
         MgmtImageActivate, MgmtImageBegin, MgmtImageChunk, MgmtImageEnd, MgmtStatus,
-        MgmtStatusCode,
+        MgmtStatusCode, NetworkDatagramSendRouteControl, NetworkStreamWriteRouteControl,
     },
     choreography::swarm::{
         coordinator_program_6, coordinator_program_for, role1_program_6, role1_program_for,
@@ -39,8 +40,9 @@ use hibana_pico::{
     },
     kernel::mgmt::{ActivationBoundary, ImageSlotTable, MgmtControl},
     kernel::network::{
-        DatagramAck, DatagramAckMsg, DatagramSend, DatagramSendMsg, NET_STREAM_FLAG_FIN, StreamAck,
-        StreamAckMsg, StreamWrite, StreamWriteMsg,
+        DatagramAck, DatagramAckMsg, DatagramSend, DatagramSendMsg, NET_STREAM_FLAG_FIN,
+        NetworkObjectReadRoute, NetworkObjectTable, NetworkObjectWriteRoute, NetworkRights,
+        NetworkRoute, StreamAck, StreamAckMsg, StreamWrite, StreamWriteMsg,
     },
     kernel::policy::{
         NodeImageUpdated, NodeImageUpdatedMsg, NodeRole, RoleMask, SwarmTelemetry,
@@ -147,7 +149,9 @@ const SENSOR: NodeId = NodeId::new(2);
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const SESSION_GENERATION: u16 = 1;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-const SECURITY: SwarmSecurity = SwarmSecurity::Secure(SwarmCredential::new(0x4849_4241));
+const SWARM_CREDENTIAL: SwarmCredential = SwarmCredential::new(0x4849_4241);
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const SECURITY: SwarmSecurity = SwarmSecurity::Secure(SWARM_CREDENTIAL);
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const RESULT_SUCCESS: u32 = 0x4849_4f4b;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -194,10 +198,6 @@ const WASI_STDOUT_PTR: u32 = 1024;
 const WASI_START_VALUE: u32 = 0x5741_5349;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const REMOTE_ACTUATOR_FD: u8 = 21;
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-const NETWORK_DATAGRAM_FD: u8 = 30;
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-const NETWORK_STREAM_FD: u8 = 31;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const QEMU_MGMT_IMAGE_SLOT: u8 = 0;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -564,6 +564,28 @@ fn local_hibana_role(local_node: NodeId, node_count: u8) -> u8 {
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
+fn expect_qemu_rx_meta(
+    local_role: u8,
+    local_node: NodeId,
+    source_node: NodeId,
+    lane: u8,
+    stage: &str,
+) {
+    let Some(meta) = cyw43439::qemu_take_last_rx_meta(local_role) else {
+        fail_closed(stage);
+    };
+    if !meta.matches(source_node, local_node, lane) {
+        uart_hex_line("[rx] actual src 0x", meta.src_node().raw() as u32);
+        uart_hex_line("[rx] expected src 0x", source_node.raw() as u32);
+        uart_hex_line("[rx] actual dst 0x", meta.dst_node().raw() as u32);
+        uart_hex_line("[rx] expected dst 0x", local_node.raw() as u32);
+        uart_hex_line("[rx] actual lane 0x", meta.lane() as u32);
+        uart_hex_line("[rx] expected lane 0x", lane as u32);
+        fail_closed(stage);
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
 fn install_runtime_session(role: u8, local_node: NodeId, node_count: u8) {
     let runtime = shared_runtime_ptr();
     unsafe {
@@ -869,11 +891,54 @@ async fn core0_network_object(
     gateway_node: NodeId,
     aggregate: u32,
 ) {
+    let mut network_objects: NetworkObjectTable<2> = NetworkObjectTable::new();
+    let datagram_fd = network_objects
+        .apply_cap_grant_datagram(
+            COORDINATOR,
+            SWARM_CREDENTIAL,
+            SESSION_GENERATION,
+            gateway_node,
+            22,
+            LABEL_NET_DATAGRAM_SEND,
+            NetworkRights::Send,
+        )
+        .unwrap_or_else(|_| fail_closed("[core0] grant datagram network object"));
+    let stream_fd = network_objects
+        .apply_cap_grant_stream(
+            COORDINATOR,
+            SWARM_CREDENTIAL,
+            SESSION_GENERATION,
+            gateway_node,
+            23,
+            LABEL_NET_STREAM_WRITE,
+            NetworkRights::Send,
+        )
+        .unwrap_or_else(|_| fail_closed("[core0] grant stream network object"));
+
+    let datagram_fd = match network_objects.route_fd_write_routed(
+        datagram_fd.fd(),
+        datagram_fd.generation(),
+        datagram_fd.route_key(),
+    ) {
+        NetworkObjectWriteRoute::Datagram(fd) => fd,
+        NetworkObjectWriteRoute::Stream(_) => fail_closed("[core0] datagram selected stream route"),
+        NetworkObjectWriteRoute::Rejected(_) => fail_closed("[core0] datagram route rejected"),
+    };
+    match endpoint
+        .flow::<NetworkDatagramSendRouteControl>()
+        .expect("core0 flow<datagram route control>")
+        .send(())
+        .await
+    {
+        Ok(_) => {}
+        Err(_) => fail_closed("[core0] select datagram route"),
+    }
     let datagram_payload = b"qemu datagram fd";
     let datagram = DatagramSend::new(
-        NETWORK_DATAGRAM_FD,
-        SESSION_GENERATION,
-        gateway_node.raw() as u8,
+        datagram_fd.fd(),
+        datagram_fd.generation(),
+        datagram_fd.route(),
+        network_objects.allocate_operation_id(),
         datagram_payload,
     )
     .unwrap_or_else(|_| fail_closed("[core0] make datagram fd send"));
@@ -890,19 +955,51 @@ async fn core0_network_object(
         Ok(ack) => ack,
         Err(_) => fail_closed("[core0] recv datagram ack"),
     };
-    if !datagram_ack.accepted() {
-        fail_closed("[core0] datagram ack rejected");
+    expect_qemu_rx_meta(
+        0,
+        COORDINATOR,
+        gateway_node,
+        22,
+        "[core0] datagram ack source",
+    );
+    if !network_objects.datagram_ack_accepted_for_route(
+        datagram_fd,
+        datagram_ack,
+        datagram.operation_id(),
+    ) {
+        fail_closed("[core0] datagram ack mismatch");
     }
     uart_hex_line(
         "[core0] network datagram fd ack node 0x",
         gateway_node.raw() as u32,
     );
 
+    let stream_fd = match network_objects.route_fd_write_routed(
+        stream_fd.fd(),
+        stream_fd.generation(),
+        stream_fd.route_key(),
+    ) {
+        NetworkObjectWriteRoute::Stream(fd) => fd,
+        NetworkObjectWriteRoute::Datagram(_) => {
+            fail_closed("[core0] stream selected datagram route")
+        }
+        NetworkObjectWriteRoute::Rejected(_) => fail_closed("[core0] stream route rejected"),
+    };
+    match endpoint
+        .flow::<NetworkStreamWriteRouteControl>()
+        .expect("core0 flow<stream route control>")
+        .send(())
+        .await
+    {
+        Ok(_) => {}
+        Err(_) => fail_closed("[core0] select stream route"),
+    }
     let sequence = (aggregate as u16).wrapping_add(gateway_node.raw());
     let stream = StreamWrite::new(
-        NETWORK_STREAM_FD,
-        SESSION_GENERATION,
-        gateway_node.raw() as u8,
+        stream_fd.fd(),
+        stream_fd.generation(),
+        stream_fd.route(),
+        network_objects.allocate_operation_id(),
         sequence,
         NET_STREAM_FLAG_FIN,
         b"qemu stream fd",
@@ -921,7 +1018,19 @@ async fn core0_network_object(
         Ok(ack) => ack,
         Err(_) => fail_closed("[core0] recv stream ack"),
     };
-    if stream_ack.sequence() != sequence || !stream_ack.accepted() {
+    expect_qemu_rx_meta(
+        0,
+        COORDINATOR,
+        gateway_node,
+        23,
+        "[core0] stream ack source",
+    );
+    if !network_objects.stream_ack_accepted_for_route(
+        stream_fd,
+        stream_ack,
+        stream.operation_id(),
+        sequence,
+    ) {
         fail_closed("[core0] stream ack mismatch");
     }
     uart_hex_line(
@@ -1336,18 +1445,67 @@ async fn core1_network_object<const ROLE: u8>(
     endpoint: &mut Endpoint<'static, ROLE>,
     local_node: NodeId,
 ) {
-    let datagram = match endpoint.recv::<DatagramSendMsg>().await {
+    let mut network_objects: NetworkObjectTable<2> = NetworkObjectTable::new();
+    network_objects
+        .apply_cap_grant_datagram(
+            local_node,
+            SWARM_CREDENTIAL,
+            SESSION_GENERATION,
+            COORDINATOR,
+            22,
+            LABEL_NET_DATAGRAM_SEND,
+            NetworkRights::Receive,
+        )
+        .unwrap_or_else(|_| fail_closed("[core1] grant datagram network object"));
+    network_objects
+        .apply_cap_grant_stream(
+            local_node,
+            SWARM_CREDENTIAL,
+            SESSION_GENERATION,
+            COORDINATOR,
+            23,
+            LABEL_NET_STREAM_WRITE,
+            NetworkRights::Receive,
+        )
+        .unwrap_or_else(|_| fail_closed("[core1] grant stream network object"));
+
+    let datagram_branch = match endpoint.offer().await {
+        Ok(branch) => branch,
+        Err(_) => fail_closed("[core1] offer datagram route"),
+    };
+    let datagram = match datagram_branch.decode::<DatagramSendMsg>().await {
         Ok(datagram) => datagram,
         Err(_) => fail_closed("[core1] recv datagram fd"),
     };
-    if datagram.fd() != NETWORK_DATAGRAM_FD
-        || datagram.generation() != SESSION_GENERATION
-        || datagram.route() != local_node.raw() as u8
+    let datagram_route = match network_objects.route_receive_routed(NetworkRoute::new(
+        COORDINATOR,
+        22,
+        LABEL_NET_DATAGRAM_SEND,
+        SESSION_GENERATION,
+    )) {
+        NetworkObjectReadRoute::Datagram(fd) => fd,
+        NetworkObjectReadRoute::Stream(_) => fail_closed("[core1] datagram selected stream route"),
+        NetworkObjectReadRoute::Rejected(_) => fail_closed("[core1] datagram route rejected"),
+    };
+    expect_qemu_rx_meta(
+        ROLE,
+        local_node,
+        datagram_route.target_node(),
+        datagram_route.lane(),
+        "[core1] datagram source",
+    );
+    if datagram.generation() == 0
+        || datagram.route() != datagram_route.route()
         || datagram.payload() != b"qemu datagram fd"
     {
         fail_closed("[core1] datagram fd mismatch");
     }
-    let ack = DatagramAck::new(NETWORK_DATAGRAM_FD, SESSION_GENERATION, true);
+    let ack = DatagramAck::new(
+        datagram.fd(),
+        datagram.generation(),
+        datagram.operation_id(),
+        true,
+    );
     match endpoint
         .flow::<DatagramAckMsg>()
         .expect("core1 flow<datagram ack>")
@@ -1363,17 +1521,36 @@ async fn core1_network_object<const ROLE: u8>(
         Ok(stream) => stream,
         Err(_) => fail_closed("[core1] recv stream fd"),
     };
-    if stream.fd() != NETWORK_STREAM_FD
-        || stream.generation() != SESSION_GENERATION
-        || stream.route() != local_node.raw() as u8
+    let stream_route = match network_objects.route_receive_routed(NetworkRoute::new(
+        COORDINATOR,
+        23,
+        LABEL_NET_STREAM_WRITE,
+        SESSION_GENERATION,
+    )) {
+        NetworkObjectReadRoute::Stream(fd) => fd,
+        NetworkObjectReadRoute::Datagram(_) => {
+            fail_closed("[core1] stream selected datagram route")
+        }
+        NetworkObjectReadRoute::Rejected(_) => fail_closed("[core1] stream route rejected"),
+    };
+    expect_qemu_rx_meta(
+        ROLE,
+        local_node,
+        stream_route.target_node(),
+        stream_route.lane(),
+        "[core1] stream source",
+    );
+    if stream.generation() == 0
+        || stream.route() != stream_route.route()
         || !stream.is_fin()
         || stream.payload() != b"qemu stream fd"
     {
         fail_closed("[core1] stream fd mismatch");
     }
     let ack = StreamAck::new(
-        NETWORK_STREAM_FD,
-        SESSION_GENERATION,
+        stream.fd(),
+        stream.generation(),
+        stream.operation_id(),
         stream.sequence(),
         true,
     );
@@ -1395,10 +1572,9 @@ async fn core1_remote_management<const ROLE: u8>(
     local_node: NodeId,
 ) {
     let mut images: ImageSlotTable<2, 64> = ImageSlotTable::new();
-    let credential = SwarmCredential::new(0x4849_4241);
     let grant = MgmtControl::install_grant(
         local_node,
-        credential,
+        SWARM_CREDENTIAL,
         SESSION_GENERATION,
         QEMU_MGMT_IMAGE_SLOT,
         QEMU_MGMT_IMAGE_GENERATION,
@@ -1412,7 +1588,13 @@ async fn core1_remote_management<const ROLE: u8>(
         Err(_) => fail_closed("[core1] recv mgmt image begin"),
     };
     let status = images
-        .begin_with_control(grant, local_node, credential, SESSION_GENERATION, begin)
+        .begin_with_control(
+            grant,
+            local_node,
+            SWARM_CREDENTIAL,
+            SESSION_GENERATION,
+            begin,
+        )
         .unwrap_or_else(|error| error.status(begin.slot()));
     core1_send_mgmt_status(endpoint, status, "[core1] send mgmt begin status").await;
 
@@ -1424,7 +1606,13 @@ async fn core1_remote_management<const ROLE: u8>(
         Err(_) => fail_closed("[core1] recv mgmt image chunk"),
     };
     let status = images
-        .chunk_with_control(grant, local_node, credential, SESSION_GENERATION, chunk)
+        .chunk_with_control(
+            grant,
+            local_node,
+            SWARM_CREDENTIAL,
+            SESSION_GENERATION,
+            chunk,
+        )
         .unwrap_or_else(|error| error.status(chunk.slot()));
     core1_send_mgmt_status(endpoint, status, "[core1] send mgmt chunk status").await;
 
@@ -1436,7 +1624,7 @@ async fn core1_remote_management<const ROLE: u8>(
         Err(_) => fail_closed("[core1] recv mgmt image end"),
     };
     let status = images
-        .end_with_control(grant, local_node, credential, SESSION_GENERATION, end)
+        .end_with_control(grant, local_node, SWARM_CREDENTIAL, SESSION_GENERATION, end)
         .unwrap_or_else(|error| error.status(end.slot()));
     core1_send_mgmt_status(endpoint, status, "[core1] send mgmt end status").await;
 
@@ -1451,7 +1639,7 @@ async fn core1_remote_management<const ROLE: u8>(
         .activate_with_control(
             grant,
             local_node,
-            credential,
+            SWARM_CREDENTIAL,
             SESSION_GENERATION,
             activate,
             ActivationBoundary::new(false, true, true, QEMU_MGMT_FENCE_EPOCH),
@@ -1473,7 +1661,7 @@ async fn core1_remote_management<const ROLE: u8>(
         .activate_with_control(
             grant,
             local_node,
-            credential,
+            SWARM_CREDENTIAL,
             SESSION_GENERATION,
             activate,
             ActivationBoundary::new(true, true, true, QEMU_MGMT_FENCE_EPOCH),
