@@ -962,10 +962,10 @@ async fn core0_network_object(
         22,
         "[core0] datagram ack source",
     );
-    if !datagram_ack.accepted_for_route(
+    if !network_objects.datagram_ack_accepted_for_route(
         datagram_fd,
+        datagram_ack,
         datagram.operation_id(),
-        datagram_fd.route_key(),
     ) {
         fail_closed("[core0] datagram ack mismatch");
     }
@@ -1025,11 +1025,11 @@ async fn core0_network_object(
         23,
         "[core0] stream ack source",
     );
-    if !stream_ack.accepted_for_route(
+    if !network_objects.stream_ack_accepted_for_route(
         stream_fd,
+        stream_ack,
         stream.operation_id(),
         sequence,
-        stream_fd.route_key(),
     ) {
         fail_closed("[core0] stream ack mismatch");
     }

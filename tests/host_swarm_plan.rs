@@ -3570,10 +3570,10 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         datagram.operation_id(),
         true,
     );
-    assert!(datagram_ack.accepted_for_route(
+    assert!(fds.datagram_ack_accepted_for_route(
         resolved_datagram,
+        datagram_ack,
         datagram.operation_id(),
-        resolved_datagram.route_key()
     ));
     assert!(
         !DatagramAck::new(
@@ -3711,11 +3711,11 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         stream.sequence(),
         true,
     );
-    assert!(stream_ack.accepted_for_route(
+    assert!(fds.stream_ack_accepted_for_route(
         resolved_stream,
+        stream_ack,
         stream.operation_id(),
         stream.sequence(),
-        resolved_stream.route_key()
     ));
     assert!(
         !StreamAck::new(
