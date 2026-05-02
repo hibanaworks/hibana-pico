@@ -2074,6 +2074,44 @@ mod tests {
     }
 
     #[test]
+    fn route_receive_routed_rejects_revoked_and_send_only_objects() {
+        let mut fds: NetworkObjectTable<3> = NetworkObjectTable::new();
+        let receive = fds
+            .apply_cap_grant_datagram(
+                GATEWAY,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                COORDINATOR,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                NetworkRights::Receive,
+            )
+            .expect("install receive route");
+        let send_only = fds
+            .apply_cap_grant_stream(
+                GATEWAY,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                COORDINATOR,
+                23,
+                LABEL_NET_STREAM_WRITE,
+                NetworkRights::Send,
+            )
+            .expect("install send-only stream route");
+
+        assert_eq!(
+            fds.route_receive_routed(send_only.route_key()),
+            NetworkObjectReadRoute::Rejected(NetworkError::PermissionDenied)
+        );
+
+        fds.revoke_fd(receive.fd()).expect("revoke receive route");
+        assert_eq!(
+            fds.route_receive_routed(receive.route_key()),
+            NetworkObjectReadRoute::Rejected(NetworkError::Revoked)
+        );
+    }
+
+    #[test]
     fn network_object_table_revoke_and_quiesce_fail_closed() {
         let mut fds: NetworkObjectTable<4> = NetworkObjectTable::new();
         let datagram = fds

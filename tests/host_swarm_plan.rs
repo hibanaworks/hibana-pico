@@ -4958,9 +4958,14 @@ fn datagram_fd_protocol_is_bounded_and_wired_through_hibana_messages() {
             .enter(rv1, SessionId::new(202), &network_program, NoBinding)
             .expect("attach network");
 
-        let outbound =
-            DatagramSend::new(fd.fd(), fd.generation(), fd.route(), 0x4447_524d, b"hello")
-                .expect("datagram send");
+        let outbound = DatagramSend::new(
+            fd.fd(),
+            fd.generation(),
+            fd.route(),
+            fds.allocate_operation_id(),
+            b"hello",
+        )
+        .expect("datagram send");
         let resolved = fds
             .resolve(
                 outbound.fd(),
@@ -5264,7 +5269,7 @@ fn wasi_fd_selects_network_datagram_route_without_p2_or_bridge() {
             resolved_write.fd(),
             resolved_write.generation(),
             resolved_write.route(),
-            0x5744_474d,
+            fds.allocate_operation_id(),
             received_write.as_bytes(),
         )
         .expect("datagram send request");
@@ -5650,7 +5655,7 @@ fn wasi_fd_selects_network_stream_route_without_p2_or_bridge() {
             resolved_write.fd(),
             resolved_write.generation(),
             resolved_write.route(),
-            0x5753_5452,
+            fds.allocate_operation_id(),
             0,
             NET_STREAM_FLAG_FIN,
             received_write.as_bytes(),
