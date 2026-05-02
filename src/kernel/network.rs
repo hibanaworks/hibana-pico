@@ -269,6 +269,14 @@ impl NetworkObject {
     }
 }
 
+const fn network_route_matches_object(object: NetworkObject, route: NetworkRoute) -> bool {
+    object.target_node().raw() == route.target_node().raw()
+        && object.lane() == route.lane()
+        && object.route() == route.route()
+        && object.session_generation() == route.session_generation()
+        && object.policy_slot() == route.policy_slot()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NetworkGrant {
     node_id: NodeId,
@@ -498,6 +506,7 @@ impl NetworkControl {
 pub struct NetworkObjectTable<const N: usize> {
     slots: [Option<NetworkObject>; N],
     next_generation: u16,
+    next_operation_id: Cell<u32>,
     rejection_telemetry: Cell<NetworkObjectRejectionTelemetry>,
 }
 
@@ -520,8 +529,23 @@ impl<const N: usize> NetworkObjectTable<N> {
         Self {
             slots: [None; N],
             next_generation: 1,
+            next_operation_id: Cell::new(1),
             rejection_telemetry: Cell::new(NetworkObjectRejectionTelemetry::new()),
         }
+    }
+
+    pub fn allocate_operation_id(&self) -> u32 {
+        let operation_id = match self.next_operation_id.get() {
+            0 => 1,
+            operation_id => operation_id,
+        };
+        let mut next = operation_id.wrapping_add(1);
+        if next == 0 {
+            next = 1;
+        }
+        self.next_operation_id.set(next);
+
+        operation_id
     }
 
     pub fn rejection_telemetry(&self) -> NetworkObjectRejectionTelemetry {
@@ -1140,6 +1164,17 @@ impl DatagramAck {
             && self.generation == generation
             && self.operation_id == operation_id
     }
+
+    pub const fn accepted_for_route(
+        &self,
+        object: NetworkObject,
+        operation_id: u32,
+        observed_route: NetworkRoute,
+    ) -> bool {
+        object.protocol().code() == NetworkRoleProtocol::Datagram.code()
+            && network_route_matches_object(object, observed_route)
+            && self.accepted_for(object.fd(), object.generation(), operation_id)
+    }
 }
 
 impl WireEncode for DatagramAck {
@@ -1522,6 +1557,18 @@ impl StreamAck {
             && self.operation_id == operation_id
             && self.sequence == sequence
     }
+
+    pub const fn accepted_for_route(
+        &self,
+        object: NetworkObject,
+        operation_id: u32,
+        sequence: u16,
+        observed_route: NetworkRoute,
+    ) -> bool {
+        object.protocol().code() == NetworkRoleProtocol::Stream.code()
+            && network_route_matches_object(object, observed_route)
+            && self.accepted_for(object.fd(), object.generation(), operation_id, sequence)
+    }
 }
 
 impl WireEncode for StreamAck {
@@ -1804,7 +1851,7 @@ mod tests {
     }
 
     #[test]
-    fn network_acks_are_bound_to_materialized_fd_generation_and_sequence() {
+    fn network_acks_are_bound_to_materialized_fd_generation_route_and_sequence() {
         let datagram =
             DatagramSend::new(3, 11, 114, 0x0102_0304, b"datagram").expect("datagram send");
         assert_eq!(datagram.operation_id(), 0x0102_0304);
@@ -1850,6 +1897,112 @@ mod tests {
                 stream.sequence()
             )
         );
+    }
+
+    #[test]
+    fn network_acks_are_bound_to_observed_route_metadata() {
+        let mut fds: NetworkObjectTable<2> = NetworkObjectTable::new();
+        let datagram = fds
+            .apply_cap_grant_datagram(
+                COORDINATOR,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                GATEWAY,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                NetworkRights::Send,
+            )
+            .expect("install datagram route");
+        let stream = fds
+            .apply_cap_grant_stream(
+                COORDINATOR,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                GATEWAY,
+                23,
+                LABEL_NET_STREAM_WRITE,
+                NetworkRights::Send,
+            )
+            .expect("install stream route");
+        let datagram_operation = fds.allocate_operation_id();
+        let stream_operation = fds.allocate_operation_id();
+        let datagram_ack = DatagramAck::new(
+            datagram.fd(),
+            datagram.generation(),
+            datagram_operation,
+            true,
+        );
+        let stream_ack =
+            StreamAck::new(stream.fd(), stream.generation(), stream_operation, 9, true);
+
+        assert!(datagram_ack.accepted_for_route(
+            datagram,
+            datagram_operation,
+            datagram.route_key()
+        ));
+        assert!(!datagram_ack.accepted_for_route(
+            datagram,
+            datagram_operation,
+            NetworkRoute::new(GATEWAY, 23, LABEL_NET_DATAGRAM_SEND, SESSION_GENERATION)
+        ));
+        assert!(!datagram_ack.accepted_for_route(
+            datagram,
+            datagram_operation,
+            NetworkRoute::new(GATEWAY, 22, LABEL_NET_STREAM_WRITE, SESSION_GENERATION)
+        ));
+        assert!(!datagram_ack.accepted_for_route(stream, datagram_operation, datagram.route_key()));
+
+        assert!(stream_ack.accepted_for_route(stream, stream_operation, 9, stream.route_key()));
+        assert!(!stream_ack.accepted_for_route(
+            stream,
+            stream_operation,
+            9,
+            NetworkRoute::new(GATEWAY, 22, LABEL_NET_STREAM_WRITE, SESSION_GENERATION)
+        ));
+        assert!(!stream_ack.accepted_for_route(stream, stream_operation, 10, stream.route_key()));
+        assert!(!stream_ack.accepted_for_route(datagram, stream_operation, 9, stream.route_key()));
+    }
+
+    #[test]
+    fn network_operation_ids_are_table_allocated_and_not_reused() {
+        let mut fds: NetworkObjectTable<2> = NetworkObjectTable::new();
+        let datagram = fds
+            .apply_cap_grant_datagram(
+                COORDINATOR,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                GATEWAY,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                NetworkRights::Send,
+            )
+            .expect("install datagram route");
+        let _stream = fds
+            .apply_cap_grant_stream(
+                COORDINATOR,
+                SWARM_CREDENTIAL,
+                SESSION_GENERATION,
+                GATEWAY,
+                23,
+                LABEL_NET_STREAM_WRITE,
+                NetworkRights::Send,
+            )
+            .expect("install stream route");
+
+        fds.next_operation_id.set(
+            ((datagram.fd() as u32) << 24)
+                ^ ((datagram.generation() as u32) << 8)
+                ^ datagram.route() as u32,
+        );
+        let first = fds.allocate_operation_id();
+        let second = fds.allocate_operation_id();
+        let third = fds.allocate_operation_id();
+
+        assert_ne!(first, 0);
+        assert_ne!(second, 0);
+        assert_ne!(third, 0);
+        assert_ne!(first, second);
+        assert_ne!(second, third);
     }
 
     #[test]

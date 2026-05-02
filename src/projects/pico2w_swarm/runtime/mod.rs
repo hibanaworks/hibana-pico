@@ -205,10 +205,6 @@ const QEMU_MGMT_IMAGE_GENERATION: u32 = 7;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const QEMU_MGMT_FENCE_EPOCH: u32 = 2;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-const QEMU_NET_DATAGRAM_OPERATION_ID: u32 = 0x5144_474d;
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-const QEMU_NET_STREAM_OPERATION_ID: u32 = 0x5153_5452;
-#[cfg(all(target_arch = "arm", target_os = "none"))]
 const QEMU_MGMT_IMAGE: &[u8] = b"\0asm\x01\0\0\0wasi_snapshot_preview1";
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -942,7 +938,7 @@ async fn core0_network_object(
         datagram_fd.fd(),
         datagram_fd.generation(),
         datagram_fd.route(),
-        QEMU_NET_DATAGRAM_OPERATION_ID,
+        network_objects.allocate_operation_id(),
         datagram_payload,
     )
     .unwrap_or_else(|_| fail_closed("[core0] make datagram fd send"));
@@ -966,10 +962,10 @@ async fn core0_network_object(
         22,
         "[core0] datagram ack source",
     );
-    if !datagram_ack.accepted_for(
-        datagram_fd.fd(),
-        datagram_fd.generation(),
+    if !datagram_ack.accepted_for_route(
+        datagram_fd,
         datagram.operation_id(),
+        datagram_fd.route_key(),
     ) {
         fail_closed("[core0] datagram ack mismatch");
     }
@@ -1003,7 +999,7 @@ async fn core0_network_object(
         stream_fd.fd(),
         stream_fd.generation(),
         stream_fd.route(),
-        QEMU_NET_STREAM_OPERATION_ID,
+        network_objects.allocate_operation_id(),
         sequence,
         NET_STREAM_FLAG_FIN,
         b"qemu stream fd",
@@ -1029,11 +1025,11 @@ async fn core0_network_object(
         23,
         "[core0] stream ack source",
     );
-    if !stream_ack.accepted_for(
-        stream_fd.fd(),
-        stream_fd.generation(),
+    if !stream_ack.accepted_for_route(
+        stream_fd,
         stream.operation_id(),
         sequence,
+        stream_fd.route_key(),
     ) {
         fail_closed("[core0] stream ack mismatch");
     }

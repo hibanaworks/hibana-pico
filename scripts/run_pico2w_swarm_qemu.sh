@@ -147,23 +147,48 @@ port_base = int(sys.argv[1])
 qemu_log = sys.argv[2]
 timeout = float(sys.argv[3])
 dst_node = 4
-rejection = "mesh source address is not loopback peer"
-packet = bytes([
-    dst_node, 6,
-    0, 0,
-    0, 1,
-    0, dst_node,
-])
+expected = (
+    "mesh source address is not loopback peer",
+    "mesh frame node mismatch",
+    "mesh packet dst",
+)
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind(("127.0.0.2", port_base + 1))
+alias_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    alias_sock.bind(("127.0.0.2", port_base + 1))
+except OSError as error:
+    print(f"cannot bind 127.0.0.2:{port_base + 1} for QEMU spoof probe: {error}", file=sys.stderr)
+    sys.exit(1)
+
+spoof_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    spoof_sock.bind(("127.0.0.1", port_base + 1))
+except OSError as error:
+    print(f"cannot bind 127.0.0.1:{port_base + 1} before coordinator start: {error}", file=sys.stderr)
+    sys.exit(1)
+
+def packet(packet_dst, frame_src, frame_dst):
+    return bytes([
+        packet_dst, 6,
+        0, 0,
+        frame_src >> 8, frame_src & 0xff,
+        frame_dst >> 8, frame_dst & 0xff,
+    ])
+
+probes = (
+    (alias_sock, packet(dst_node, 1, dst_node)),
+    (spoof_sock, packet(dst_node, 2, dst_node)),
+    (spoof_sock, packet(dst_node + 1, 1, dst_node + 1)),
+)
 deadline = time.monotonic() + timeout
 while time.monotonic() < deadline:
-    sock.sendto(packet, ("127.0.0.1", port_base + dst_node))
+    for sock, payload in probes:
+        sock.sendto(payload, ("127.0.0.1", port_base + dst_node))
     time.sleep(0.05)
     try:
         with open(qemu_log, "r", encoding="utf-8") as log:
-            if rejection in log.read():
+            content = log.read()
+            if all(rejection in content for rejection in expected):
                 sys.exit(0)
     except FileNotFoundError:
         pass
@@ -319,7 +344,15 @@ if [[ "$NODE_COUNT" == 6 ]]; then
   fi
   if [[ "$MESH_SPOOF_PROBE" == 1 ]]; then
     if ! grep -q "mesh source address is not loopback peer" "$LOG_DIR/sensor-4.log.qemu"; then
-      echo "missing sensor-4 QEMU mesh spoof rejection line" >&2
+      echo "missing sensor-4 QEMU mesh alias-source rejection line" >&2
+      exit 1
+    fi
+    if ! grep -q "mesh frame node mismatch" "$LOG_DIR/sensor-4.log.qemu"; then
+      echo "missing sensor-4 QEMU mesh frame-source rejection line" >&2
+      exit 1
+    fi
+    if ! grep -q "mesh packet dst" "$LOG_DIR/sensor-4.log.qemu"; then
+      echo "missing sensor-4 QEMU mesh packet-destination rejection line" >&2
       exit 1
     fi
   fi

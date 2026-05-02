@@ -3515,12 +3515,11 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         .send(()))
     .await
     .expect("coordinator selects qemu datagram route");
-    let datagram_operation = 0x4454_474d;
     let datagram = DatagramSend::new(
         resolved_datagram.fd(),
         resolved_datagram.generation(),
         resolved_datagram.route(),
-        datagram_operation,
+        fds.allocate_operation_id(),
         b"qemu datagram fd",
     )
     .expect("qemu datagram send");
@@ -3571,10 +3570,10 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         datagram.operation_id(),
         true,
     );
-    assert!(datagram_ack.accepted_for(
-        resolved_datagram.fd(),
-        resolved_datagram.generation(),
-        datagram.operation_id()
+    assert!(datagram_ack.accepted_for_route(
+        resolved_datagram,
+        datagram.operation_id(),
+        resolved_datagram.route_key()
     ));
     assert!(
         !DatagramAck::new(
@@ -3660,12 +3659,11 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         .send(()))
     .await
     .expect("coordinator selects qemu stream route");
-    let stream_operation = 0x5354_524d;
     let stream = StreamWrite::new(
         resolved_stream.fd(),
         resolved_stream.generation(),
         resolved_stream.route(),
-        stream_operation,
+        fds.allocate_operation_id(),
         0,
         NET_STREAM_FLAG_FIN,
         b"qemu stream fd",
@@ -3713,11 +3711,11 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         stream.sequence(),
         true,
     );
-    assert!(stream_ack.accepted_for(
-        resolved_stream.fd(),
-        resolved_stream.generation(),
+    assert!(stream_ack.accepted_for_route(
+        resolved_stream,
         stream.operation_id(),
-        stream.sequence()
+        stream.sequence(),
+        resolved_stream.route_key()
     ));
     assert!(
         !StreamAck::new(
