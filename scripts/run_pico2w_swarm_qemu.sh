@@ -96,6 +96,7 @@ RUN_TIMEOUT="${HIBANA_PICO_QEMU_TIMEOUT:-10s}"
 PORT_BASE="${HIBANA_PICO_PORT_BASE:-39000}"
 SENSOR_BOOT_WAIT="${HIBANA_PICO_SENSOR_BOOT_WAIT:-0.5}"
 MESH_SPOOF_PROBE="${HIBANA_PICO_QEMU_MESH_SPOOF_PROBE:-1}"
+MESH_SPOOF_PROBE_TIMEOUT="${HIBANA_PICO_QEMU_MESH_SPOOF_PROBE_TIMEOUT:-5}"
 LOG_DIR="${HIBANA_PICO_LOG_DIR:-$(mktemp -d /tmp/hibana-pico2w-swarm.XXXXXX)}"
 mkdir -p "$LOG_DIR"
 
@@ -137,13 +138,16 @@ inject_mesh_spoof_probe() {
     exit 1
   fi
 
-  if ! python3 - "$PORT_BASE" <<'PY'
+  if ! python3 - "$PORT_BASE" "$LOG_DIR/sensor-4.log.qemu" "$MESH_SPOOF_PROBE_TIMEOUT" <<'PY'
 import socket
 import sys
 import time
 
 port_base = int(sys.argv[1])
+qemu_log = sys.argv[2]
+timeout = float(sys.argv[3])
 dst_node = 4
+rejection = "mesh source address is not loopback peer"
 packet = bytes([
     dst_node, 6,
     0, 0,
@@ -153,9 +157,18 @@ packet = bytes([
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind(("127.0.0.2", port_base + 1))
-for _ in range(8):
+deadline = time.monotonic() + timeout
+while time.monotonic() < deadline:
     sock.sendto(packet, ("127.0.0.1", port_base + dst_node))
     time.sleep(0.05)
+    try:
+        with open(qemu_log, "r", encoding="utf-8") as log:
+            if rejection in log.read():
+                sys.exit(0)
+    except FileNotFoundError:
+        pass
+
+sys.exit(1)
 PY
   then
     echo "failed to inject QEMU mesh spoof probe" >&2
