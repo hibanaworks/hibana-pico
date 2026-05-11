@@ -1173,6 +1173,8 @@ Important profiles:
 
 profile-rp2040-pico-min:
   RP2040 non-wireless minimal WASI P1 device profile
+profile-rp2040-pico-control-min:
+  RP2040 non-wireless control/fail-safe proof profile without Wasm engine capacity
 profile-rp2040-picow-swarm-min:
   RP2040 + CYW43439 minimum wireless swarm profile
 profile-rp2350-pico2w-swarm-min:
@@ -1378,6 +1380,6 @@ No hidden fallback.
 No heap-required Pico path.
 No runtime protocol intelligence outside hibana.
 No same-session recovery.
-No fail_closed from localside.
+No localside escape hatch.
 
 Only choreography on real Pico-class hardware.

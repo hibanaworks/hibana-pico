@@ -161,14 +161,11 @@ pub static WASIP1_LED_GUEST: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/target/wasip1-apps/wasm32-wasip1/release/wasip1-led-choreofs-wrong-object.wasm"
 ));
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-#[cfg(feature = "baker-abort-safe-demo")]
-pub static WASIP1_LED_GUEST: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/target/wasip1-apps/wasm32-wasip1/release/wasip1-led-blink.wasm"
-));
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
+#[cfg(all(
+    target_arch = "arm",
+    target_os = "none",
+    not(feature = "baker-abort-safe-demo")
+))]
 pub fn write_selected_guest_in_place<'slot>(
     slot: &'slot mut core::mem::MaybeUninit<crate::kernel::engine::wasm::Guest<'static>>,
 ) -> Result<

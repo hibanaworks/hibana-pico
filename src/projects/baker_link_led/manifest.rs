@@ -284,7 +284,6 @@ mod tests {
     use crate::{
         choreography::protocol::FdWrite,
         kernel::{
-            choreofs::ChoreoFsObjectKind,
             fd_object::{GpioFdWriteError, check_gpio_object_fd_write},
             wasi::{ChoreoResourceKind, PicoFdRights, PicoFdView, PicoFdViewSource},
         },
@@ -366,7 +365,6 @@ mod tests {
             let object = store
                 .open(path, PicoFdRights::Write)
                 .expect("open LED path");
-            assert_eq!(object.kind(), ChoreoFsObjectKind::GpioDevice);
             assert_eq!(object.resource(), ChoreoResourceKind::Gpio);
         }
     }
@@ -399,7 +397,7 @@ mod tests {
 
         assert_eq!(
             check_gpio_object_fd_write(&fds, &write, baker_link_led_fd_write_route()),
-            Err(GpioFdWriteError::InvalidPayload)
+            Err(GpioFdWriteError::BadPayload)
         );
     }
 

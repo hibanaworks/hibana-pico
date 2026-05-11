@@ -36,6 +36,10 @@ impl Default for BakerTrafficLoopResolver {
     }
 }
 
+pub fn baker_traffic_loop_policy(ctx: ResolverContext) -> Result<LoopResolution, ResolverError> {
+    BakerTrafficLoopResolver::new().resolve_policy(ctx)
+}
+
 /// Resolver for the Baker Engine-owned Abort | Normal boundary.
 ///
 /// The active demo/test selects the abort arm after Engine observes a guest

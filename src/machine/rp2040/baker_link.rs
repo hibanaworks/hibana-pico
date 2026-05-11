@@ -34,7 +34,7 @@ mod tests {
 
     #[test]
     fn baker_board_safe_state_turns_all_user_leds_inactive() {
-        let levels = BakerLinkBoard::safe_gpio_levels();
+        let levels = BakerLinkBoard::GPIO_LEVELS;
         assert_eq!(levels.len(), BAKER_LINK_USER_LED_PINS.len());
         assert_eq!(levels, &BAKER_LINK_SAFE_GPIO_LEVELS);
         for (level, pin) in levels.iter().zip(BAKER_LINK_USER_LED_PINS) {

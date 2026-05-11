@@ -82,7 +82,12 @@ cargo build \
   --target thumbv6m-none-eabi \
   --release \
   --bin hibana-pico-baker-led-demo \
-  --features "profile-rp2040-pico-min embed-wasip1-artifacts baker-abort-safe-demo"
+  --features "profile-rp2040-pico-control-min baker-abort-safe-demo"
+cargo build \
+  --target thumbv6m-none-eabi \
+  --release \
+  --bin hibana-pico-baker-led-demo \
+  --features "profile-rp2040-pico-control-min baker-recoverable-abort-demo"
 cargo build \
   --target thumbv8m.main-none-eabi \
   --release \

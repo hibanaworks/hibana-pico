@@ -6,7 +6,11 @@
 
 mod vm;
 
-#[cfg(all(target_arch = "arm", target_os = "none"))]
+#[cfg(all(
+    target_arch = "arm",
+    target_os = "none",
+    feature = "wasm-engine-static-placement"
+))]
 use core::mem::MaybeUninit;
 
 use crate::{
@@ -32,7 +36,11 @@ impl<'a> Guest<'a> {
         })
     }
 
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
+    #[cfg(all(
+        target_arch = "arm",
+        target_os = "none",
+        feature = "wasm-engine-static-placement"
+    ))]
     pub(crate) fn place_in_static_slot<'slot>(
         slot: &'slot mut MaybeUninit<Self>,
         module: &'a [u8],

@@ -19,6 +19,7 @@ profile-rp2040-pico-min = [
     "machine-gpio",
     "machine-uart",
     "wasm-engine-core",
+    "wasm-engine-static-placement",
     "wasip1-sys-fd-write",
     "wasip1-sys-poll-oneoff",
     "wasip1-sys-proc-exit",
@@ -27,6 +28,17 @@ profile-rp2040-pico-min = [
     "kernel-memory-lease",
     "kernel-fd-view",
     "kernel-interrupt-resolver",
+    "kernel-budget",
+]
+profile-rp2040-pico-control-min = [
+    "platform-rp2040",
+    "machine-sio",
+    "machine-gpio",
+    "machine-uart",
+    "wasip1-ctrl-common",
+    "wasip1-ledger-pico-min",
+    "kernel-memory-lease",
+    "kernel-fd-view",
     "kernel-budget",
 ]
 profile-rp2040-picow-swarm-min = [
@@ -38,6 +50,7 @@ profile-rp2040-picow-swarm-min = [
     "machine-cyw43439",
     "machine-cyw43439-real-gspi",
     "wasm-engine-core",
+    "wasm-engine-static-placement",
     "wasip1-sys-fd-write",
     "wasip1-sys-clock-time-get",
     "wasip1-sys-poll-oneoff",
@@ -57,6 +70,7 @@ profile-rp2350-pico2w-swarm-min = [
     "machine-cyw43439",
     "machine-cyw43439-real-gspi",
     "wasm-engine-core",
+    "wasm-engine-static-placement",
     "wasip1-sys-fd-write",
     "wasip1-sys-clock-time-get",
     "wasip1-sys-poll-oneoff",
@@ -113,6 +127,7 @@ machine-cyw43439-real-gspi = ["machine-cyw43439"]
 wasm-engine-none = []
 wasm-engine-tiny = []
 wasm-engine-core = ["wasm-engine-tiny"]
+wasm-engine-static-placement = ["wasm-engine-core"]
 wasm-engine-wasip1-std-profile = ["wasm-engine-core"]
 wasm-engine-wasip1-full = ["wasm-engine-wasip1-std-profile"]
 
@@ -254,6 +269,7 @@ baker-choreofs-wrong-object-demo = [
 baker-invalid-fd-demo = []
 baker-bad-payload-demo = []
 baker-abort-safe-demo = []
+baker-recoverable-abort-demo = ["baker-abort-safe-demo"]
 
 [[bin]]
 name = "hibana-pico-rp2040-sio-smoke"

@@ -65,9 +65,11 @@ macro_rules! abort_safe_terminal_program {
     }};
 }
 
-macro_rules! abort_safe_linear_program {
-    () => {
-        seq_chain!(
+macro_rules! recoverable_abort_program {
+    () => {{
+        let abort_arm = seq_chain!(
+            g::send::<Role<1>, Role<1>, EngineAbortRouteControl, 1>()
+                .policy::<POLICY_BAKER_ENGINE_ABORT_ROUTE>(),
             g::send::<Role<1>, Role<0>, EngineAbortMsg, 1>(),
             g::send::<Role<1>, Role<0>, EngineAbortBeginControl, 1>(),
             g::send::<Role<0>, Role<1>, EngineAbortFenceControl, 1>(),
@@ -75,19 +77,19 @@ macro_rules! abort_safe_linear_program {
             local_gpio_set_cycle!(),
             local_gpio_set_cycle!(),
             g::send::<Role<0>, Role<1>, EngineAbortAckControl, 1>(),
-        )
-    };
-}
-
-macro_rules! recoverable_abort_program {
-    () => {
-        seq_chain!(
             g::send::<Role<0>, Role<1>, BudgetRunMsg, 1>(),
-            abort_safe_linear_program!(),
+            g::send::<Role<1>, Role<0>, Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 1>()
+        );
+        let normal_arm = seq_chain!(
+            g::send::<Role<1>, Role<1>, EngineNormalRouteControl, 1>()
+                .policy::<POLICY_BAKER_ENGINE_ABORT_ROUTE>(),
+            g::send::<Role<1>, Role<0>, Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 1>()
+        );
+        g::seq(
             g::send::<Role<0>, Role<1>, BudgetRunMsg, 1>(),
-            g::send::<Role<1>, Role<0>, Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 1>(),
+            g::route(abort_arm, normal_arm),
         )
-    };
+    }};
 }
 
 macro_rules! traffic_light_program {
@@ -170,9 +172,6 @@ pub const CHOREOFS_BAD_PATH_TIMER_PROGRAM: RoleProgram<3> = project(&choreofs_ba
 pub const ABORT_SAFE_KERNEL_PROGRAM: RoleProgram<0> = project(&abort_safe_terminal_program!());
 pub const ABORT_SAFE_ENGINE_PROGRAM: RoleProgram<1> = project(&abort_safe_terminal_program!());
 pub const ABORT_SAFE_GPIO_PROGRAM: RoleProgram<2> = project(&abort_safe_terminal_program!());
-pub const ABORT_SAFE_LINEAR_KERNEL_PROGRAM: RoleProgram<0> = project(&abort_safe_linear_program!());
-pub const ABORT_SAFE_LINEAR_ENGINE_PROGRAM: RoleProgram<1> = project(&abort_safe_linear_program!());
-pub const ABORT_SAFE_LINEAR_GPIO_PROGRAM: RoleProgram<2> = project(&abort_safe_linear_program!());
 pub const RECOVERABLE_ABORT_KERNEL_PROGRAM: RoleProgram<0> = project(&recoverable_abort_program!());
 pub const RECOVERABLE_ABORT_ENGINE_PROGRAM: RoleProgram<1> = project(&recoverable_abort_program!());
 pub const RECOVERABLE_ABORT_GPIO_PROGRAM: RoleProgram<2> = project(&recoverable_abort_program!());
@@ -250,17 +249,6 @@ pub fn abort_safe_terminal_roles() -> (RoleProgram<0>, RoleProgram<1>, RoleProgr
         ABORT_SAFE_KERNEL_PROGRAM,
         ABORT_SAFE_ENGINE_PROGRAM,
         ABORT_SAFE_GPIO_PROGRAM,
-    )
-}
-
-/// Baker Link abort terminal fragment without the preceding Abort | Normal
-/// route. Hardware uses this after the Engine-owned abort route has been
-/// selected by construction; host tests keep the full route proof above.
-pub fn abort_safe_linear_roles() -> (RoleProgram<0>, RoleProgram<1>, RoleProgram<2>) {
-    (
-        ABORT_SAFE_LINEAR_KERNEL_PROGRAM,
-        ABORT_SAFE_LINEAR_ENGINE_PROGRAM,
-        ABORT_SAFE_LINEAR_GPIO_PROGRAM,
     )
 }
 

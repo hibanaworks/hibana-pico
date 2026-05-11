@@ -4310,12 +4310,14 @@ fn six_process_swarm_choreography_connects_coordinator_and_five_sensors() {
 #[test]
 #[cfg(feature = "profile-host-qemu-swarm")]
 fn production_qemu_swarm_routes_network_objects_over_swarm_transport() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         // This host proof exercises the production swarm choreography path. The
         // patched CYW43439 UDP overlay is covered by scripts/run_pico2w_swarm_qemu.sh.
         let module = Wasip1StdoutModule::parse(WASIP1_STDOUT_GUEST).expect("parse stdout guest");
-        let chunk = module.demo_stdout_chunk().expect("stdout chunk");
-        assert_eq!(chunk.as_bytes(), WASIP1_STDOUT_DEMO_TEXT);
+        let chunk = module
+            .stdout_chunk_for(TEST_STDOUT_TEXT)
+            .expect("stdout chunk");
+        assert_eq!(chunk.as_bytes(), TEST_STDOUT_TEXT);
 
         let medium: HostSwarmMedium<192> = HostSwarmMedium::new();
         let node2 = NodeId::new(2);

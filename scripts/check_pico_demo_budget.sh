@@ -24,7 +24,8 @@ BUDGET_ENTRIES=(
   "baker-choreofs-bad-path|hibana-pico-baker-led-demo|profile-rp2040-pico-min embed-wasip1-artifacts baker-choreofs-bad-path-demo|baker"
   "baker-choreofs-bad-payload|hibana-pico-baker-led-demo|profile-rp2040-pico-min embed-wasip1-artifacts baker-choreofs-bad-payload-demo|baker"
   "baker-choreofs-wrong-object|hibana-pico-baker-led-demo|profile-rp2040-pico-min embed-wasip1-artifacts baker-choreofs-wrong-object-demo|baker"
-  "baker-fail-safe|hibana-pico-baker-led-demo|profile-rp2040-pico-min embed-wasip1-artifacts baker-abort-safe-demo|baker"
+  "baker-fail-safe|hibana-pico-baker-led-demo|profile-rp2040-pico-control-min baker-abort-safe-demo|baker"
+  "baker-recoverable-fail-safe|hibana-pico-baker-led-demo|profile-rp2040-pico-control-min baker-recoverable-abort-demo|baker"
 )
 
 RUSTUP=(rustup run "$TOOLCHAIN")

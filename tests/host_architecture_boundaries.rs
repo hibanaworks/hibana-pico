@@ -210,7 +210,8 @@ fn baker_project_layer_owns_baker_fd_materialization_not_machine_manifest() {
     let machine = include_str!("../src/machine/rp2040/baker_link.rs");
     let project_manifest = include_str!("../src/projects/baker_link_led/manifest.rs");
     let project_ledger = include_str!("../src/projects/baker_link_led/ledger.rs");
-    let project_runtime = include_str!("../src/projects/baker_link_led/runtime.rs");
+    let project_engine_session = include_str!("../src/projects/baker_link_led/engine_session.rs");
+    let project_kernel_session = include_str!("../src/projects/baker_link_led/kernel_session.rs");
     let labels = include_str!("../src/choreography/protocol/labels.rs");
     let engine_facade = include_str!("../src/kernel/engine/wasm/mod.rs");
     let engine_vm = include_str!("../src/kernel/engine/wasm/vm.rs");
@@ -268,9 +269,14 @@ fn baker_project_layer_owns_baker_fd_materialization_not_machine_manifest() {
         ],
     );
     assert_present(
-        "src/projects/baker_link_led/runtime.rs",
-        project_runtime,
+        "src/projects/baker_link_led/kernel_session.rs",
+        project_kernel_session,
         &["ChoreoFsOpenAdmitRouteMsg", "mint_baker_link_choreofs_fd"],
+    );
+    assert_present(
+        "src/projects/baker_link_led/engine_session.rs",
+        project_engine_session,
+        &["ChoreoFsOpenAdmitRouteMsg", "PathOpen"],
     );
     assert_absent(
         "src/choreography/protocol/labels.rs",

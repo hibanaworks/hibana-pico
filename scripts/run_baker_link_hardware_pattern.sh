@@ -54,11 +54,15 @@ case "$pattern" in
     expected_stage="4849004d"
     ;;
   fail-safe|abort-safe)
-    features="$features baker-abort-safe-demo"
+    features="profile-rp2040-pico-control-min baker-abort-safe-demo"
     expected_result="48494653"
     ;;
+  recoverable-fail-safe|recoverable-abort-safe|recoverable)
+    features="profile-rp2040-pico-control-min baker-recoverable-abort-demo"
+    expected_result="48495243"
+    ;;
   *)
-    echo "usage: $0 {traffic|chaser|ordinary-std|choreofs|bad-order|invalid-fd|bad-payload|choreofs-bad-path|choreofs-bad-payload|choreofs-wrong-object|fail-safe|abort-safe}" >&2
+    echo "usage: $0 {traffic|chaser|ordinary-std|choreofs|bad-order|invalid-fd|bad-payload|choreofs-bad-path|choreofs-bad-payload|choreofs-wrong-object|fail-safe|abort-safe|recoverable-fail-safe}" >&2
     exit 2
     ;;
 esac

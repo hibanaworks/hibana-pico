@@ -1576,7 +1576,8 @@ impl<'a> Module<'a> {
     #[cfg(all(
         target_arch = "arm",
         target_os = "none",
-        not(feature = "wasm-engine-wasip1-full")
+        not(feature = "wasm-engine-wasip1-full"),
+        feature = "wasm-engine-static-placement"
     ))]
     fn instantiate_into<'slot>(
         self,
@@ -2062,7 +2063,8 @@ fn core_wasm_memory_zeroed() -> Result<LinearMemory, WasmError> {
 #[cfg(all(
     target_arch = "arm",
     target_os = "none",
-    not(feature = "wasm-engine-wasip1-full")
+    not(feature = "wasm-engine-wasip1-full"),
+    feature = "wasm-engine-static-placement"
 ))]
 unsafe fn write_core_wasm_memory_zeroed(dst: *mut LinearMemory) {
     unsafe {
@@ -2087,7 +2089,8 @@ fn core_wasm_frames_empty<'a>() -> Result<Frames<'a>, WasmError> {
 #[cfg(all(
     target_arch = "arm",
     target_os = "none",
-    not(feature = "wasm-engine-wasip1-full")
+    not(feature = "wasm-engine-wasip1-full"),
+    feature = "wasm-engine-static-placement"
 ))]
 unsafe fn write_core_wasm_frames_empty<'a>(dst: *mut Frames<'a>) {
     let frames = dst.cast::<Frame<'a>>();
@@ -4125,7 +4128,8 @@ impl<'a> Vm<'a> {
     #[cfg(all(
         target_arch = "arm",
         target_os = "none",
-        not(feature = "wasm-engine-wasip1-full")
+        not(feature = "wasm-engine-wasip1-full"),
+        feature = "wasm-engine-static-placement"
     ))]
     pub(super) fn initialize<'slot>(
         slot: &'slot mut core::mem::MaybeUninit<Self>,

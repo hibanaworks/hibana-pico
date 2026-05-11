@@ -41,8 +41,8 @@ use hibana_pico::{
     projects::baker_link_led::{
         choreography::{
             BakerTrafficLoopContinueControl, POLICY_BAKER_ENGINE_ABORT_ROUTE,
-            POLICY_BAKER_TRAFFIC_LOOP, abort_safe_linear_roles, abort_safe_terminal_roles,
-            fd_write_two_cycles_roles, recoverable_abort_roles, traffic_light_roles,
+            POLICY_BAKER_TRAFFIC_LOOP, abort_safe_terminal_roles, fd_write_two_cycles_roles,
+            recoverable_abort_roles, traffic_light_roles,
         },
         ledger::baker_link_pico_min_ledger,
         manifest::{
@@ -1771,102 +1771,6 @@ fn baker_link_abort_terminal_fences_ledger_and_uses_gpio_choreography_for_safe_s
 }
 
 #[test]
-fn baker_link_abort_linear_fragment_attaches_and_runs_safe_state() {
-    run_current_task(async {
-        let backend = HostQueueBackend::new();
-        let clock = CounterClock::new();
-        let mut tap = [TapEvent::zero(); 128];
-        let mut slab = vec![0u8; 262_144];
-        let cluster = TestKit::new(&clock);
-        let rv = cluster
-            .add_rendezvous_from_config(
-                Config::new(&mut tap, slab.as_mut_slice()).with_universe(EngineLabelUniverse),
-                SioTransport::new(&backend),
-            )
-            .expect("register abort linear rendezvous");
-        let (kernel_program, engine_program, gpio_program) = abort_safe_linear_roles();
-        let sid = SessionId::new(172);
-        let mut kernel: Endpoint<'_, 0> = cluster
-            .enter(rv, sid, &kernel_program, NoBinding)
-            .expect("attach abort linear kernel endpoint");
-        let mut engine: Endpoint<'_, 1> = cluster
-            .enter(rv, sid, &engine_program, NoBinding)
-            .expect("attach abort linear engine endpoint");
-        let mut gpio: Endpoint<'_, 2> = cluster
-            .enter(rv, sid, &gpio_program, NoBinding)
-            .expect("attach abort linear gpio endpoint");
-
-        let abort = EngineAbort::new(EngineAbortReason::GuestTrap, 1);
-        (engine
-            .flow::<EngineAbortMsg>()
-            .expect("engine flow<linear abort reason>")
-            .send(&abort))
-        .await
-        .expect("engine sends linear abort reason");
-        assert_eq!(
-            (kernel.recv::<EngineAbortMsg>())
-                .await
-                .expect("kernel receives linear abort reason"),
-            abort
-        );
-        (engine
-            .flow::<EngineAbortBeginControl>()
-            .expect("engine flow<linear abort begin>")
-            .send(()))
-        .await
-        .expect("engine sends linear abort begin");
-        (kernel.recv::<EngineAbortBeginControl>())
-            .await
-            .expect("kernel receives linear abort begin");
-        (kernel
-            .flow::<EngineAbortFenceControl>()
-            .expect("kernel flow<linear abort fence>")
-            .send(()))
-        .await
-        .expect("kernel sends linear abort fence");
-        (engine.recv::<EngineAbortFenceControl>())
-            .await
-            .expect("engine receives linear abort fence");
-
-        for safe in BAKER_LINK_SAFE_GPIO_LEVELS {
-            let set = GpioSet::new(safe.pin(), safe.high());
-            (kernel
-                .flow::<Msg<LABEL_GPIO_SET, GpioSet>>()
-                .expect("kernel flow<linear safe gpio>")
-                .send(&set))
-            .await
-            .expect("kernel sends linear safe gpio");
-            let received = (gpio.recv::<Msg<LABEL_GPIO_SET, GpioSet>>())
-                .await
-                .expect("gpio receives linear safe gpio");
-            assert_eq!(received, set);
-            (gpio
-                .flow::<Msg<LABEL_GPIO_SET_DONE, GpioSet>>()
-                .expect("gpio flow<linear safe done>")
-                .send(&received))
-            .await
-            .expect("gpio sends linear safe done");
-            assert_eq!(
-                (kernel.recv::<Msg<LABEL_GPIO_SET_DONE, GpioSet>>())
-                    .await
-                    .expect("kernel receives linear safe done"),
-                received
-            );
-        }
-
-        (kernel
-            .flow::<EngineAbortAckControl>()
-            .expect("kernel flow<linear abort ack>")
-            .send(()))
-        .await
-        .expect("kernel sends linear abort ack");
-        (engine.recv::<EngineAbortAckControl>())
-            .await
-            .expect("engine receives linear abort ack");
-    });
-}
-
-#[test]
 fn baker_link_recoverable_fail_safe_starts_fresh_activation_after_abort() {
     run_current_task(async {
         let backend = HostQueueBackend::new();
@@ -1892,7 +1796,7 @@ fn baker_link_recoverable_fail_safe_starts_fresh_activation_after_abort() {
             .enter(rv, sid, &gpio_program, NoBinding)
             .expect("attach recoverable abort gpio endpoint");
 
-        let first_run = BudgetRun::new(1, 1, 250_000, 0);
+        let first_run = BudgetRun::new(0, 1, 250_000, 0);
         (kernel
             .flow::<BudgetRunMsg>()
             .expect("kernel flow<first budget>")
@@ -1914,6 +1818,13 @@ fn baker_link_recoverable_fail_safe_starts_fresh_activation_after_abort() {
             .begin_poll_oneoff(PollOneoff::new(50))
             .expect("create pre-abort pending syscall");
 
+        (engine
+            .flow::<EngineAbortRouteControl>()
+            .expect("engine flow<recoverable abort route>")
+            .send(()))
+        .await
+        .expect("engine selects recoverable abort route");
+
         let abort = EngineAbort::new(EngineAbortReason::GuestTrap, 1);
         (engine
             .flow::<EngineAbortMsg>()
@@ -1921,10 +1832,18 @@ fn baker_link_recoverable_fail_safe_starts_fresh_activation_after_abort() {
             .send(&abort))
         .await
         .expect("engine sends recoverable abort reason");
+        let branch = (kernel.offer())
+            .await
+            .expect("kernel offers recoverable abort reason");
         assert_eq!(
-            (kernel.recv::<EngineAbortMsg>())
+            branch.label(),
+            hibana_pico::choreography::protocol::LABEL_ENGINE_ABORT_REASON
+        );
+        assert_eq!(
+            branch
+                .decode::<EngineAbortMsg>()
                 .await
-                .expect("kernel receives recoverable abort reason"),
+                .expect("kernel decodes recoverable abort reason"),
             abort
         );
         (engine
@@ -1962,7 +1881,7 @@ fn baker_link_recoverable_fail_safe_starts_fresh_activation_after_abort() {
             .await
             .expect("engine receives recoverable abort fence");
 
-        for safe in BAKER_LINK_SAFE_GPIO_LEVELS {
+        for (idx, safe) in BAKER_LINK_SAFE_GPIO_LEVELS.iter().enumerate() {
             let set = GpioSet::new(safe.pin(), safe.high());
             (kernel
                 .flow::<Msg<LABEL_GPIO_SET, GpioSet>>()
@@ -1970,9 +1889,7 @@ fn baker_link_recoverable_fail_safe_starts_fresh_activation_after_abort() {
                 .send(&set))
             .await
             .expect("kernel sends recoverable safe gpio");
-            let received = (gpio.recv::<Msg<LABEL_GPIO_SET, GpioSet>>())
-                .await
-                .expect("gpio receives recoverable safe gpio");
+            let received = gpio_decode_set(&mut gpio, if idx == 0 { 1 } else { 0 }).await;
             assert_eq!(received, set);
             (gpio
                 .flow::<Msg<LABEL_GPIO_SET_DONE, GpioSet>>()
@@ -2005,7 +1922,7 @@ fn baker_link_recoverable_fail_safe_starts_fresh_activation_after_abort() {
             "same activation must not continue after AbortAck"
         );
 
-        let fresh_run = BudgetRun::new(2, 2, 250_000, 100);
+        let fresh_run = BudgetRun::new(1, 2, 250_000, 100);
         (kernel
             .flow::<BudgetRunMsg>()
             .expect("kernel flow<fresh budget>")

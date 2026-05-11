@@ -13,6 +13,7 @@ use crate::{
     },
     kernel::policy::PolicySlotTable,
     kernel::swarm::{NodeId, SwarmCredential},
+    kernel::transaction::ObjectTransaction,
 };
 
 pub const NET_DATAGRAM_PAYLOAD_CAPACITY: usize = 48;
@@ -605,6 +606,23 @@ impl<const N: usize> NetworkObjectTable<N> {
             }
             NetworkControl::CapRevoke { fd } => self.revoke_fd_entry(fd),
         }
+    }
+
+    pub fn apply_control_in_tx(
+        &mut self,
+        control: NetworkControl,
+        node_id: NodeId,
+        credential: SwarmCredential,
+        session_generation: u16,
+        tx: ObjectTransaction,
+    ) -> Result<NetworkObject, NetworkError> {
+        if tx.generation() != session_generation {
+            return Err(self.record_rejection(NetworkError::BadSessionGeneration));
+        }
+        if !tx.is_commit() {
+            return Err(self.record_rejection(NetworkError::PolicyDenied));
+        }
+        self.apply_control(control, node_id, credential, session_generation)
     }
 
     pub fn apply_cap_grant_datagram(

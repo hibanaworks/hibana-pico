@@ -443,11 +443,23 @@ fn plan_wasi_engine_facade_keeps_placement_and_vm_internals_private() {
 fn baker_project_uses_common_choreography_fragments_without_warning_suppression() {
     let baker = include_str!("../src/projects/baker_link_led/choreography.rs");
     let runtime = include_str!("../src/projects/baker_link_led/runtime.rs");
+    let device_session = include_str!("../src/projects/baker_link_led/device_session.rs");
+    let kernel_session = include_str!("../src/projects/baker_link_led/kernel_session.rs");
+    let engine_session = include_str!("../src/projects/baker_link_led/engine_session.rs");
+    let storage = include_str!("../src/projects/baker_link_led/storage.rs");
     let stages = include_str!("../src/projects/baker_link_led/stages.rs");
     let guest = include_str!("../src/projects/baker_link_led/guest.rs");
     let fragments = include_str!("../src/choreography/protocol/fragments.rs");
 
-    for source in [runtime, stages, guest] {
+    for source in [
+        runtime,
+        device_session,
+        kernel_session,
+        engine_session,
+        storage,
+        stages,
+        guest,
+    ] {
         assert!(
             !source.contains("allow(dead_code") && !source.contains("allow(unused_imports"),
             "Baker proof modules must be split or cfg-gated instead of suppressing responsibility leaks"
@@ -530,6 +542,18 @@ fn plan_pico_keeps_abort_out_of_loop_control_shape() {
         (
             "src/projects/baker_link_led/runtime.rs",
             include_str!("../src/projects/baker_link_led/runtime.rs"),
+        ),
+        (
+            "src/projects/baker_link_led/device_session.rs",
+            include_str!("../src/projects/baker_link_led/device_session.rs"),
+        ),
+        (
+            "src/projects/baker_link_led/kernel_session.rs",
+            include_str!("../src/projects/baker_link_led/kernel_session.rs"),
+        ),
+        (
+            "src/projects/baker_link_led/engine_session.rs",
+            include_str!("../src/projects/baker_link_led/engine_session.rs"),
         ),
     ];
 

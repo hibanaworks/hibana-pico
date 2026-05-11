@@ -14,6 +14,7 @@ fn cargo_features_define_small_pico_and_full_host_profiles() {
 
     for feature in [
         "profile-rp2040-pico-min",
+        "profile-rp2040-pico-control-min",
         "profile-rp2040-picow-swarm-min",
         "profile-rp2350-pico2w-swarm-min",
         "profile-host-qemu-swarm",

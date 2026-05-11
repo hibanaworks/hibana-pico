@@ -1,8 +1,13 @@
 #[cfg(not(feature = "baker-abort-safe-demo"))]
 pub const RESULT_SUCCESS: u32 = 0x4849_4f4b;
 pub const RESULT_FAILURE: u32 = 0x4849_4641;
-#[cfg(feature = "baker-abort-safe-demo")]
+#[cfg(all(
+    feature = "baker-abort-safe-demo",
+    not(feature = "baker-recoverable-abort-demo")
+))]
 pub const RESULT_ABORT_SAFE_OK: u32 = 0x4849_4653;
+#[cfg(feature = "baker-recoverable-abort-demo")]
+pub const RESULT_RECOVERABLE_ABORT_OK: u32 = 0x4849_5243;
 #[cfg(any(
     feature = "baker-bad-order-demo",
     feature = "baker-invalid-fd-demo",
@@ -112,7 +117,6 @@ pub const STAGE_KERNEL_ABORT_FENCE_SENT: u32 = 0x4849_0135;
 pub const STAGE_KERNEL_ABORT_SAFE_GPIO_BEGIN: u32 = 0x4849_0136;
 #[cfg(not(feature = "baker-abort-safe-demo"))]
 pub const STAGE_ENGINE_RESUME_ERR_TRAP: u32 = 0x4849_0108;
-#[cfg(not(feature = "baker-abort-safe-demo"))]
 pub const STAGE_GPIO_SET_LABEL_ERR: u32 = 0x4849_0121;
 pub const STAGE_GPIO_SET_DECODE_ERR: u32 = 0x4849_0122;
 pub const STAGE_GPIO_SET_DONE_SEND_ERR: u32 = 0x4849_0123;
@@ -148,6 +152,12 @@ pub const STAGE_KERNEL_TRAFFIC_MEM_MISMATCH: u32 = 0x4849_0132;
 pub const STAGE_ENGINE_ABORT_ACK_RECV: u32 = 0x4849_0133;
 #[cfg(feature = "baker-abort-safe-demo")]
 pub const STAGE_KERNEL_ABORT_SAFE_GPIO_DONE: u32 = 0x4849_0134;
+#[cfg(feature = "baker-recoverable-abort-demo")]
+pub const STAGE_KERNEL_ABORT_REENTER_RUN_SENT: u32 = 0x4849_0137;
+#[cfg(feature = "baker-recoverable-abort-demo")]
+pub const STAGE_ENGINE_ABORT_REENTER_RUN_RECV: u32 = 0x4849_0138;
+#[cfg(feature = "baker-recoverable-abort-demo")]
+pub const STAGE_KERNEL_ABORT_REENTER_PROC_EXIT: u32 = 0x4849_0139;
 pub const STAGE_HARD_PANIC: u32 = 0x4849_0f00;
 pub const STAGE_CORE1_LAUNCH_ERR: u32 = 0x4849_0f01;
 pub const STAGE_CORE1_START_TIMEOUT: u32 = 0x4849_0f02;
