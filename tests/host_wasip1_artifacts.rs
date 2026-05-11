@@ -36,8 +36,8 @@ use hibana_pico::{
     kernel::policy::{NodeRole, RoleMask, SwarmTelemetry, SwarmTelemetryMsg},
     kernel::remote::{
         RemoteActuateAck, RemoteActuateReqMsg, RemoteActuateRequest, RemoteActuateRetMsg,
-        RemoteObjectTable, RemoteRights, RemoteSample, RemoteSampleReqMsg, RemoteSampleRequest,
-        RemoteSampleRetMsg,
+        RemoteObjectTable, RemoteRights, RemoteRoute, RemoteSample, RemoteSampleReqMsg,
+        RemoteSampleRequest, RemoteSampleRetMsg,
     },
     kernel::swarm::{
         HostSwarmMedium, HostSwarmRoleTransport, NodeId, SwarmCredential, SwarmSecurity,
@@ -1683,11 +1683,13 @@ fn rust_built_wasip1_artifact_installs_as_hotswap_image_and_requires_fence() {
             .apply_cap_grant_management(
                 SENSOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                SENSOR,
-                NodeRole::Sensor.bit() as u8,
-                1,
-                LABEL_MGMT_IMAGE_BEGIN,
+                RemoteRoute::new(
+                    SENSOR,
+                    NodeRole::Sensor.bit() as u8,
+                    1,
+                    LABEL_MGMT_IMAGE_BEGIN,
+                    SESSION_GENERATION,
+                ),
                 RemoteRights::Write,
             )
             .expect("install authenticated remote management cap");

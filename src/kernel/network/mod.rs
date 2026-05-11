@@ -292,39 +292,34 @@ pub struct NetworkGrant {
 }
 
 impl NetworkGrant {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         node_id: NodeId,
         credential: SwarmCredential,
-        target_node: NodeId,
-        lane: u8,
-        route: u8,
-        session_generation: u16,
-        policy_slot: u8,
+        route: NetworkRoute,
         rights: NetworkRights,
         protocol: NetworkRoleProtocol,
     ) -> Self {
         Self {
             node_id,
-            target_node,
-            lane,
-            route,
-            session_generation,
-            policy_slot,
+            target_node: route.target_node,
+            lane: route.lane,
+            route: route.route,
+            session_generation: route.session_generation,
+            policy_slot: route.policy_slot,
             rights,
             protocol,
-            tag: Self::compute_tag(
-                node_id,
-                credential,
-                target_node,
-                lane,
-                route,
-                session_generation,
-                policy_slot,
-                rights,
-                protocol,
-            ),
+            tag: Self::compute_tag(node_id, credential, route, rights, protocol),
         }
+    }
+
+    pub const fn route_key(&self) -> NetworkRoute {
+        NetworkRoute::with_policy(
+            self.target_node,
+            self.lane,
+            self.route,
+            self.session_generation,
+            self.policy_slot,
+        )
     }
 
     fn verify(
@@ -342,11 +337,7 @@ impl NetworkGrant {
         let expected = Self::compute_tag(
             self.node_id,
             credential,
-            self.target_node,
-            self.lane,
-            self.route,
-            self.session_generation,
-            self.policy_slot,
+            self.route_key(),
             self.rights,
             self.protocol,
         );
@@ -356,25 +347,20 @@ impl NetworkGrant {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn compute_tag(
         node_id: NodeId,
         credential: SwarmCredential,
-        target_node: NodeId,
-        lane: u8,
-        route: u8,
-        session_generation: u16,
-        policy_slot: u8,
+        route: NetworkRoute,
         rights: NetworkRights,
         protocol: NetworkRoleProtocol,
     ) -> u32 {
         let mut acc = credential.key() ^ 0x4e46_4443;
         acc = acc.rotate_left(5) ^ node_id.raw() as u32;
-        acc = acc.rotate_left(5) ^ target_node.raw() as u32;
-        acc = acc.rotate_left(5) ^ lane as u32;
-        acc = acc.rotate_left(5) ^ route as u32;
-        acc = acc.rotate_left(5) ^ session_generation as u32;
-        acc = acc.rotate_left(5) ^ policy_slot as u32;
+        acc = acc.rotate_left(5) ^ route.target_node.raw() as u32;
+        acc = acc.rotate_left(5) ^ route.lane as u32;
+        acc = acc.rotate_left(5) ^ route.route as u32;
+        acc = acc.rotate_left(5) ^ route.session_generation as u32;
+        acc = acc.rotate_left(5) ^ route.policy_slot as u32;
         acc = acc.rotate_left(5) ^ rights.bits() as u32;
         acc = acc.rotate_left(5) ^ protocol.code() as u32;
         acc
@@ -388,71 +374,28 @@ pub enum NetworkControl {
 }
 
 impl NetworkControl {
-    #[allow(clippy::too_many_arguments)]
     pub fn cap_grant(
         node_id: NodeId,
         credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        lane: u8,
-        route: u8,
-        policy_slot: u8,
+        route: NetworkRoute,
         rights: NetworkRights,
         protocol: NetworkRoleProtocol,
     ) -> Self {
         Self::CapGrant(NetworkGrant::new(
-            node_id,
-            credential,
-            target_node,
-            lane,
-            route,
-            session_generation,
-            policy_slot,
-            rights,
-            protocol,
+            node_id, credential, route, rights, protocol,
         ))
     }
 
     pub fn cap_grant_datagram(
         node_id: NodeId,
         credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        lane: u8,
-        route: u8,
-        rights: NetworkRights,
-    ) -> Self {
-        Self::cap_grant_datagram_with_policy(
-            node_id,
-            credential,
-            session_generation,
-            target_node,
-            lane,
-            route,
-            0,
-            rights,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn cap_grant_datagram_with_policy(
-        node_id: NodeId,
-        credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        lane: u8,
-        route: u8,
-        policy_slot: u8,
+        route: NetworkRoute,
         rights: NetworkRights,
     ) -> Self {
         Self::cap_grant(
             node_id,
             credential,
-            session_generation,
-            target_node,
-            lane,
             route,
-            policy_slot,
             rights,
             NetworkRoleProtocol::Datagram,
         )
@@ -461,43 +404,13 @@ impl NetworkControl {
     pub fn cap_grant_stream(
         node_id: NodeId,
         credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        lane: u8,
-        route: u8,
-        rights: NetworkRights,
-    ) -> Self {
-        Self::cap_grant_stream_with_policy(
-            node_id,
-            credential,
-            session_generation,
-            target_node,
-            lane,
-            route,
-            0,
-            rights,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn cap_grant_stream_with_policy(
-        node_id: NodeId,
-        credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        lane: u8,
-        route: u8,
-        policy_slot: u8,
+        route: NetworkRoute,
         rights: NetworkRights,
     ) -> Self {
         Self::cap_grant(
             node_id,
             credential,
-            session_generation,
-            target_node,
-            lane,
             route,
-            policy_slot,
             rights,
             NetworkRoleProtocol::Stream,
         )
@@ -594,15 +507,7 @@ impl<const N: usize> NetworkObjectTable<N> {
                 if let Err(error) = grant.verify(node_id, credential, session_generation) {
                     return Err(self.record_rejection(error));
                 }
-                self.materialize_cap_grant(
-                    grant.target_node,
-                    grant.lane,
-                    grant.route,
-                    grant.session_generation,
-                    grant.policy_slot,
-                    grant.rights,
-                    grant.protocol,
-                )
+                self.materialize_cap_grant(grant.route_key(), grant.rights, grant.protocol)
             }
             NetworkControl::CapRevoke { fd } => self.revoke_fd_entry(fd),
         }
@@ -629,51 +534,12 @@ impl<const N: usize> NetworkObjectTable<N> {
         &mut self,
         node_id: NodeId,
         credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        lane: u8,
-        route: u8,
+        route: NetworkRoute,
         rights: NetworkRights,
     ) -> Result<NetworkObject, NetworkError> {
+        let session_generation = route.session_generation();
         self.apply_control(
-            NetworkControl::cap_grant_datagram(
-                node_id,
-                credential,
-                session_generation,
-                target_node,
-                lane,
-                route,
-                rights,
-            ),
-            node_id,
-            credential,
-            session_generation,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn apply_cap_grant_datagram_with_policy(
-        &mut self,
-        node_id: NodeId,
-        credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        lane: u8,
-        route: u8,
-        policy_slot: u8,
-        rights: NetworkRights,
-    ) -> Result<NetworkObject, NetworkError> {
-        self.apply_control(
-            NetworkControl::cap_grant_datagram_with_policy(
-                node_id,
-                credential,
-                session_generation,
-                target_node,
-                lane,
-                route,
-                policy_slot,
-                rights,
-            ),
+            NetworkControl::cap_grant_datagram(node_id, credential, route, rights),
             node_id,
             credential,
             session_generation,
@@ -684,70 +550,24 @@ impl<const N: usize> NetworkObjectTable<N> {
         &mut self,
         node_id: NodeId,
         credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        lane: u8,
-        route: u8,
+        route: NetworkRoute,
         rights: NetworkRights,
     ) -> Result<NetworkObject, NetworkError> {
+        let session_generation = route.session_generation();
         self.apply_control(
-            NetworkControl::cap_grant_stream(
-                node_id,
-                credential,
-                session_generation,
-                target_node,
-                lane,
-                route,
-                rights,
-            ),
+            NetworkControl::cap_grant_stream(node_id, credential, route, rights),
             node_id,
             credential,
             session_generation,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn apply_cap_grant_stream_with_policy(
-        &mut self,
-        node_id: NodeId,
-        credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        lane: u8,
-        route: u8,
-        policy_slot: u8,
-        rights: NetworkRights,
-    ) -> Result<NetworkObject, NetworkError> {
-        self.apply_control(
-            NetworkControl::cap_grant_stream_with_policy(
-                node_id,
-                credential,
-                session_generation,
-                target_node,
-                lane,
-                route,
-                policy_slot,
-                rights,
-            ),
-            node_id,
-            credential,
-            session_generation,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
     fn materialize_cap_grant(
         &mut self,
-        target_node: NodeId,
-        lane: u8,
-        route: u8,
-        session_generation: u16,
-        policy_slot: u8,
+        route_key: NetworkRoute,
         rights: NetworkRights,
         protocol: NetworkRoleProtocol,
     ) -> Result<NetworkObject, NetworkError> {
-        let route_key =
-            NetworkRoute::with_policy(target_node, lane, route, session_generation, policy_slot);
         if self.has_active_route_grant(route_key, protocol) {
             return Err(self.record_rejection(NetworkError::BadRoute));
         }
@@ -759,11 +579,11 @@ impl<const N: usize> NetworkObjectTable<N> {
         let entry = NetworkObject {
             fd,
             generation,
-            target_node,
-            lane,
-            route,
-            session_generation,
-            policy_slot,
+            target_node: route_key.target_node(),
+            lane: route_key.lane(),
+            route: route_key.route(),
+            session_generation: route_key.session_generation(),
+            policy_slot: route_key.policy_slot(),
             rights,
             protocol,
             revoked: false,
@@ -1959,10 +1779,7 @@ mod tests {
             .apply_cap_grant_datagram(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                GATEWAY,
-                22,
-                LABEL_NET_DATAGRAM_SEND,
+                NetworkRoute::new(GATEWAY, 22, LABEL_NET_DATAGRAM_SEND, SESSION_GENERATION),
                 NetworkRights::Send,
             )
             .expect("install datagram route");
@@ -1970,10 +1787,7 @@ mod tests {
             .apply_cap_grant_stream(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                GATEWAY,
-                23,
-                LABEL_NET_STREAM_WRITE,
+                NetworkRoute::new(GATEWAY, 23, LABEL_NET_STREAM_WRITE, SESSION_GENERATION),
                 NetworkRights::Send,
             )
             .expect("install stream route");
@@ -2023,10 +1837,7 @@ mod tests {
             .apply_cap_grant_datagram(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                GATEWAY,
-                22,
-                LABEL_NET_DATAGRAM_SEND,
+                NetworkRoute::new(GATEWAY, 22, LABEL_NET_DATAGRAM_SEND, SESSION_GENERATION),
                 NetworkRights::Send,
             )
             .expect("install datagram send route");
@@ -2034,10 +1845,7 @@ mod tests {
             .apply_cap_grant_stream(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                GATEWAY,
-                23,
-                LABEL_NET_STREAM_WRITE,
+                NetworkRoute::new(GATEWAY, 23, LABEL_NET_STREAM_WRITE, SESSION_GENERATION),
                 NetworkRights::Send,
             )
             .expect("install stream send route");
@@ -2069,10 +1877,7 @@ mod tests {
             .apply_cap_grant_datagram(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                GATEWAY,
-                22,
-                LABEL_NET_DATAGRAM_SEND,
+                NetworkRoute::new(GATEWAY, 22, LABEL_NET_DATAGRAM_SEND, SESSION_GENERATION),
                 NetworkRights::Send,
             )
             .expect("install datagram route");
@@ -2080,10 +1885,7 @@ mod tests {
             .apply_cap_grant_stream(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                GATEWAY,
-                23,
-                LABEL_NET_STREAM_WRITE,
+                NetworkRoute::new(GATEWAY, 23, LABEL_NET_STREAM_WRITE, SESSION_GENERATION),
                 NetworkRights::Send,
             )
             .expect("install stream route");
@@ -2111,10 +1913,7 @@ mod tests {
             .apply_cap_grant_datagram(
                 GATEWAY,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                COORDINATOR,
-                21,
-                LABEL_NET_DATAGRAM_RECV,
+                NetworkRoute::new(COORDINATOR, 21, LABEL_NET_DATAGRAM_RECV, SESSION_GENERATION),
                 NetworkRights::Receive,
             )
             .expect("pre-seed table");
@@ -2122,10 +1921,7 @@ mod tests {
             .apply_cap_grant_datagram(
                 GATEWAY,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                COORDINATOR,
-                22,
-                LABEL_NET_DATAGRAM_SEND,
+                NetworkRoute::new(COORDINATOR, 22, LABEL_NET_DATAGRAM_SEND, SESSION_GENERATION),
                 NetworkRights::Receive,
             )
             .expect("install datagram receive route");
@@ -2133,10 +1929,7 @@ mod tests {
             .apply_cap_grant_stream(
                 GATEWAY,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                COORDINATOR,
-                23,
-                LABEL_NET_STREAM_WRITE,
+                NetworkRoute::new(COORDINATOR, 23, LABEL_NET_STREAM_WRITE, SESSION_GENERATION),
                 NetworkRights::Receive,
             )
             .expect("install stream receive route");
@@ -2179,10 +1972,7 @@ mod tests {
             .apply_cap_grant_datagram(
                 GATEWAY,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                COORDINATOR,
-                22,
-                LABEL_NET_DATAGRAM_SEND,
+                NetworkRoute::new(COORDINATOR, 22, LABEL_NET_DATAGRAM_SEND, SESSION_GENERATION),
                 NetworkRights::Receive,
             )
             .expect("install receive route");
@@ -2190,10 +1980,7 @@ mod tests {
             .apply_cap_grant_stream(
                 GATEWAY,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                COORDINATOR,
-                23,
-                LABEL_NET_STREAM_WRITE,
+                NetworkRoute::new(COORDINATOR, 23, LABEL_NET_STREAM_WRITE, SESSION_GENERATION),
                 NetworkRights::Send,
             )
             .expect("install send-only stream route");
@@ -2217,10 +2004,7 @@ mod tests {
             .apply_cap_grant_datagram(
                 GATEWAY,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                COORDINATOR,
-                22,
-                LABEL_NET_DATAGRAM_SEND,
+                NetworkRoute::new(COORDINATOR, 22, LABEL_NET_DATAGRAM_SEND, SESSION_GENERATION),
                 NetworkRights::Receive,
             )
             .expect("install first receive route");
@@ -2229,10 +2013,7 @@ mod tests {
             fds.apply_cap_grant_datagram(
                 GATEWAY,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                COORDINATOR,
-                22,
-                LABEL_NET_DATAGRAM_SEND,
+                NetworkRoute::new(COORDINATOR, 22, LABEL_NET_DATAGRAM_SEND, SESSION_GENERATION),
                 NetworkRights::SendReceive,
             ),
             Err(NetworkError::BadRoute)
@@ -2244,10 +2025,7 @@ mod tests {
             fds.apply_cap_grant_datagram(
                 GATEWAY,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                COORDINATOR,
-                22,
-                LABEL_NET_DATAGRAM_SEND,
+                NetworkRoute::new(COORDINATOR, 22, LABEL_NET_DATAGRAM_SEND, SESSION_GENERATION),
                 NetworkRights::Receive,
             )
             .is_ok()
@@ -2258,14 +2036,16 @@ mod tests {
     fn network_object_table_revoke_and_quiesce_reject() {
         let mut fds: NetworkObjectTable<4> = NetworkObjectTable::new();
         let datagram = fds
-            .apply_cap_grant_datagram_with_policy(
+            .apply_cap_grant_datagram(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                SENSOR,
-                22,
-                LABEL_NET_DATAGRAM_SEND,
-                3,
+                NetworkRoute::with_policy(
+                    SENSOR,
+                    22,
+                    LABEL_NET_DATAGRAM_SEND,
+                    SESSION_GENERATION,
+                    3,
+                ),
                 NetworkRights::SendReceive,
             )
             .expect("install authenticated datagram fd");
@@ -2274,10 +2054,7 @@ mod tests {
             .apply_cap_grant_stream(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                GATEWAY,
-                23,
-                LABEL_NET_STREAM_WRITE,
+                NetworkRoute::new(GATEWAY, 23, LABEL_NET_STREAM_WRITE, SESSION_GENERATION),
                 NetworkRights::SendReceive,
             )
             .expect("install authenticated stream fd");
@@ -2355,10 +2132,7 @@ mod tests {
             .apply_cap_grant_datagram(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                SENSOR,
-                22,
-                LABEL_NET_DATAGRAM_RECV,
+                NetworkRoute::new(SENSOR, 22, LABEL_NET_DATAGRAM_RECV, SESSION_GENERATION),
                 NetworkRights::Receive,
             )
             .expect("install authenticated reopened datagram fd");
@@ -2376,11 +2150,7 @@ mod tests {
         let grant = NetworkGrant::new(
             COORDINATOR,
             SWARM_CREDENTIAL,
-            SENSOR,
-            22,
-            LABEL_NET_DATAGRAM_SEND,
-            SESSION_GENERATION,
-            3,
+            NetworkRoute::with_policy(SENSOR, 22, LABEL_NET_DATAGRAM_SEND, SESSION_GENERATION, 3),
             NetworkRights::SendReceive,
             NetworkRoleProtocol::Datagram,
         );
@@ -2388,14 +2158,16 @@ mod tests {
 
         assert_eq!(
             fds.apply_control(
-                NetworkControl::cap_grant_datagram_with_policy(
+                NetworkControl::cap_grant_datagram(
                     COORDINATOR,
                     SWARM_CREDENTIAL,
-                    SESSION_GENERATION.wrapping_sub(1),
-                    SENSOR,
-                    22,
-                    LABEL_NET_DATAGRAM_SEND,
-                    3,
+                    NetworkRoute::with_policy(
+                        SENSOR,
+                        22,
+                        LABEL_NET_DATAGRAM_SEND,
+                        SESSION_GENERATION.wrapping_sub(1),
+                        3
+                    ),
                     NetworkRights::SendReceive,
                 ),
                 COORDINATOR,
@@ -2407,14 +2179,16 @@ mod tests {
 
         assert_eq!(
             fds.apply_control(
-                NetworkControl::cap_grant_datagram_with_policy(
+                NetworkControl::cap_grant_datagram(
                     COORDINATOR,
                     SwarmCredential::new(0x5752_4f4e),
-                    SESSION_GENERATION,
-                    SENSOR,
-                    22,
-                    LABEL_NET_DATAGRAM_SEND,
-                    3,
+                    NetworkRoute::with_policy(
+                        SENSOR,
+                        22,
+                        LABEL_NET_DATAGRAM_SEND,
+                        SESSION_GENERATION,
+                        3
+                    ),
                     NetworkRights::SendReceive,
                 ),
                 COORDINATOR,
@@ -2426,14 +2200,16 @@ mod tests {
 
         assert_eq!(
             fds.apply_control(
-                NetworkControl::cap_grant_datagram_with_policy(
+                NetworkControl::cap_grant_datagram(
                     GATEWAY,
                     SWARM_CREDENTIAL,
-                    SESSION_GENERATION,
-                    SENSOR,
-                    22,
-                    LABEL_NET_DATAGRAM_SEND,
-                    3,
+                    NetworkRoute::with_policy(
+                        SENSOR,
+                        22,
+                        LABEL_NET_DATAGRAM_SEND,
+                        SESSION_GENERATION,
+                        3
+                    ),
                     NetworkRights::SendReceive,
                 ),
                 COORDINATOR,

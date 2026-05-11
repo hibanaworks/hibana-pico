@@ -103,13 +103,8 @@ mod tests {
                     fd,
                     PicoFdRights::Write,
                     ChoreoResourceKind::Gpio,
-                    3,
-                    LABEL_GPIO_SET,
                     0,
-                    0,
-                    0,
-                    0,
-                    0,
+                    TEST_ROUTE,
                 )
                 .expect("grant gpio fd");
         }

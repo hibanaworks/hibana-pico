@@ -3,8 +3,11 @@ use hibana_pico::{
     kernel::{
         choreofs::{ChoreoFsError, ChoreoFsStore},
         mgmt::{ActivationBoundary, ImageSlotError, ImageSlotTable, TopologyLifecycle},
-        network::{NetworkControl, NetworkError, NetworkObjectTable, NetworkRights},
-        remote::{RemoteControl, RemoteError, RemoteObjectTable, RemoteResource, RemoteRights},
+        network::{NetworkControl, NetworkError, NetworkObjectTable, NetworkRights, NetworkRoute},
+        remote::{
+            RemoteControl, RemoteError, RemoteObjectTable, RemoteResource, RemoteRights,
+            RemoteRoute,
+        },
         state::{StateRestoreFact, StateSnapshotFact},
         swarm::{NodeId, SwarmCredential},
         transaction::{ObjectTransaction, ObjectTransactionDecision},
@@ -33,11 +36,7 @@ fn remote_and_network_cap_grants_require_tx_commit() {
     let remote_control = RemoteControl::cap_grant_remote(
         COORDINATOR,
         CREDENTIAL,
-        SESSION_GENERATION,
-        SENSOR,
-        1,
-        2,
-        3,
+        RemoteRoute::new(SENSOR, 1, 2, 3, SESSION_GENERATION),
         RemoteRights::Read,
         RemoteResource::Sensor,
     );
@@ -66,10 +65,7 @@ fn remote_and_network_cap_grants_require_tx_commit() {
     let network_control = NetworkControl::cap_grant_datagram(
         COORDINATOR,
         CREDENTIAL,
-        SESSION_GENERATION,
-        SENSOR,
-        4,
-        5,
+        NetworkRoute::new(SENSOR, 4, 5, SESSION_GENERATION),
         NetworkRights::Send,
     );
     assert_eq!(

@@ -391,60 +391,48 @@ pub struct PicoFdGrant {
 }
 
 impl PicoFdGrant {
-    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         fd: u8,
         rights: PicoFdRights,
         resource: ChoreoResourceKind,
-        lane: u8,
-        route_label: u8,
         choreo_object_id: u16,
-        target_node: u8,
-        target_role: u16,
-        session_generation: u16,
-        policy_slot: u8,
+        route: PicoFdRoute,
     ) -> Self {
         Self {
             fd,
             rights,
             resource,
-            lane,
-            route_label,
+            lane: route.lane,
+            route_label: route.route_label,
             choreo_object_id,
-            target_node,
-            target_role,
-            session_generation,
-            choreo_object_generation: session_generation,
-            policy_slot,
+            target_node: route.target_node,
+            target_role: route.target_role,
+            session_generation: route.session_generation,
+            choreo_object_generation: route.session_generation,
+            policy_slot: route.policy_slot,
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub const fn new_mint(
         fd: u8,
         rights: PicoFdRights,
         resource: ChoreoResourceKind,
-        lane: u8,
-        route_label: u8,
         choreo_object_id: u16,
-        target_node: u8,
-        target_role: u16,
-        session_generation: u16,
         choreo_object_generation: u16,
-        policy_slot: u8,
+        route: PicoFdRoute,
     ) -> Self {
         Self {
             fd,
             rights,
             resource,
-            lane,
-            route_label,
+            lane: route.lane,
+            route_label: route.route_label,
             choreo_object_id,
-            target_node,
-            target_role,
-            session_generation,
+            target_node: route.target_node,
+            target_role: route.target_role,
+            session_generation: route.session_generation,
             choreo_object_generation,
-            policy_slot,
+            policy_slot: route.policy_slot,
         }
     }
 
@@ -480,59 +468,37 @@ pub enum PicoFdControl {
 }
 
 impl PicoFdControl {
-    #[allow(clippy::too_many_arguments)]
     pub const fn cap_grant(
         fd: u8,
         rights: PicoFdRights,
         resource: ChoreoResourceKind,
-        lane: u8,
-        route_label: u8,
         choreo_object_id: u16,
-        target_node: u8,
-        target_role: u16,
-        choreo_object_generation: u16,
-        policy_slot: u8,
+        route: PicoFdRoute,
     ) -> Self {
         Self::CapGrant(PicoFdGrant::new(
             fd,
             rights,
             resource,
-            lane,
-            route_label,
             choreo_object_id,
-            target_node,
-            target_role,
-            choreo_object_generation,
-            policy_slot,
+            route,
         ))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub const fn cap_mint(
         fd: u8,
         rights: PicoFdRights,
         resource: ChoreoResourceKind,
-        lane: u8,
-        route_label: u8,
         choreo_object_id: u16,
-        target_node: u8,
-        target_role: u16,
-        session_generation: u16,
         choreo_object_generation: u16,
-        policy_slot: u8,
+        route: PicoFdRoute,
     ) -> Self {
         Self::CapMint(PicoFdGrant::new_mint(
             fd,
             rights,
             resource,
-            lane,
-            route_label,
             choreo_object_id,
-            target_node,
-            target_role,
-            session_generation,
             choreo_object_generation,
-            policy_slot,
+            route,
         ))
     }
 }
@@ -732,45 +698,24 @@ impl<const N: usize> PicoFdView<N> {
         route_label: u8,
         wait_or_subscription_id: u16,
     ) -> Result<PicoFdViewEntry, PicoFdError> {
-        self.apply_cap_grant(
-            fd,
-            rights,
-            resource,
-            lane,
-            route_label,
-            wait_or_subscription_id,
-            0,
-            0,
-            0,
-            0,
-        )
+        let route = PicoFdRoute::new(0, 0, lane, route_label, 0, 0);
+        self.apply_cap_grant(fd, rights, resource, wait_or_subscription_id, route)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn apply_cap_grant(
         &mut self,
         fd: u8,
         rights: PicoFdRights,
         resource: ChoreoResourceKind,
-        lane: u8,
-        route_label: u8,
         wait_or_subscription_id: u16,
-        target_node: u8,
-        target_role: u16,
-        session_generation: u16,
-        policy_slot: u8,
+        route: PicoFdRoute,
     ) -> Result<PicoFdViewEntry, PicoFdError> {
         self.apply_control(PicoFdControl::cap_grant(
             fd,
             rights,
             resource,
-            lane,
-            route_label,
             wait_or_subscription_id,
-            target_node,
-            target_role,
-            session_generation,
-            policy_slot,
+            route,
         ))
     }
 
@@ -779,27 +724,17 @@ impl<const N: usize> PicoFdView<N> {
         fd: u8,
         rights: PicoFdRights,
         resource: ChoreoResourceKind,
-        lane: u8,
-        route_label: u8,
         choreo_object_id: u16,
-        target_node: u8,
-        target_role: u16,
-        session_generation: u16,
         choreo_object_generation: u16,
-        policy_slot: u8,
+        route: PicoFdRoute,
     ) -> Result<PicoFdViewEntry, PicoFdError> {
         self.apply_control(PicoFdControl::cap_mint(
             fd,
             rights,
             resource,
-            lane,
-            route_label,
             choreo_object_id,
-            target_node,
-            target_role,
-            session_generation,
             choreo_object_generation,
-            policy_slot,
+            route,
         ))
     }
 
@@ -2082,18 +2017,21 @@ mod tests {
     #[test]
     fn fd_control_messages_materialize_restrict_and_revoke_view() {
         let mut fds: PicoFdView<1> = PicoFdView::new();
+        let route = PicoFdRoute::new(
+            2,
+            0,
+            22,
+            crate::choreography::protocol::LABEL_NET_DATAGRAM_SEND,
+            7,
+            1,
+        );
         let granted = fds
             .apply_control(PicoFdControl::cap_grant(
                 30,
                 PicoFdRights::ReadWrite,
                 ChoreoResourceKind::NetworkDatagram,
-                22,
-                crate::choreography::protocol::LABEL_NET_DATAGRAM_SEND,
                 99,
-                2,
-                0,
-                7,
-                1,
+                route,
             ))
             .expect("CapGrant materializes fd view");
 
@@ -2261,18 +2199,21 @@ mod tests {
     #[test]
     fn pico_fd_view_tracks_gateway_route_metadata() {
         let mut fds: PicoFdView<1> = PicoFdView::new();
+        let route = PicoFdRoute::new(
+            4,
+            crate::kernel::policy::NodeRole::Gateway.bit(),
+            20,
+            crate::choreography::protocol::LABEL_SWARM_TELEMETRY,
+            7,
+            1,
+        );
         let gateway = fds
             .apply_cap_grant(
                 40,
                 PicoFdRights::ReadWrite,
                 ChoreoResourceKind::Gateway,
-                20,
-                crate::choreography::protocol::LABEL_SWARM_TELEMETRY,
                 0,
-                4,
-                crate::kernel::policy::NodeRole::Gateway.bit(),
-                7,
-                1,
+                route,
             )
             .expect("grant gateway fd");
 

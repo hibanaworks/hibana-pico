@@ -79,7 +79,7 @@ use hibana_pico::{
     kernel::wasi::{MemoryLeaseTable, Wasip1StdoutModule},
     port::host_queue::HostQueueBackend,
     port::transport::SioTransport,
-    projects::baker_link_led::choreography::{
+    proof::baker_link::choreography::{
         BakerTrafficLoopBreakControl, BakerTrafficLoopContinueControl,
         POLICY_BAKER_ENGINE_ABORT_ROUTE, POLICY_BAKER_TRAFFIC_LOOP,
     },
@@ -1593,11 +1593,13 @@ fn swarm_leave_revoke_choreography_quiesces_objects_leases_and_neighbors() {
             .apply_cap_grant(
                 SENSOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                SENSOR,
-                NodeRole::Sensor.bit() as u8,
-                0,
-                LABEL_REMOTE_SAMPLE_REQ,
+                RemoteRoute::new(
+                    SENSOR,
+                    NodeRole::Sensor.bit() as u8,
+                    0,
+                    LABEL_REMOTE_SAMPLE_REQ,
+                    SESSION_GENERATION,
+                ),
                 RemoteRights::Read,
                 RemoteResource::Sensor,
             )
@@ -1740,11 +1742,13 @@ fn remote_sensor_and_actuator_objects_are_wired_through_hibana_messages() {
             .apply_cap_grant(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                SENSOR,
-                NodeRole::Sensor.bit() as u8,
-                0,
-                LABEL_REMOTE_SAMPLE_REQ,
+                RemoteRoute::new(
+                    SENSOR,
+                    NodeRole::Sensor.bit() as u8,
+                    0,
+                    LABEL_REMOTE_SAMPLE_REQ,
+                    SESSION_GENERATION,
+                ),
                 RemoteRights::Read,
                 RemoteResource::Sensor,
             )
@@ -1753,11 +1757,13 @@ fn remote_sensor_and_actuator_objects_are_wired_through_hibana_messages() {
             .apply_cap_grant(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                ACTUATOR,
-                NodeRole::Actuator.bit() as u8,
-                0,
-                LABEL_REMOTE_ACTUATE_REQ,
+                RemoteRoute::new(
+                    ACTUATOR,
+                    NodeRole::Actuator.bit() as u8,
+                    0,
+                    LABEL_REMOTE_ACTUATE_REQ,
+                    SESSION_GENERATION,
+                ),
                 RemoteRights::Write,
                 RemoteResource::Actuator,
             )
@@ -2016,27 +2022,31 @@ fn remote_object_control_selects_explicit_route_arm_without_bridge() {
             .apply_cap_grant_with_policy(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                SENSOR,
-                NodeRole::Sensor.bit() as u8,
-                17,
-                LABEL_REMOTE_SAMPLE_REQ,
-                2,
+                RemoteRoute::with_policy(
+                    SENSOR,
+                    NodeRole::Sensor.bit() as u8,
+                    17,
+                    LABEL_REMOTE_SAMPLE_REQ,
+                    SESSION_GENERATION,
+                    2,
+                ),
                 RemoteRights::Read,
                 RemoteResource::Sensor,
             )
             .expect("install authenticated remote sensor fd");
         assert_eq!(
             caps.apply_control(
-                RemoteControl::cap_grant_remote_with_policy(
+                RemoteControl::cap_grant_remote(
                     COORDINATOR,
                     SwarmCredential::new(0x5752_4f4e),
-                    SESSION_GENERATION,
-                    SENSOR,
-                    NodeRole::Sensor.bit() as u8,
-                    17,
-                    LABEL_REMOTE_SAMPLE_REQ,
-                    2,
+                    RemoteRoute::with_policy(
+                        SENSOR,
+                        NodeRole::Sensor.bit() as u8,
+                        17,
+                        LABEL_REMOTE_SAMPLE_REQ,
+                        SESSION_GENERATION,
+                        2
+                    ),
                     RemoteRights::Read,
                     RemoteResource::Sensor,
                 ),
@@ -2048,15 +2058,17 @@ fn remote_object_control_selects_explicit_route_arm_without_bridge() {
         );
         assert_eq!(
             caps.apply_control(
-                RemoteControl::cap_grant_remote_with_policy(
+                RemoteControl::cap_grant_remote(
                     COORDINATOR,
                     SWARM_CREDENTIAL,
-                    SESSION_GENERATION.wrapping_add(1),
-                    SENSOR,
-                    NodeRole::Sensor.bit() as u8,
-                    17,
-                    LABEL_REMOTE_SAMPLE_REQ,
-                    2,
+                    RemoteRoute::with_policy(
+                        SENSOR,
+                        NodeRole::Sensor.bit() as u8,
+                        17,
+                        LABEL_REMOTE_SAMPLE_REQ,
+                        SESSION_GENERATION.wrapping_add(1),
+                        2
+                    ),
                     RemoteRights::Read,
                     RemoteResource::Sensor,
                 ),
@@ -2071,11 +2083,13 @@ fn remote_object_control_selects_explicit_route_arm_without_bridge() {
             .apply_cap_grant(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                SENSOR,
-                NodeRole::Actuator.bit() as u8,
-                17,
-                LABEL_REMOTE_ACTUATE_REQ,
+                RemoteRoute::new(
+                    SENSOR,
+                    NodeRole::Actuator.bit() as u8,
+                    17,
+                    LABEL_REMOTE_ACTUATE_REQ,
+                    SESSION_GENERATION,
+                ),
                 RemoteRights::Write,
                 RemoteResource::Actuator,
             )
@@ -2084,11 +2098,13 @@ fn remote_object_control_selects_explicit_route_arm_without_bridge() {
             .apply_cap_grant(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                SENSOR,
-                NodeRole::Sensor.bit() as u8,
-                17,
-                LABEL_REMOTE_SAMPLE_REQ,
+                RemoteRoute::new(
+                    SENSOR,
+                    NodeRole::Sensor.bit() as u8,
+                    17,
+                    LABEL_REMOTE_SAMPLE_REQ,
+                    SESSION_GENERATION,
+                ),
                 RemoteRights::ReadWrite,
                 RemoteResource::Sensor,
             )
@@ -2545,12 +2561,14 @@ fn remote_management_object_control_selects_management_route_arm_without_bridge(
             .apply_cap_grant_with_policy(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                GATEWAY,
-                NodeRole::Gateway.bit() as u8,
-                19,
-                LABEL_MGMT_IMAGE_BEGIN,
-                3,
+                RemoteRoute::with_policy(
+                    GATEWAY,
+                    NodeRole::Gateway.bit() as u8,
+                    19,
+                    LABEL_MGMT_IMAGE_BEGIN,
+                    SESSION_GENERATION,
+                    3,
+                ),
                 RemoteRights::Write,
                 RemoteResource::Management,
             )
@@ -2760,12 +2778,14 @@ fn remote_telemetry_object_control_selects_telemetry_route_arm_without_bridge() 
             .apply_cap_grant_with_policy(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                GATEWAY,
-                NodeRole::Gateway.bit() as u8,
-                20,
-                LABEL_SWARM_TELEMETRY,
-                4,
+                RemoteRoute::with_policy(
+                    GATEWAY,
+                    NodeRole::Gateway.bit() as u8,
+                    20,
+                    LABEL_SWARM_TELEMETRY,
+                    SESSION_GENERATION,
+                    4,
+                ),
                 RemoteRights::Write,
                 RemoteResource::Telemetry,
             )
@@ -3447,10 +3467,12 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         .apply_cap_grant_datagram(
             COORDINATOR,
             SWARM_CREDENTIAL,
-            SESSION_GENERATION,
-            gateway_node,
-            22,
-            LABEL_NET_DATAGRAM_SEND,
+            NetworkRoute::new(
+                gateway_node,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                SESSION_GENERATION,
+            ),
             NetworkRights::Send,
         )
         .expect("grant qemu datagram NetworkObject");
@@ -3458,10 +3480,7 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         .apply_cap_grant_stream(
             COORDINATOR,
             SWARM_CREDENTIAL,
-            SESSION_GENERATION,
-            gateway_node,
-            23,
-            LABEL_NET_STREAM_WRITE,
+            NetworkRoute::new(gateway_node, 23, LABEL_NET_STREAM_WRITE, SESSION_GENERATION),
             NetworkRights::Send,
         )
         .expect("grant qemu stream NetworkObject");
@@ -3470,10 +3489,7 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         .apply_cap_grant_datagram(
             gateway_node,
             SWARM_CREDENTIAL,
-            SESSION_GENERATION,
-            COORDINATOR,
-            21,
-            LABEL_NET_DATAGRAM_RECV,
+            NetworkRoute::new(COORDINATOR, 21, LABEL_NET_DATAGRAM_RECV, SESSION_GENERATION),
             NetworkRights::Receive,
         )
         .expect("pre-seed gateway table so inbound routing is not fd-order dependent");
@@ -3481,10 +3497,7 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         .apply_cap_grant_datagram(
             gateway_node,
             SWARM_CREDENTIAL,
-            SESSION_GENERATION,
-            COORDINATOR,
-            22,
-            LABEL_NET_DATAGRAM_SEND,
+            NetworkRoute::new(COORDINATOR, 22, LABEL_NET_DATAGRAM_SEND, SESSION_GENERATION),
             NetworkRights::Receive,
         )
         .expect("grant gateway datagram receive NetworkObject");
@@ -3492,10 +3505,7 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
         .apply_cap_grant_stream(
             gateway_node,
             SWARM_CREDENTIAL,
-            SESSION_GENERATION,
-            COORDINATOR,
-            23,
-            LABEL_NET_STREAM_WRITE,
+            NetworkRoute::new(COORDINATOR, 23, LABEL_NET_STREAM_WRITE, SESSION_GENERATION),
             NetworkRights::Receive,
         )
         .expect("grant gateway stream receive NetworkObject");
@@ -4899,10 +4909,7 @@ fn datagram_fd_protocol_is_bounded_and_wired_through_hibana_messages() {
             .apply_cap_grant_datagram(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                NodeId::new(4),
-                0,
-                13,
+                NetworkRoute::new(NodeId::new(4), 0, 13, SESSION_GENERATION),
                 NetworkRights::SendReceive,
             )
             .expect("install authenticated datagram fd");
@@ -4910,10 +4917,7 @@ fn datagram_fd_protocol_is_bounded_and_wired_through_hibana_messages() {
             .apply_cap_grant_datagram(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                NodeId::new(5),
-                0,
-                14,
+                NetworkRoute::new(NodeId::new(5), 0, 14, SESSION_GENERATION),
                 NetworkRights::Receive,
             )
             .expect("install authenticated recv-only fd");
@@ -5050,14 +5054,16 @@ fn wasi_fd_selects_network_datagram_route_without_p2_or_bridge() {
     hibana_pico::port::exec::run_current_task(async {
         let mut fds: NetworkObjectTable<4> = NetworkObjectTable::new();
         let datagram_fd = fds
-            .apply_cap_grant_datagram_with_policy(
+            .apply_cap_grant_datagram(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                SENSOR,
-                22,
-                LABEL_NET_DATAGRAM_SEND,
-                4,
+                NetworkRoute::with_policy(
+                    SENSOR,
+                    22,
+                    LABEL_NET_DATAGRAM_SEND,
+                    SESSION_GENERATION,
+                    4,
+                ),
                 NetworkRights::SendReceive,
             )
             .expect("install authenticated datagram fd");
@@ -5066,10 +5072,7 @@ fn wasi_fd_selects_network_datagram_route_without_p2_or_bridge() {
             .apply_cap_grant_datagram(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                SENSOR,
-                22,
-                LABEL_NET_DATAGRAM_RECV,
+                NetworkRoute::new(SENSOR, 22, LABEL_NET_DATAGRAM_RECV, SESSION_GENERATION),
                 NetworkRights::Receive,
             )
             .expect("install authenticated recv-only datagram fd");
@@ -5077,10 +5080,7 @@ fn wasi_fd_selects_network_datagram_route_without_p2_or_bridge() {
             .apply_cap_grant_stream(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                SENSOR,
-                23,
-                LABEL_NET_STREAM_WRITE,
+                NetworkRoute::new(SENSOR, 23, LABEL_NET_STREAM_WRITE, SESSION_GENERATION),
                 NetworkRights::SendReceive,
             )
             .expect("install authenticated stream fd");
@@ -5526,14 +5526,16 @@ fn wasi_fd_selects_network_stream_route_without_p2_or_bridge() {
     hibana_pico::port::exec::run_current_task(async {
         let mut fds: NetworkObjectTable<2> = NetworkObjectTable::new();
         let stream_fd = fds
-            .apply_cap_grant_stream_with_policy(
+            .apply_cap_grant_stream(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                SENSOR,
-                23,
-                LABEL_NET_STREAM_WRITE,
-                5,
+                NetworkRoute::with_policy(
+                    SENSOR,
+                    23,
+                    LABEL_NET_STREAM_WRITE,
+                    SESSION_GENERATION,
+                    5,
+                ),
                 NetworkRights::SendReceive,
             )
             .expect("install authenticated stream fd");
@@ -5952,11 +5954,13 @@ fn three_node_policy_and_remote_management_are_wired_and_fenced() {
             .apply_cap_grant_management(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                ACTUATOR,
-                NodeRole::Actuator.bit() as u8,
-                0,
-                AppChoice::App1.label(),
+                RemoteRoute::new(
+                    ACTUATOR,
+                    NodeRole::Actuator.bit() as u8,
+                    0,
+                    AppChoice::App1.label(),
+                    SESSION_GENERATION,
+                ),
                 RemoteRights::Write,
             )
             .expect("install authenticated management cap");
@@ -5966,10 +5970,7 @@ fn three_node_policy_and_remote_management_are_wired_and_fenced() {
             .apply_cap_grant_datagram(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                GATEWAY,
-                22,
-                LABEL_NET_DATAGRAM_SEND,
+                NetworkRoute::new(GATEWAY, 22, LABEL_NET_DATAGRAM_SEND, SESSION_GENERATION),
                 NetworkRights::SendReceive,
             )
             .expect("install authenticated active datagram fd");
@@ -6302,11 +6303,7 @@ fn remote_management_image_install_is_wired_through_hibana_over_swarm_transport(
             .apply_cap_grant_management(
                 COORDINATOR,
                 SWARM_CREDENTIAL,
-                SESSION_GENERATION,
-                ACTUATOR,
-                1,
-                1,
-                LABEL_MGMT_IMAGE_BEGIN,
+                RemoteRoute::new(ACTUATOR, 1, 1, LABEL_MGMT_IMAGE_BEGIN, SESSION_GENERATION),
                 RemoteRights::Write,
             )
             .expect("install authenticated management control");

@@ -1,7 +1,7 @@
 use hibana_pico::{
     choreography::protocol::GpioSet,
     machine::rp2040::{baker_link::BAKER_LINK_SAFE_GPIO_LEVELS, gpio},
-    projects::baker_link_led::manifest::apply_baker_link_led_bank_set,
+    proof::baker_link::manifest::apply_baker_link_led_bank_set,
 };
 
 pub fn rp2040_gpio_bank_init() {

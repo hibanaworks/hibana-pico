@@ -3,7 +3,9 @@
     target_os = "none",
     feature = "baker-abort-safe-demo"
 ))]
-use super::device_session::gpio_device_recv_abort_set_once;
+use super::device_session::{
+    gpio_device_recv_abort_terminal_entry_set_once, gpio_device_recv_abort_terminal_seq_set_once,
+};
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 use super::stages::*;
 #[cfg(all(
@@ -110,7 +112,7 @@ use hibana_pico::kernel::engine::wasm::PathKind;
     target_os = "none",
     not(feature = "baker-abort-safe-demo")
 ))]
-use hibana_pico::projects::baker_link_led::choreography::{
+use hibana_pico::proof::baker_link::choreography::{
     BakerTrafficLoopBreakControl, BakerTrafficLoopContinueControl,
 };
 #[cfg(all(
@@ -580,8 +582,9 @@ pub(super) async fn engine_abort_safe_session(
         .recv::<EngineAbortFenceControl>()
         .await
         .unwrap_or_else(|_| panic!());
-    for index in 0..BAKER_LINK_SAFE_GPIO_LEVELS.len() {
-        gpio_device_recv_abort_set_once(gpio_endpoint, if index == 0 { 1 } else { 0 }).await;
+    gpio_device_recv_abort_terminal_entry_set_once(gpio_endpoint).await;
+    for _ in 1..BAKER_LINK_SAFE_GPIO_LEVELS.len() {
+        gpio_device_recv_abort_terminal_seq_set_once(gpio_endpoint).await;
     }
     endpoint
         .recv::<EngineAbortAckControl>()

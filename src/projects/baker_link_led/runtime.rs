@@ -48,20 +48,20 @@ use hibana::substrate::{SessionKit, binding::NoBinding, ids::SessionId, runtime:
     target_os = "none",
     not(feature = "baker-abort-safe-demo")
 ))]
-use hibana_pico::projects::baker_link_led::choreography::POLICY_BAKER_TRAFFIC_LOOP;
+use hibana_pico::proof::baker_link::choreography::POLICY_BAKER_TRAFFIC_LOOP;
 #[cfg(all(
     target_arch = "arm",
     target_os = "none",
     not(feature = "baker-recoverable-abort-demo"),
     feature = "baker-abort-safe-demo"
 ))]
-use hibana_pico::projects::baker_link_led::choreography::abort_safe_terminal_roles;
+use hibana_pico::proof::baker_link::choreography::abort_safe_terminal_roles;
 #[cfg(all(
     target_arch = "arm",
     target_os = "none",
     feature = "baker-choreofs-bad-path-demo"
 ))]
-use hibana_pico::projects::baker_link_led::choreography::choreofs_bad_path_roles;
+use hibana_pico::proof::baker_link::choreography::choreofs_bad_path_roles;
 #[cfg(all(
     target_arch = "arm",
     target_os = "none",
@@ -71,13 +71,13 @@ use hibana_pico::projects::baker_link_led::choreography::choreofs_bad_path_roles
         feature = "baker-choreofs-wrong-object-demo"
     )
 ))]
-use hibana_pico::projects::baker_link_led::choreography::choreofs_traffic_light_roles;
+use hibana_pico::proof::baker_link::choreography::choreofs_traffic_light_roles;
 #[cfg(all(
     target_arch = "arm",
     target_os = "none",
     feature = "baker-recoverable-abort-demo"
 ))]
-use hibana_pico::projects::baker_link_led::choreography::recoverable_abort_roles;
+use hibana_pico::proof::baker_link::choreography::recoverable_abort_roles;
 #[cfg(all(
     target_arch = "arm",
     target_os = "none",
@@ -89,19 +89,19 @@ use hibana_pico::projects::baker_link_led::choreography::recoverable_abort_roles
         feature = "baker-choreofs-wrong-object-demo"
     ))
 ))]
-use hibana_pico::projects::baker_link_led::choreography::traffic_light_roles;
+use hibana_pico::proof::baker_link::choreography::traffic_light_roles;
 #[cfg(all(
     target_arch = "arm",
     target_os = "none",
     not(feature = "baker-abort-safe-demo")
 ))]
-use hibana_pico::projects::baker_link_led::guest::write_selected_guest_in_place;
+use hibana_pico::proof::baker_link::guest::write_selected_guest_in_place;
 #[cfg(all(
     target_arch = "arm",
     target_os = "none",
     not(feature = "baker-abort-safe-demo")
 ))]
-use hibana_pico::projects::baker_link_led::resolver::baker_traffic_loop_policy;
+use hibana_pico::proof::baker_link::resolver::baker_traffic_loop_policy;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 use hibana_pico::{
     choreography::protocol::EngineLabelUniverse,
@@ -109,7 +109,7 @@ use hibana_pico::{
     machine::rp2040::{clock, timer, uart},
     port::exec::{park, run_current_task, signal, wait_until},
     port::transport::SioTransport,
-    projects::baker_link_led::manifest::{BAKER_LINK_LED_ACTIVE_HIGH, BAKER_LINK_LED_PINS},
+    proof::baker_link::manifest::{BAKER_LINK_LED_ACTIVE_HIGH, BAKER_LINK_LED_PINS},
 };
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]

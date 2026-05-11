@@ -109,10 +109,10 @@ use hibana_pico::port::exec::park;
 ))]
 use hibana_pico::{
     choreography::protocol::PathOpened,
-    projects::baker_link_led::ledger::{
+    proof::baker_link::ledger::{
         baker_link_choreofs_ledger, mint_baker_link_choreofs_fd, resolve_baker_link_choreofs_path,
     },
-    projects::baker_link_led::manifest::{
+    proof::baker_link::manifest::{
         BAKER_LINK_CHOREOFS_PREOPEN_FD, BakerLinkLedResourceStore, baker_link_led_resource_store,
     },
 };
@@ -133,7 +133,7 @@ use hibana_pico::{
         fd_object::check_gpio_object_fd_write, guest_ledger::WASI_ERRNO_SUCCESS,
         resolver::PicoInterruptResolver,
     },
-    projects::baker_link_led::manifest::{
+    proof::baker_link::manifest::{
         BAKER_LINK_TRAFFIC_LIGHT_PATTERN_STEPS, baker_link_led_fd_write_route,
     },
 };
@@ -570,10 +570,10 @@ pub(super) async fn kernel_session(
         feature = "baker-choreofs-bad-payload-demo",
         feature = "baker-choreofs-wrong-object-demo"
     )))]
-    let mut ledger = hibana_pico::projects::baker_link_led::ledger::baker_link_pico_min_ledger::<
-        1,
-        1,
-    >(TEST_MEMORY_LEN, TEST_MEMORY_EPOCH)
+    let mut ledger = hibana_pico::proof::baker_link::ledger::baker_link_pico_min_ledger::<1, 1>(
+        TEST_MEMORY_LEN,
+        TEST_MEMORY_EPOCH,
+    )
     .unwrap_or_else(|_| panic!());
     let mut resolver: PicoInterruptResolver<2, 4, 1> = PicoInterruptResolver::new();
 
@@ -630,10 +630,10 @@ pub(super) async fn kernel_abort_safe_session(endpoint: &mut KernelEndpoint) {
     #[cfg(feature = "baker-recoverable-abort-demo")]
     kernel_send_abort_budget_run(endpoint, 0).await;
 
-    let mut ledger = hibana_pico::projects::baker_link_led::ledger::baker_link_pico_min_ledger::<
-        1,
-        1,
-    >(TEST_MEMORY_LEN, TEST_MEMORY_EPOCH)
+    let mut ledger = hibana_pico::proof::baker_link::ledger::baker_link_pico_min_ledger::<1, 1>(
+        TEST_MEMORY_LEN,
+        TEST_MEMORY_EPOCH,
+    )
     .unwrap_or_else(|_| panic!());
     let grant = ledger
         .grant_read_lease(MemBorrow::new(TEST_LED_PTR, 1, TEST_MEMORY_EPOCH))

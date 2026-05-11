@@ -637,16 +637,8 @@ impl<const FDS: usize, const LEASES: usize, const PENDING: usize>
         &self.fds
     }
 
-    pub fn fd_view_mut(&mut self) -> &mut PicoFdView<FDS> {
-        &mut self.fds
-    }
-
     pub fn lease_table(&self) -> &MemoryLeaseTable<LEASES> {
         &self.leases
-    }
-
-    pub fn lease_table_mut(&mut self) -> &mut MemoryLeaseTable<LEASES> {
-        &mut self.leases
     }
 
     pub fn pending_table(&self) -> &PendingSyscallTable<PENDING> {
@@ -669,20 +661,17 @@ impl<const FDS: usize, const LEASES: usize, const PENDING: usize>
         if self.fds.active_count() >= self.quotas.max_fds as usize {
             return Err(GuestQuotaError::FdLimit.into());
         }
+        let route = PicoFdRoute::new(
+            target_node,
+            target_role,
+            lane,
+            route_label,
+            session_generation,
+            policy_slot,
+        );
         Ok(self
             .fds
-            .apply_cap_grant(
-                fd,
-                rights,
-                resource,
-                lane,
-                route_label,
-                wait_or_subscription_id,
-                target_node,
-                target_role,
-                session_generation,
-                policy_slot,
-            )?
+            .apply_cap_grant(fd, rights, resource, wait_or_subscription_id, route)?
             .into())
     }
 
@@ -710,20 +699,23 @@ impl<const FDS: usize, const LEASES: usize, const PENDING: usize>
         if self.fds.active_count() >= self.quotas.max_fds as usize {
             return Err(GuestQuotaError::FdLimit.into());
         }
+        let route = PicoFdRoute::new(
+            target_node,
+            target_role,
+            lane,
+            route_label,
+            session_generation,
+            policy_slot,
+        );
         Ok(self
             .fds
             .apply_cap_mint(
                 fd,
                 rights,
                 resource,
-                lane,
-                route_label,
                 choreo_object_id,
-                target_node,
-                target_role,
-                session_generation,
                 choreo_object_generation,
-                policy_slot,
+                route,
             )?
             .into())
     }

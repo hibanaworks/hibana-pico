@@ -686,10 +686,12 @@ async fn core0_network_object(
         .apply_cap_grant_datagram(
             COORDINATOR,
             SWARM_CREDENTIAL,
-            SESSION_GENERATION,
-            gateway_node,
-            22,
-            LABEL_NET_DATAGRAM_SEND,
+            NetworkRoute::new(
+                gateway_node,
+                22,
+                LABEL_NET_DATAGRAM_SEND,
+                SESSION_GENERATION,
+            ),
             NetworkRights::Send,
         )
         .unwrap_or_else(|_| hard_stop("[core0] grant datagram network object"));
@@ -697,10 +699,7 @@ async fn core0_network_object(
         .apply_cap_grant_stream(
             COORDINATOR,
             SWARM_CREDENTIAL,
-            SESSION_GENERATION,
-            gateway_node,
-            23,
-            LABEL_NET_STREAM_WRITE,
+            NetworkRoute::new(gateway_node, 23, LABEL_NET_STREAM_WRITE, SESSION_GENERATION),
             NetworkRights::Send,
         )
         .unwrap_or_else(|_| hard_stop("[core0] grant stream network object"));
@@ -1238,10 +1237,7 @@ async fn core1_network_object<const ROLE: u8>(
         .apply_cap_grant_datagram(
             local_node,
             SWARM_CREDENTIAL,
-            SESSION_GENERATION,
-            COORDINATOR,
-            22,
-            LABEL_NET_DATAGRAM_SEND,
+            NetworkRoute::new(COORDINATOR, 22, LABEL_NET_DATAGRAM_SEND, SESSION_GENERATION),
             NetworkRights::Receive,
         )
         .unwrap_or_else(|_| hard_stop("[core1] grant datagram network object"));
@@ -1249,10 +1245,7 @@ async fn core1_network_object<const ROLE: u8>(
         .apply_cap_grant_stream(
             local_node,
             SWARM_CREDENTIAL,
-            SESSION_GENERATION,
-            COORDINATOR,
-            23,
-            LABEL_NET_STREAM_WRITE,
+            NetworkRoute::new(COORDINATOR, 23, LABEL_NET_STREAM_WRITE, SESSION_GENERATION),
             NetworkRights::Receive,
         )
         .unwrap_or_else(|_| hard_stop("[core1] grant stream network object"));

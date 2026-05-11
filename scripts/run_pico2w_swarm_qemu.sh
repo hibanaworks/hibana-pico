@@ -148,17 +148,27 @@ qemu_log = sys.argv[2]
 timeout = float(sys.argv[3])
 dst_node = 4
 expected = (
-    "mesh source address is not loopback peer",
     "mesh frame node mismatch",
     "mesh packet dst",
 )
+expected_alias = "mesh source address is not loopback peer"
 
 alias_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 try:
     alias_sock.bind(("127.0.0.2", port_base + 1))
 except OSError as error:
-    print(f"cannot bind 127.0.0.2:{port_base + 1} for QEMU spoof probe: {error}", file=sys.stderr)
-    sys.exit(1)
+    print(
+        f"warning: cannot bind 127.0.0.2:{port_base + 1} for source-address spoof probe: {error}",
+        file=sys.stderr,
+    )
+    if sys.platform == "darwin":
+        print("warning: skipping QEMU mesh spoof probe on Darwin loopback alias limits", file=sys.stderr)
+        with open(f"{qemu_log}.probe-skipped", "w", encoding="utf-8") as marker:
+            marker.write("darwin-loopback-alias\n")
+        sys.exit(0)
+    alias_sock = None
+else:
+    expected = (expected_alias,) + expected
 
 spoof_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 try:
@@ -176,10 +186,11 @@ def packet(packet_dst, frame_src, frame_dst):
     ])
 
 probes = (
-    (alias_sock, packet(dst_node, 1, dst_node)),
     (spoof_sock, packet(dst_node, 2, dst_node)),
     (spoof_sock, packet(dst_node + 1, 1, dst_node + 1)),
 )
+if alias_sock is not None:
+    probes = ((alias_sock, packet(dst_node, 1, dst_node)),) + probes
 deadline = time.monotonic() + timeout
 while time.monotonic() < deadline:
     for sock, payload in probes:
@@ -342,7 +353,7 @@ if [[ "$NODE_COUNT" == 6 ]]; then
     echo "missing sensor-4 network stream fd line" >&2
     exit 1
   fi
-  if [[ "$MESH_SPOOF_PROBE" == 1 ]]; then
+  if [[ "$MESH_SPOOF_PROBE" == 1 && ! -f "$LOG_DIR/sensor-4.log.qemu.probe-skipped" ]]; then
     if ! grep -q "mesh source address is not loopback peer" "$LOG_DIR/sensor-4.log.qemu"; then
       echo "missing sensor-4 QEMU mesh alias-source rejection line" >&2
       exit 1

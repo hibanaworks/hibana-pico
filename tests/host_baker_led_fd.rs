@@ -38,7 +38,7 @@ use hibana_pico::{
     port::exec::run_current_task,
     port::host_queue::HostQueueBackend,
     port::transport::SioTransport,
-    projects::baker_link_led::{
+    proof::baker_link::{
         choreography::{
             BakerTrafficLoopContinueControl, POLICY_BAKER_ENGINE_ABORT_ROUTE,
             POLICY_BAKER_TRAFFIC_LOOP, abort_safe_terminal_roles, fd_write_two_cycles_roles,
@@ -67,7 +67,7 @@ use hibana_pico::{
         LABEL_WASI_POLL_ONEOFF_RET, PollReady, TimerSleepUntil,
     },
     kernel::resolver::{InterruptEvent, PicoInterruptResolver, ResolvedInterrupt},
-    projects::baker_link_led::choreography::BakerTrafficLoopBreakControl,
+    proof::baker_link::choreography::BakerTrafficLoopBreakControl,
 };
 
 #[cfg(all(feature = "baker-choreofs-demo", feature = "wasip1-sys-path-minimal",))]
@@ -86,10 +86,10 @@ use hibana_pico::kernel::engine::wasm::{Call, Error as WasmError, Event, Guest};
 #[cfg(all(feature = "baker-choreofs-demo", feature = "wasip1-sys-path-minimal",))]
 use hibana_pico::{
     kernel::engine::wasm::{Path as WasiPathCall, PathKind, Pending},
-    projects::baker_link_led::manifest::{
+    proof::baker_link::manifest::{
         BAKER_LINK_LED_RESOURCE_PATHS, BakerLinkLedResourceStore, baker_link_led_resource_store,
     },
-    projects::baker_link_led::{
+    proof::baker_link::{
         choreography::choreofs_traffic_light_roles,
         ledger::{
             baker_link_choreofs_ledger, mint_baker_link_choreofs_fd,
@@ -105,12 +105,12 @@ use hibana_pico::{
         feature = "wasip1-sys-path-minimal",
     ),
 ))]
-use hibana_pico::projects::baker_link_led::manifest::BAKER_LINK_LED_FDS;
+use hibana_pico::proof::baker_link::manifest::BAKER_LINK_LED_FDS;
 
 #[cfg(feature = "profile-rp2040-pico-min")]
 use hibana_pico::{
     kernel::fd_object::GpioFdWriteError,
-    projects::baker_link_led::manifest::{BAKER_LINK_LED_PINS, baker_link_traffic_light_step},
+    proof::baker_link::manifest::{BAKER_LINK_LED_PINS, baker_link_traffic_light_step},
 };
 
 type TestTransport<'a> = SioTransport<&'a HostQueueBackend>;
@@ -308,13 +308,13 @@ fn poll_once<F: Future>(future: &mut F) -> Poll<F::Output> {
     future.as_mut().poll(&mut cx)
 }
 
-async fn gpio_decode_set(gpio: &mut Endpoint<'_, 2>, route_depth: u8) -> GpioSet {
-    if route_depth == 0 {
-        return gpio
-            .recv::<Msg<LABEL_GPIO_SET, GpioSet>>()
-            .await
-            .expect("gpio receives fd_write gpio set");
-    }
+async fn gpio_decode_abort_terminal_seq_set(gpio: &mut Endpoint<'_, 2>) -> GpioSet {
+    gpio.recv::<Msg<LABEL_GPIO_SET, GpioSet>>()
+        .await
+        .expect("gpio receives fd_write gpio set")
+}
+
+async fn gpio_decode_abort_terminal_entry_set(gpio: &mut Endpoint<'_, 2>) -> GpioSet {
     let branch = (gpio.offer()).await.expect("gpio offers fd_write gpio set");
     assert_eq!(branch.label(), LABEL_GPIO_SET);
     branch
@@ -388,7 +388,7 @@ async fn exchange_linear_led_write<const ROLE: u8>(
     .await
     .expect("kernel sends gpio set");
 
-    let received_set = gpio_decode_set(gpio, 0).await;
+    let received_set = gpio_decode_abort_terminal_seq_set(gpio).await;
     assert_eq!(received_set, set);
     apply_baker_link_led_bank_set(
         |pin, high| {
@@ -516,7 +516,7 @@ async fn exchange_policy_entry_led_write<const ROLE: u8, const FDS: usize>(
     .await
     .expect("kernel sends gpio set");
 
-    let received_set = gpio_decode_set(gpio, 1).await;
+    let received_set = gpio_decode_abort_terminal_entry_set(gpio).await;
     assert_eq!(received_set, set);
     apply_baker_link_led_bank_set(
         |pin, high| {
@@ -1738,7 +1738,11 @@ fn baker_link_abort_terminal_fences_ledger_and_uses_gpio_choreography_for_safe_s
                 .send(&set))
             .await
             .expect("kernel sends safe gpio set");
-            let received = gpio_decode_set(&mut gpio, if idx == 0 { 1 } else { 0 }).await;
+            let received = if idx == 0 {
+                gpio_decode_abort_terminal_entry_set(&mut gpio).await
+            } else {
+                gpio_decode_abort_terminal_seq_set(&mut gpio).await
+            };
             assert_eq!(received, set);
             pins.apply(received).expect("apply safe-state gpio set");
             (gpio
@@ -1889,7 +1893,11 @@ fn baker_link_recoverable_fail_safe_starts_fresh_activation_after_abort() {
                 .send(&set))
             .await
             .expect("kernel sends recoverable safe gpio");
-            let received = gpio_decode_set(&mut gpio, if idx == 0 { 1 } else { 0 }).await;
+            let received = if idx == 0 {
+                gpio_decode_abort_terminal_entry_set(&mut gpio).await
+            } else {
+                gpio_decode_abort_terminal_seq_set(&mut gpio).await
+            };
             assert_eq!(received, set);
             (gpio
                 .flow::<Msg<LABEL_GPIO_SET_DONE, GpioSet>>()

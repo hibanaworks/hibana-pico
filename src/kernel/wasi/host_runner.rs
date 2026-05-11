@@ -417,7 +417,7 @@ impl<'a> HostRunner<'a> {
                 Event::Call(Call::FdClose(call)) => {
                     let request = EngineReq::FdClose(FdRequest::new(call.fd()));
                     if call.fd() > 2 && call.fd() != HOST_ROOT_FD {
-                        let _ = state.ledger.fd_view_mut().close_current(call.fd());
+                        let _ = state.ledger.close_fd_current(call.fd());
                     }
                     let reply = EngineRet::FdClosed(FdClosed::new(call.fd()));
                     HostRunnerState::drive_exchange(request, reply, &mut report)?;
@@ -782,7 +782,7 @@ impl HostRunnerState<'_> {
                 let request = EngineReq::FdClose(FdRequest::new(fd));
                 let reply = EngineRet::FdClosed(FdClosed::new(fd));
                 Self::drive_exchange(request, reply, report)?;
-                let _ = self.ledger.fd_view_mut().close_current(fd);
+                let _ = self.ledger.close_fd_current(fd);
                 call.complete_sock_shutdown(WASI_ERRNO_SUCCESS as u32)?;
             }
             SocketKind::SockAccept => {

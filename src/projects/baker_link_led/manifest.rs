@@ -285,7 +285,7 @@ mod tests {
         choreography::protocol::FdWrite,
         kernel::{
             fd_object::{GpioFdWriteError, check_gpio_object_fd_write},
-            wasi::{ChoreoResourceKind, PicoFdRights, PicoFdView, PicoFdViewSource},
+            wasi::{ChoreoResourceKind, PicoFdRights, PicoFdRoute, PicoFdView, PicoFdViewSource},
         },
     };
 
@@ -295,18 +295,21 @@ mod tests {
         let opened = store
             .open(BAKER_LINK_LED_RESOURCE_PATHS[index], PicoFdRights::Write)
             .expect("open Baker LED resource");
+        let route = PicoFdRoute::new(
+            super::BAKER_LINK_LED_TARGET_NODE,
+            super::BAKER_LINK_LED_TARGET_ROLE,
+            super::BAKER_LINK_LED_LANE,
+            super::BAKER_LINK_LED_ROUTE_LABEL,
+            BAKER_LINK_LED_SESSION_GENERATION,
+            super::BAKER_LINK_LED_POLICY_SLOT,
+        );
         fds.apply_cap_mint(
             fd,
             PicoFdRights::Write,
             opened.resource(),
-            super::BAKER_LINK_LED_LANE,
-            super::BAKER_LINK_LED_ROUTE_LABEL,
             opened.object_id(),
-            super::BAKER_LINK_LED_TARGET_NODE,
-            super::BAKER_LINK_LED_TARGET_ROLE,
-            BAKER_LINK_LED_SESSION_GENERATION,
             opened.generation(),
-            super::BAKER_LINK_LED_POLICY_SLOT,
+            route,
         )
         .expect("mint Baker LED fd view");
     }

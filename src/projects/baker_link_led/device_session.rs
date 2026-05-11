@@ -94,32 +94,39 @@ pub(super) async fn gpio_device_recv_set_once(endpoint: &mut GpioEndpoint) {
     target_os = "none",
     feature = "baker-abort-safe-demo"
 ))]
-pub(super) async fn gpio_device_recv_abort_set_once(endpoint: &mut GpioEndpoint, route_depth: u8) {
-    let set = if route_depth == 0 {
-        endpoint
-            .recv::<Msg<LABEL_GPIO_SET, GpioSet>>()
-            .await
-            .unwrap_or_else(|_| {
-                record_failure_stage(STAGE_GPIO_SET_DECODE_ERR);
-                panic!()
-            })
-    } else {
-        let branch = endpoint.offer().await.unwrap_or_else(|_| {
+pub(super) async fn gpio_device_recv_abort_terminal_entry_set_once(endpoint: &mut GpioEndpoint) {
+    let branch = endpoint.offer().await.unwrap_or_else(|_| {
+        record_failure_stage(STAGE_GPIO_SET_DECODE_ERR);
+        panic!()
+    });
+    if branch.label() != LABEL_GPIO_SET {
+        record_failure_stage(STAGE_GPIO_SET_LABEL_ERR);
+        panic!();
+    }
+    let set = branch
+        .decode::<Msg<LABEL_GPIO_SET, GpioSet>>()
+        .await
+        .unwrap_or_else(|_| {
             record_failure_stage(STAGE_GPIO_SET_DECODE_ERR);
             panic!()
         });
-        if branch.label() != LABEL_GPIO_SET {
-            record_failure_stage(STAGE_GPIO_SET_LABEL_ERR);
-            panic!();
-        }
-        branch
-            .decode::<Msg<LABEL_GPIO_SET, GpioSet>>()
-            .await
-            .unwrap_or_else(|_| {
-                record_failure_stage(STAGE_GPIO_SET_DECODE_ERR);
-                panic!()
-            })
-    };
+    rp2040_gpio_apply_baker_led_set(set);
+    gpio_device_send_set_done_once(endpoint, set).await;
+}
+
+#[cfg(all(
+    target_arch = "arm",
+    target_os = "none",
+    feature = "baker-abort-safe-demo"
+))]
+pub(super) async fn gpio_device_recv_abort_terminal_seq_set_once(endpoint: &mut GpioEndpoint) {
+    let set = endpoint
+        .recv::<Msg<LABEL_GPIO_SET, GpioSet>>()
+        .await
+        .unwrap_or_else(|_| {
+            record_failure_stage(STAGE_GPIO_SET_DECODE_ERR);
+            panic!()
+        });
     rp2040_gpio_apply_baker_led_set(set);
     gpio_device_send_set_done_once(endpoint, set).await;
 }

@@ -2,7 +2,7 @@ use crate::{
     kernel::{
         choreofs::{ChoreoFsError, pico_rights_from_wasip1_base},
         guest_ledger::{GuestFd, GuestLedger},
-        wasi::{ChoreoResourceKind, PicoFdRights, PicoFdView, PicoFdViewEntry},
+        wasi::{ChoreoResourceKind, PicoFdRights, PicoFdRoute, PicoFdView, PicoFdViewEntry},
     },
     projects::baker_link_led::manifest::{
         BAKER_LINK_CHOREOFS_PREOPEN_FD, BAKER_LINK_CHOREOFS_PREOPEN_LANE,
@@ -108,18 +108,21 @@ fn mint_baker_link_led_fd_for<const N: usize>(
 ) -> Result<PicoFdViewEntry, ChoreoFsError> {
     let index = baker_link_led_index_for_fd(fd).ok_or(ChoreoFsError::NotFound)?;
     let opened = store.open(BAKER_LINK_LED_RESOURCE_PATHS[index], PicoFdRights::Write)?;
+    let route = PicoFdRoute::new(
+        BAKER_LINK_LED_TARGET_NODE,
+        BAKER_LINK_LED_TARGET_ROLE,
+        BAKER_LINK_LED_LANE,
+        BAKER_LINK_LED_ROUTE_LABEL,
+        BAKER_LINK_LED_SESSION_GENERATION,
+        BAKER_LINK_LED_POLICY_SLOT,
+    );
     Ok(table.apply_cap_mint(
         fd,
         PicoFdRights::Write,
         opened.resource(),
-        BAKER_LINK_LED_LANE,
-        BAKER_LINK_LED_ROUTE_LABEL,
         opened.object_id(),
-        BAKER_LINK_LED_TARGET_NODE,
-        BAKER_LINK_LED_TARGET_ROLE,
-        BAKER_LINK_LED_SESSION_GENERATION,
         opened.generation(),
-        BAKER_LINK_LED_POLICY_SLOT,
+        route,
     )?)
 }
 

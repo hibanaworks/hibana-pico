@@ -300,42 +300,36 @@ pub struct RemoteGrant {
 }
 
 impl RemoteGrant {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         node_id: NodeId,
         credential: SwarmCredential,
-        target_node: NodeId,
-        target_role: u8,
-        lane: u8,
-        route: u8,
-        session_generation: u16,
-        policy_slot: u8,
+        route: RemoteRoute,
         rights: RemoteRights,
         resource: RemoteResource,
     ) -> Self {
         Self {
             node_id,
-            target_node,
-            target_role,
-            lane,
-            route,
-            session_generation,
-            policy_slot,
+            target_node: route.target_node,
+            target_role: route.target_role,
+            lane: route.lane,
+            route: route.route,
+            session_generation: route.session_generation,
+            policy_slot: route.policy_slot,
             rights,
             resource,
-            tag: Self::compute_tag(
-                node_id,
-                credential,
-                target_node,
-                target_role,
-                lane,
-                route,
-                session_generation,
-                policy_slot,
-                rights,
-                resource,
-            ),
+            tag: Self::compute_tag(node_id, credential, route, rights, resource),
         }
+    }
+
+    pub const fn route_key(&self) -> RemoteRoute {
+        RemoteRoute::with_policy(
+            self.target_node,
+            self.target_role,
+            self.lane,
+            self.route,
+            self.session_generation,
+            self.policy_slot,
+        )
     }
 
     fn verify(
@@ -353,12 +347,7 @@ impl RemoteGrant {
         let expected = Self::compute_tag(
             self.node_id,
             credential,
-            self.target_node,
-            self.target_role,
-            self.lane,
-            self.route,
-            self.session_generation,
-            self.policy_slot,
+            self.route_key(),
             self.rights,
             self.resource,
         );
@@ -368,27 +357,21 @@ impl RemoteGrant {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn compute_tag(
         node_id: NodeId,
         credential: SwarmCredential,
-        target_node: NodeId,
-        target_role: u8,
-        lane: u8,
-        route: u8,
-        session_generation: u16,
-        policy_slot: u8,
+        route: RemoteRoute,
         rights: RemoteRights,
         resource: RemoteResource,
     ) -> u32 {
         let mut acc = credential.key() ^ 0x5246_4443;
         acc = acc.rotate_left(5) ^ node_id.raw() as u32;
-        acc = acc.rotate_left(5) ^ target_node.raw() as u32;
-        acc = acc.rotate_left(5) ^ target_role as u32;
-        acc = acc.rotate_left(5) ^ lane as u32;
-        acc = acc.rotate_left(5) ^ route as u32;
-        acc = acc.rotate_left(5) ^ session_generation as u32;
-        acc = acc.rotate_left(5) ^ policy_slot as u32;
+        acc = acc.rotate_left(5) ^ route.target_node.raw() as u32;
+        acc = acc.rotate_left(5) ^ route.target_role as u32;
+        acc = acc.rotate_left(5) ^ route.lane as u32;
+        acc = acc.rotate_left(5) ^ route.route as u32;
+        acc = acc.rotate_left(5) ^ route.session_generation as u32;
+        acc = acc.rotate_left(5) ^ route.policy_slot as u32;
         acc = acc.rotate_left(5) ^ rights.bits() as u32;
         acc = acc.rotate_left(5) ^ resource.code() as u32;
         acc
@@ -402,102 +385,37 @@ pub enum RemoteControl {
 }
 
 impl RemoteControl {
-    #[allow(clippy::too_many_arguments)]
     pub fn cap_grant(
         node_id: NodeId,
         credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        target_role: u8,
-        lane: u8,
-        route: u8,
-        policy_slot: u8,
+        route: RemoteRoute,
         rights: RemoteRights,
         resource: RemoteResource,
     ) -> Self {
         Self::CapGrant(RemoteGrant::new(
-            node_id,
-            credential,
-            target_node,
-            target_role,
-            lane,
-            route,
-            session_generation,
-            policy_slot,
-            rights,
-            resource,
+            node_id, credential, route, rights, resource,
         ))
     }
 
     pub fn cap_grant_remote(
         node_id: NodeId,
         credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        target_role: u8,
-        lane: u8,
-        route: u8,
+        route: RemoteRoute,
         rights: RemoteRights,
         resource: RemoteResource,
     ) -> Self {
-        Self::cap_grant_remote_with_policy(
-            node_id,
-            credential,
-            session_generation,
-            target_node,
-            target_role,
-            lane,
-            route,
-            0,
-            rights,
-            resource,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn cap_grant_remote_with_policy(
-        node_id: NodeId,
-        credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        target_role: u8,
-        lane: u8,
-        route: u8,
-        policy_slot: u8,
-        rights: RemoteRights,
-        resource: RemoteResource,
-    ) -> Self {
-        Self::cap_grant(
-            node_id,
-            credential,
-            session_generation,
-            target_node,
-            target_role,
-            lane,
-            route,
-            policy_slot,
-            rights,
-            resource,
-        )
+        Self::cap_grant(node_id, credential, route, rights, resource)
     }
 
     pub fn cap_grant_management(
         node_id: NodeId,
         credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        target_role: u8,
-        lane: u8,
-        route: u8,
+        route: RemoteRoute,
         rights: RemoteRights,
     ) -> Self {
         Self::cap_grant_remote(
             node_id,
             credential,
-            session_generation,
-            target_node,
-            target_role,
-            lane,
             route,
             rights,
             RemoteResource::Management,
@@ -507,20 +425,12 @@ impl RemoteControl {
     pub fn cap_grant_telemetry(
         node_id: NodeId,
         credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        target_role: u8,
-        lane: u8,
-        route: u8,
+        route: RemoteRoute,
         rights: RemoteRights,
     ) -> Self {
         Self::cap_grant_remote(
             node_id,
             credential,
-            session_generation,
-            target_node,
-            target_role,
-            lane,
             route,
             rights,
             RemoteResource::Telemetry,
@@ -573,16 +483,7 @@ impl<const N: usize> RemoteObjectTable<N> {
                 if let Err(error) = grant.verify(node_id, credential, session_generation) {
                     return Err(self.record_rejection(error));
                 }
-                self.materialize_cap_grant(
-                    grant.target_node,
-                    grant.target_role,
-                    grant.lane,
-                    grant.route,
-                    grant.session_generation,
-                    grant.policy_slot,
-                    grant.rights,
-                    grant.resource,
-                )
+                self.materialize_cap_grant(grant.route_key(), grant.rights, grant.resource)
             }
             RemoteControl::CapRevoke { fd } => self.revoke_fd_entry(fd),
         }
@@ -605,60 +506,28 @@ impl<const N: usize> RemoteObjectTable<N> {
         self.apply_control(control, node_id, credential, session_generation)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn apply_cap_grant(
         &mut self,
         node_id: NodeId,
         credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        target_role: u8,
-        lane: u8,
-        route: u8,
+        route: RemoteRoute,
         rights: RemoteRights,
         resource: RemoteResource,
     ) -> Result<RemoteObject, RemoteError> {
-        self.apply_cap_grant_with_policy(
-            node_id,
-            credential,
-            session_generation,
-            target_node,
-            target_role,
-            lane,
-            route,
-            0,
-            rights,
-            resource,
-        )
+        self.apply_cap_grant_with_policy(node_id, credential, route, rights, resource)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn apply_cap_grant_with_policy(
         &mut self,
         node_id: NodeId,
         credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        target_role: u8,
-        lane: u8,
-        route: u8,
-        policy_slot: u8,
+        route: RemoteRoute,
         rights: RemoteRights,
         resource: RemoteResource,
     ) -> Result<RemoteObject, RemoteError> {
+        let session_generation = route.session_generation();
         self.apply_control(
-            RemoteControl::cap_grant_remote_with_policy(
-                node_id,
-                credential,
-                session_generation,
-                target_node,
-                target_role,
-                lane,
-                route,
-                policy_slot,
-                rights,
-                resource,
-            ),
+            RemoteControl::cap_grant_remote(node_id, credential, route, rights, resource),
             node_id,
             credential,
             session_generation,
@@ -669,24 +538,12 @@ impl<const N: usize> RemoteObjectTable<N> {
         &mut self,
         node_id: NodeId,
         credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        target_role: u8,
-        lane: u8,
-        route: u8,
+        route: RemoteRoute,
         rights: RemoteRights,
     ) -> Result<RemoteObject, RemoteError> {
+        let session_generation = route.session_generation();
         self.apply_control(
-            RemoteControl::cap_grant_management(
-                node_id,
-                credential,
-                session_generation,
-                target_node,
-                target_role,
-                lane,
-                route,
-                rights,
-            ),
+            RemoteControl::cap_grant_management(node_id, credential, route, rights),
             node_id,
             credential,
             session_generation,
@@ -697,39 +554,21 @@ impl<const N: usize> RemoteObjectTable<N> {
         &mut self,
         node_id: NodeId,
         credential: SwarmCredential,
-        session_generation: u16,
-        target_node: NodeId,
-        target_role: u8,
-        lane: u8,
-        route: u8,
+        route: RemoteRoute,
         rights: RemoteRights,
     ) -> Result<RemoteObject, RemoteError> {
+        let session_generation = route.session_generation();
         self.apply_control(
-            RemoteControl::cap_grant_telemetry(
-                node_id,
-                credential,
-                session_generation,
-                target_node,
-                target_role,
-                lane,
-                route,
-                rights,
-            ),
+            RemoteControl::cap_grant_telemetry(node_id, credential, route, rights),
             node_id,
             credential,
             session_generation,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn materialize_cap_grant(
         &mut self,
-        target_node: NodeId,
-        target_role: u8,
-        lane: u8,
-        route: u8,
-        session_generation: u16,
-        policy_slot: u8,
+        route_key: RemoteRoute,
         rights: RemoteRights,
         resource: RemoteResource,
     ) -> Result<RemoteObject, RemoteError> {
@@ -741,12 +580,12 @@ impl<const N: usize> RemoteObjectTable<N> {
         let cap = RemoteObject {
             fd,
             generation,
-            target_node,
-            target_role,
-            lane,
-            route,
-            session_generation,
-            policy_slot,
+            target_node: route_key.target_node(),
+            target_role: route_key.target_role(),
+            lane: route_key.lane(),
+            route: route_key.route(),
+            session_generation: route_key.session_generation(),
+            policy_slot: route_key.policy_slot(),
             rights,
             resource,
             revoked: false,
@@ -1267,12 +1106,7 @@ mod tests {
         let grant = RemoteGrant::new(
             node,
             credential,
-            target,
-            0x02,
-            17,
-            LABEL_REMOTE_SAMPLE_REQ,
-            7,
-            3,
+            RemoteRoute::with_policy(target, 0x02, 17, LABEL_REMOTE_SAMPLE_REQ, 7, 3),
             RemoteRights::Read,
             RemoteResource::Sensor,
         );
@@ -1280,15 +1114,10 @@ mod tests {
         let mut table: RemoteObjectTable<4> = RemoteObjectTable::new();
         assert_eq!(
             table.apply_control(
-                RemoteControl::cap_grant_remote_with_policy(
+                RemoteControl::cap_grant_remote(
                     node,
                     credential,
-                    6,
-                    target,
-                    0x02,
-                    17,
-                    LABEL_REMOTE_SAMPLE_REQ,
-                    3,
+                    RemoteRoute::with_policy(target, 0x02, 17, LABEL_REMOTE_SAMPLE_REQ, 6, 3),
                     RemoteRights::Read,
                     RemoteResource::Sensor,
                 ),
@@ -1301,15 +1130,10 @@ mod tests {
 
         assert_eq!(
             table.apply_control(
-                RemoteControl::cap_grant_remote_with_policy(
+                RemoteControl::cap_grant_remote(
                     node,
                     SwarmCredential::new(0x5752_4f4e),
-                    7,
-                    target,
-                    0x02,
-                    17,
-                    LABEL_REMOTE_SAMPLE_REQ,
-                    3,
+                    RemoteRoute::with_policy(target, 0x02, 17, LABEL_REMOTE_SAMPLE_REQ, 7, 3),
                     RemoteRights::Read,
                     RemoteResource::Sensor,
                 ),
@@ -1322,15 +1146,10 @@ mod tests {
 
         assert_eq!(
             table.apply_control(
-                RemoteControl::cap_grant_remote_with_policy(
+                RemoteControl::cap_grant_remote(
                     NodeId::new(9),
                     credential,
-                    7,
-                    target,
-                    0x02,
-                    17,
-                    LABEL_REMOTE_SAMPLE_REQ,
-                    3,
+                    RemoteRoute::with_policy(target, 0x02, 17, LABEL_REMOTE_SAMPLE_REQ, 7, 3),
                     RemoteRights::Read,
                     RemoteResource::Sensor,
                 ),

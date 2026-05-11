@@ -14,4 +14,6 @@ pub mod choreography;
 pub mod kernel;
 pub mod machine;
 pub mod port;
-pub mod projects;
+pub mod proof;
+
+mod projects;

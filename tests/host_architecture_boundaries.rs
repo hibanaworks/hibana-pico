@@ -17,6 +17,29 @@ fn assert_present(path: &str, source: &str, required: &[&str]) {
 }
 
 #[test]
+fn crate_public_surface_hides_project_tree_behind_proof_facade() {
+    let lib = include_str!("../src/lib.rs");
+    let proof = include_str!("../src/proof/baker_link.rs");
+
+    assert_present("src/lib.rs", lib, &["pub mod proof;", "mod projects;"]);
+    assert_absent(
+        "src/lib.rs",
+        lib,
+        &["pub mod projects;", "doc(hidden)", "cfg_attr(doc"],
+    );
+    assert_present(
+        "src/proof/baker_link.rs",
+        proof,
+        &["pub use crate::projects::baker_link_led"],
+    );
+    assert_absent(
+        "src/proof/baker_link.rs",
+        proof,
+        &["doc(hidden)", "compat", "legacy"],
+    );
+}
+
+#[test]
 fn choreography_sources_do_not_depend_on_kernel_machine_or_projects() {
     const SOURCES: &[(&str, &str)] = &[
         (
