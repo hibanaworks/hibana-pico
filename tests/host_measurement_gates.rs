@@ -380,11 +380,11 @@ fn plan_wasi_vm_hot_path_keeps_control_structure_scans_out() {
         "Wasm VM capacity must be selected by explicit profile features, not by test builds"
     );
     assert!(
-        vm.contains("feature = \"wasm-engine-wasip1-std-profile\") {\n    24"),
+        vm.contains("feature = \"wasm-engine-wasip1-std-profile\") {\n    16"),
         "embedded std profile must keep active control-stack capacity measured, not padded"
     );
     assert!(
-        vm.contains("feature = \"wasm-engine-wasip1-std-profile\") {\n    128"),
+        vm.contains("feature = \"wasm-engine-wasip1-std-profile\") {\n    56"),
         "embedded std profile must keep active control-target capacity measured, not padded"
     );
     for needle in [

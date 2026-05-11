@@ -79,6 +79,17 @@ macro_rules! abort_safe_linear_program {
     };
 }
 
+macro_rules! recoverable_abort_program {
+    () => {
+        seq_chain!(
+            g::send::<Role<0>, Role<1>, BudgetRunMsg, 1>(),
+            abort_safe_linear_program!(),
+            g::send::<Role<0>, Role<1>, BudgetRunMsg, 1>(),
+            g::send::<Role<1>, Role<0>, Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 1>(),
+        )
+    };
+}
+
 macro_rules! traffic_light_program {
     () => {{
         let continue_arm = g::send::<Role<1>, Role<1>, BakerTrafficLoopContinueControl, 1>()
@@ -162,6 +173,9 @@ pub const ABORT_SAFE_GPIO_PROGRAM: RoleProgram<2> = project(&abort_safe_terminal
 pub const ABORT_SAFE_LINEAR_KERNEL_PROGRAM: RoleProgram<0> = project(&abort_safe_linear_program!());
 pub const ABORT_SAFE_LINEAR_ENGINE_PROGRAM: RoleProgram<1> = project(&abort_safe_linear_program!());
 pub const ABORT_SAFE_LINEAR_GPIO_PROGRAM: RoleProgram<2> = project(&abort_safe_linear_program!());
+pub const RECOVERABLE_ABORT_KERNEL_PROGRAM: RoleProgram<0> = project(&recoverable_abort_program!());
+pub const RECOVERABLE_ABORT_ENGINE_PROGRAM: RoleProgram<1> = project(&recoverable_abort_program!());
+pub const RECOVERABLE_ABORT_GPIO_PROGRAM: RoleProgram<2> = project(&recoverable_abort_program!());
 
 /// Baker Link LED fd_write proof. The guest writes ASCII `1` then `0` to fd 3;
 /// each write is gated by a read lease and acknowledged by the GPIO device role
@@ -247,5 +261,18 @@ pub fn abort_safe_linear_roles() -> (RoleProgram<0>, RoleProgram<1>, RoleProgram
         ABORT_SAFE_LINEAR_KERNEL_PROGRAM,
         ABORT_SAFE_LINEAR_ENGINE_PROGRAM,
         ABORT_SAFE_LINEAR_GPIO_PROGRAM,
+    )
+}
+
+/// Baker Link recoverable fail-safe proof. The lifecycle owner holds a reusable
+/// `ActivationAuthority<Many>` in the lower-layer hibana capability system. This
+/// projected proof materializes concrete `Activation<One>` runs as
+/// generation-distinct `BudgetRunMsg`s: the first run aborts, `Fence` makes its
+/// authority stale, and a second `BudgetRunMsg` starts a fresh activation.
+pub fn recoverable_abort_roles() -> (RoleProgram<0>, RoleProgram<1>, RoleProgram<2>) {
+    (
+        RECOVERABLE_ABORT_KERNEL_PROGRAM,
+        RECOVERABLE_ABORT_ENGINE_PROGRAM,
+        RECOVERABLE_ABORT_GPIO_PROGRAM,
     )
 }

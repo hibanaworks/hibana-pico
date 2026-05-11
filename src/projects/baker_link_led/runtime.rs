@@ -218,7 +218,7 @@ const SLAB_BYTES: usize = 200 * 1024;
     target_os = "none",
     not(feature = "baker-abort-safe-demo")
 ))]
-const SLAB_BYTES: usize = 124 * 1024;
+const SLAB_BYTES: usize = 122 * 1024;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const TEST_MEMORY_LEN: u32 = 64 * 1024;
 #[cfg(all(target_arch = "arm", target_os = "none"))]

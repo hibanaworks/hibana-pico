@@ -222,6 +222,8 @@ baker-ordinary-std-demo = [
     "wasip1-ledger-embedded-std",
 ]
 baker-choreofs-demo = [
+    "wasm-engine-wasip1-std-profile",
+    "wasip1-sys-args-env",
     "wasip1-sys-fd-write",
     "wasip1-sys-poll-oneoff",
     "wasip1-sys-proc-exit",

@@ -279,8 +279,8 @@ The fastest way to audit a proof is to read one row left to right:
 | Timer sleep | `src/choreography/local.rs::timer_sleep_roles` | `tests/host_baker_led_fd.rs` and `src/projects/baker_link_led/runtime.rs` drive `flow::<TimerSleepUntil>().send`, resolver admission, then `flow::<TimerSleepDone>().send` through the typed poll path | `src/kernel/resolver.rs` converts `InterruptEvent::TimerTick` into `ResolvedInterrupt::TimerSleepDone`; `src/kernel/device/timer.rs` only completes due waits |
 | WASI clock | `src/choreography/local.rs::wasip1_clock_now_roles` | `tests/host_wasip1_syscalls.rs` drives request/reply with `Wasip1ClockNow` | no interrupt resolver; this is a synchronous clock syscall returning `ClockNow` |
 | Baker traffic light | `src/projects/baker_link_led/choreography.rs::traffic_light_roles` | `kernel::engine::wasm::Guest` executes the no-main `wasm32-wasip1` artifact and maps real `wasi_snapshot_preview1.fd_write` / `poll_oneoff` imports into typed `Event::Call` values; `tests/host_baker_led_fd.rs` and `src/projects/baker_link_led/runtime.rs` turn those pending calls into `fd_write("1" / "0") -> Kernel->GPIO -> poll_oneoff -> Kernel->Timer`; `src/kernel/guest_ledger.rs::GuestLedger` owns the app-local fd view, lease, pending, quota, and errno facts | `src/machine/rp2040/baker_link.rs` supplies only Baker Link board facts: the visible GP22/GP21/GP20 user LED pins and safe inactive levels. `src/projects/baker_link_led/manifest.rs` is the LED proof manifest: ChoreoFS `GpioDevice` objects plus fd/pin/active-high/route facts. `src/projects/baker_link_led/ledger.rs` applies those manifest facts to the Baker project `GuestLedger`; `src/kernel/fd_object.rs` checks the materialized fd view, explicit GPIO route, and payload; `src/machine/rp2040/timer.rs` owns TIMER0 top-half/raw readiness; `src/kernel/resolver.rs` admits each timeout as `TimerSleepDone`; UART is a separate local device proof and fail-diagnostic path, not the Baker success criterion |
-| Baker ChoreoFS LED open | `src/projects/baker_link_led/choreography.rs::choreofs_traffic_light_roles` | `apps/wasip1/wasip1-smoke-apps/src/bin/wasip1-led-choreofs-open.rs` is the small physical RP2040 proof artifact: a `#![no_main]` `wasm32-wasip1` app exporting `__main_void` that calls preopen-relative `path_open("device/led/green")`, `path_open("device/led/orange")`, `path_open("device/led/red")`, then `fd_write("1"/"0")` and `poll_oneoff`; `src/projects/baker_link_led/runtime.rs` drives every `path_open` as `MemBorrowRead -> PathOpen -> PathOpened -> MemRelease` before the fd_write loop | `src/projects/baker_link_led/manifest.rs` maps ChoreoFS `GpioDevice` objects into the explicit Baker GPIO route, not a generic object route; bad `not/allowed`, `fd_write("on")`, and `fd_write` to a non-GPIO ChoreoFS object are hardware-verified typed-reject patterns |
-| Baker fail-safe terminal | `src/projects/baker_link_led/choreography.rs::abort_safe_terminal_roles` and `abort_safe_linear_roles` | `tests/host_baker_led_fd.rs::baker_link_abort_terminal_fences_ledger_and_uses_gpio_choreography_for_safe_state` verifies the full Engine-owned `Abort | Normal` terminal route; the physical `baker-abort-safe-demo` profile drives the selected terminal fragment as `EngineAbort -> AbortBegin -> Fence -> GPIO safe-state -> AbortAck` | `src/kernel/guest_ledger.rs::GuestLedger::apply_abort_fence` makes old fds, leases, and pending tokens stale by generation; Baker safe state uses the existing `Kernel -> GPIO -> Kernel` `GpioSet/GpioSetDone` choreography for GP22/GP21/GP20, while hard panic remains endpoint-free direct MMIO |
+| Baker ChoreoFS LED open | `src/projects/baker_link_led/choreography.rs::choreofs_traffic_light_roles` | `apps/wasip1/wasip1-smoke-apps/src/bin/wasip1-led-choreofs-open.rs` is the ordinary Rust `fn main` physical RP2040 proof artifact built as `wasm32-wasip1`; it calls `path_open("/device/led/green")`, `path_open("/device/led/orange")`, `path_open("/device/led/red")`, then `fd_write("1"/"0")` and `poll_oneoff`; `src/projects/baker_link_led/runtime.rs` drives every emitted `path_open` as `MemBorrowRead -> PathOpen -> PathOpened -> MemRelease` before the fd_write loop | `src/projects/baker_link_led/manifest.rs` maps ChoreoFS `GpioDevice` objects into the explicit Baker GPIO route, not a generic object route; bad `not/allowed`, `fd_write("on")`, and `fd_write` to a non-GPIO ChoreoFS object are hardware-verified typed-reject patterns |
+| Baker fail-safe terminal | `src/projects/baker_link_led/choreography.rs::abort_safe_terminal_roles`, `abort_safe_linear_roles`, and `recoverable_abort_roles` | `tests/host_baker_led_fd.rs::baker_link_abort_terminal_fences_ledger_and_uses_gpio_choreography_for_safe_state` verifies the full Engine-owned `Abort | Normal` terminal route; `baker_link_recoverable_fail_safe_starts_fresh_activation_after_abort` proves `AbortAck` cannot continue the old activation and only a fresh `BudgetRun` generation can restart progress; the physical `baker-abort-safe-demo` profile drives the selected terminal fragment as `EngineAbort -> AbortBegin -> Fence -> GPIO safe-state -> AbortAck` | `src/kernel/guest_ledger.rs::GuestLedger::apply_abort_fence` makes old fds, leases, and pending tokens stale by generation; Baker safe state uses the existing `Kernel -> GPIO -> Kernel` `GpioSet/GpioSetDone` choreography for GP22/GP21/GP20, while hard panic remains endpoint-free direct MMIO |
 | WASI memory grow | `src/choreography/local.rs::memory_grow_stdout_roles` | `tests/host_wasip1_artifacts.rs` drives `MemFence(MemoryGrow)`, rejects the old lease, then borrows again under the new epoch | `kernel::wasi::MemoryLeaseTable` invalidates outstanding leases and rejects stale epochs |
 | Ordinary std core coverage | no new choreography | `tests/host_wasip1_artifacts.rs::rust_built_ordinary_std_core_coverage_runs_on_host_full_profile` runs the Rust std artifact through `HostRunner` | core Wasm handles control/result values, bulk memory, table/ref, floats, and `memory.grow`; unsupported syscalls remain typed rejects |
 | Ordinary std ChoreoFS read | no new choreography | `tests/host_wasip1_artifacts.rs::rust_built_std_choreofs_app_uses_resource_store_through_host_full_runner` runs `File::open` / `Read` from a Rust std app through `path_open` and `fd_read` | `src/kernel/choreofs.rs` is the bounded resource store; the app never reaches host filesystem authority |
@@ -801,13 +801,13 @@ scripts/run_baker_link_hardware_pattern.sh fail-safe
 
 The Baker ChoreoFS hardware proof embeds
 `wasip1-led-choreofs-open.wasm`. It is the small physical RP2040 artifact:
-a `#![no_main]` `wasm32-wasip1` app exporting `__main_void`. Its first actions
-are:
+an ordinary Rust `fn main` app built for `wasm32-wasip1`. Its emitted boundary
+events begin with:
 
 ```text
-path_open(9, "device/led/green")  -> ChoreoFS GpioDevice -> fd 3
-path_open(9, "device/led/orange") -> ChoreoFS GpioDevice -> fd 4
-path_open(9, "device/led/red")    -> ChoreoFS GpioDevice -> fd 5
+path_open(9, "/device/led/green")  -> ChoreoFS GpioDevice -> fd 3
+path_open(9, "/device/led/orange") -> ChoreoFS GpioDevice -> fd 4
+path_open(9, "/device/led/red")    -> ChoreoFS GpioDevice -> fd 5
 fd_write(fd=3, "1")                -> Kernel -> GPIO -> GP22
 poll_oneoff(...)                   -> Timer IRQ -> resolver -> PollReady
 ```
@@ -827,8 +827,8 @@ loop. The bad ChoreoFS hardware patterns are:
 | `choreofs-bad-payload` | `fd_write("on")` reaches the LED object route and rejects at payload policy, `stage=0x4849004c` |
 | `choreofs-wrong-object` | `device/not-gpio` can mint an fd, but `fd_write("1")` rejects because the object is not GPIO, `stage=0x4849004d` |
 
-The fail-safe hardware pattern proves the recoverable terminal path without
-using a hard-stop escape hatch for a soft abort:
+The fail-safe hardware pattern proves the soft terminal path without using a
+hard-stop escape hatch for a soft abort:
 
 ```text
 EngineAbort
@@ -840,10 +840,11 @@ EngineAbort
   -> AbortAck
 ```
 
-The host test keeps the full `Abort | Normal` route proof. The physical Baker
-profile runs the selected terminal fragment so the same RP2040 two-core mapping
-can keep the safe-state proof small enough for the board. Expected hardware
-result is `HIBANA_DEMO_RESULT = 0x48494653`.
+The host tests keep the full `Abort | Normal` route proof and the recoverable
+fresh-activation proof. The physical Baker profile runs the selected terminal
+fragment so the same RP2040 two-core mapping can keep the safe-state proof small
+enough for the board. Expected hardware result is
+`HIBANA_DEMO_RESULT = 0x48494653`.
 
 The app-owned behavior proof swaps only the WASI guest artifact. The same
 `traffic_light_roles()` choreography, same fd view, same memory lease path,

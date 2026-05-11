@@ -769,6 +769,15 @@ ActivationAuthority<Many>
   -> new generation
   -> new activation
 
+`CapDelegate` is hibana lower-layer authority movement. It must not be faked as
+an application-level `g::send` message. A Pico project proves the resulting
+fresh activation by showing:
+
+AbortAck
+  -> old activation cannot continue
+  -> fresh BudgetRun with a new generation
+  -> normal projected progress
+
 Same-session recovery is forbidden.
 
 19. StateSnapshot / StateRestore Law
@@ -1286,7 +1295,7 @@ CYW43439 physical swarm gates pass.
 Do not claim recoverable fail-safe until:
 
 AbortBegin / Fence / SAFE / AbortAck passes
-fresh Activation<One> from ActivationAuthority<Many> passes
+fresh activation after AbortAck passes with a new generation
 same-session recovery is rejected
 hard panic endpoint-free stop is verified
 

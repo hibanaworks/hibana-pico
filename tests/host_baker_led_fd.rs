@@ -24,9 +24,10 @@ use hibana_pico::{
         EngineAbortFenceControl, EngineAbortMsg, EngineAbortReason, EngineAbortRouteControl,
         EngineLabelUniverse, EngineReq, EngineRet, FdWrite, FdWriteDone, GpioSet, LABEL_GPIO_SET,
         LABEL_GPIO_SET_DONE, LABEL_MEM_BORROW_READ, LABEL_MEM_RELEASE, LABEL_UART_WRITE,
-        LABEL_UART_WRITE_RET, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET, LABEL_WASIP1_STDOUT,
-        LABEL_WASIP1_STDOUT_RET, MemBorrow, MemReadGrantControl, MemRelease, MemRights, PollOneoff,
-        StdoutChunk, TimerSleepDone, UartWrite, UartWriteDone,
+        LABEL_UART_WRITE_RET, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET, LABEL_WASI_PROC_EXIT,
+        LABEL_WASIP1_STDOUT, LABEL_WASIP1_STDOUT_RET, MemBorrow, MemReadGrantControl, MemRelease,
+        MemRights, PollOneoff, ProcExitStatus, StdoutChunk, TimerSleepDone, UartWrite,
+        UartWriteDone,
     },
     kernel::device::{gpio::GpioStateTable, uart::UartTxLog},
     kernel::fd_object::check_gpio_object_fd_write,
@@ -41,7 +42,7 @@ use hibana_pico::{
         choreography::{
             BakerTrafficLoopContinueControl, POLICY_BAKER_ENGINE_ABORT_ROUTE,
             POLICY_BAKER_TRAFFIC_LOOP, abort_safe_linear_roles, abort_safe_terminal_roles,
-            fd_write_two_cycles_roles, traffic_light_roles,
+            fd_write_two_cycles_roles, recoverable_abort_roles, traffic_light_roles,
         },
         ledger::baker_link_pico_min_ledger,
         manifest::{
@@ -63,17 +64,13 @@ use hibana_pico::{
 use hibana_pico::{
     choreography::protocol::{
         LABEL_TIMER_SLEEP_DONE, LABEL_TIMER_SLEEP_UNTIL, LABEL_WASI_POLL_ONEOFF,
-        LABEL_WASI_POLL_ONEOFF_RET, LABEL_WASI_PROC_EXIT, PollReady, ProcExitStatus,
-        TimerSleepUntil,
+        LABEL_WASI_POLL_ONEOFF_RET, PollReady, TimerSleepUntil,
     },
     kernel::resolver::{InterruptEvent, PicoInterruptResolver, ResolvedInterrupt},
     projects::baker_link_led::choreography::BakerTrafficLoopBreakControl,
 };
 
-#[cfg(all(
-    feature = "wasm-engine-wasip1-std-profile",
-    feature = "wasip1-sys-path-minimal",
-))]
+#[cfg(all(feature = "baker-choreofs-demo", feature = "wasip1-sys-path-minimal",))]
 use hibana_pico::choreography::protocol::{
     LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET, PathOpen, PathOpened,
 };
@@ -86,10 +83,7 @@ use hibana_pico::choreography::protocol::{
 ))]
 use hibana_pico::kernel::engine::wasm::{Call, Error as WasmError, Event, Guest};
 
-#[cfg(all(
-    feature = "wasm-engine-wasip1-std-profile",
-    feature = "wasip1-sys-path-minimal",
-))]
+#[cfg(all(feature = "baker-choreofs-demo", feature = "wasip1-sys-path-minimal",))]
 use hibana_pico::{
     kernel::engine::wasm::{Path as WasiPathCall, PathKind, Pending},
     projects::baker_link_led::manifest::{
@@ -233,10 +227,7 @@ fn wasip1_artifact(name: &str) -> Vec<u8> {
 }
 
 const TEST_MEMORY_LEN: u32 = 4096;
-#[cfg(all(
-    feature = "wasm-engine-wasip1-std-profile",
-    feature = "wasip1-sys-path-minimal",
-))]
+#[cfg(all(feature = "baker-choreofs-demo", feature = "wasip1-sys-path-minimal"))]
 const TEST_CHOREOFS_MEMORY_LEN: u32 = 64 * 1024;
 const TEST_MEMORY_EPOCH: u32 = 1;
 const TEST_LED_PTR: u32 = 128;
@@ -733,10 +724,7 @@ async fn exchange_app_activation_start(
     assert_eq!(received, run);
 }
 
-#[cfg(all(
-    feature = "wasm-engine-wasip1-std-profile",
-    feature = "wasip1-sys-path-minimal",
-))]
+#[cfg(all(feature = "baker-choreofs-demo", feature = "wasip1-sys-path-minimal"))]
 async fn exchange_choreofs_path_open(
     kernel: &mut Endpoint<'_, 0>,
     engine: &mut Endpoint<'_, 1>,
@@ -940,10 +928,7 @@ fn baker_expected_chaser_steps() -> [ExpectedTrafficStep; BAKER_LINK_TRAFFIC_LIG
     ]
 }
 
-#[cfg(all(
-    feature = "wasm-engine-wasip1-std-profile",
-    feature = "wasip1-sys-path-minimal",
-))]
+#[cfg(all(feature = "baker-choreofs-demo", feature = "wasip1-sys-path-minimal"))]
 fn baker_expected_choreofs_steps() -> [ExpectedTrafficStep; BAKER_LINK_TRAFFIC_LIGHT_PATTERN_STEPS]
 {
     [
@@ -1496,10 +1481,7 @@ fn baker_link_led_blink_uses_timer_resolver_between_fd_writes() {
 }
 
 #[test]
-#[cfg(all(
-    feature = "wasm-engine-wasip1-std-profile",
-    feature = "wasip1-sys-path-minimal",
-))]
+#[cfg(all(feature = "baker-choreofs-demo", feature = "wasip1-sys-path-minimal",))]
 fn baker_link_choreofs_opened_led_fds_drive_gpio_and_timer_like_firmware() {
     run_large_stack_test(|| {
         run_current_task(async {
@@ -1881,6 +1863,175 @@ fn baker_link_abort_linear_fragment_attaches_and_runs_safe_state() {
         (engine.recv::<EngineAbortAckControl>())
             .await
             .expect("engine receives linear abort ack");
+    });
+}
+
+#[test]
+fn baker_link_recoverable_fail_safe_starts_fresh_activation_after_abort() {
+    run_current_task(async {
+        let backend = HostQueueBackend::new();
+        let clock = CounterClock::new();
+        let mut tap = [TapEvent::zero(); 128];
+        let mut slab = vec![0u8; 262_144];
+        let cluster = TestKit::new(&clock);
+        let rv = cluster
+            .add_rendezvous_from_config(
+                Config::new(&mut tap, slab.as_mut_slice()).with_universe(EngineLabelUniverse),
+                SioTransport::new(&backend),
+            )
+            .expect("register recoverable abort rendezvous");
+        let (kernel_program, engine_program, gpio_program) = recoverable_abort_roles();
+        let sid = SessionId::new(173);
+        let mut kernel: Endpoint<'_, 0> = cluster
+            .enter(rv, sid, &kernel_program, NoBinding)
+            .expect("attach recoverable abort kernel endpoint");
+        let mut engine: Endpoint<'_, 1> = cluster
+            .enter(rv, sid, &engine_program, NoBinding)
+            .expect("attach recoverable abort engine endpoint");
+        let mut gpio: Endpoint<'_, 2> = cluster
+            .enter(rv, sid, &gpio_program, NoBinding)
+            .expect("attach recoverable abort gpio endpoint");
+
+        let first_run = BudgetRun::new(1, 1, 250_000, 0);
+        (kernel
+            .flow::<BudgetRunMsg>()
+            .expect("kernel flow<first budget>")
+            .send(&first_run))
+        .await
+        .expect("kernel sends first budget");
+        assert_eq!(
+            (engine.recv::<BudgetRunMsg>())
+                .await
+                .expect("engine receives first budget"),
+            first_run
+        );
+
+        let mut ledger = baker_ledger();
+        let grant = ledger
+            .grant_read_lease(MemBorrow::new(TEST_LED_PTR, 1, TEST_MEMORY_EPOCH))
+            .expect("grant pre-abort lease");
+        let pending = ledger
+            .begin_poll_oneoff(PollOneoff::new(50))
+            .expect("create pre-abort pending syscall");
+
+        let abort = EngineAbort::new(EngineAbortReason::GuestTrap, 1);
+        (engine
+            .flow::<EngineAbortMsg>()
+            .expect("engine flow<recoverable abort reason>")
+            .send(&abort))
+        .await
+        .expect("engine sends recoverable abort reason");
+        assert_eq!(
+            (kernel.recv::<EngineAbortMsg>())
+                .await
+                .expect("kernel receives recoverable abort reason"),
+            abort
+        );
+        (engine
+            .flow::<EngineAbortBeginControl>()
+            .expect("engine flow<recoverable abort begin>")
+            .send(()))
+        .await
+        .expect("engine sends recoverable abort begin");
+        (kernel.recv::<EngineAbortBeginControl>())
+            .await
+            .expect("kernel receives recoverable abort begin");
+
+        ledger.apply_abort_fence(TEST_MEMORY_EPOCH + 1);
+        assert_eq!(ledger.fd_view().active_count(), 0);
+        assert_eq!(ledger.lease_table().outstanding_lease_count(), 0);
+        assert_eq!(ledger.pending_table().pending_count(), 0);
+        assert!(
+            ledger
+                .release_lease(MemRelease::new(grant.lease_id()))
+                .is_err()
+        );
+        assert!(
+            ledger
+                .complete_poll_oneoff(pending, TimerSleepDone::new(50))
+                .is_err()
+        );
+
+        (kernel
+            .flow::<EngineAbortFenceControl>()
+            .expect("kernel flow<recoverable abort fence>")
+            .send(()))
+        .await
+        .expect("kernel sends recoverable abort fence");
+        (engine.recv::<EngineAbortFenceControl>())
+            .await
+            .expect("engine receives recoverable abort fence");
+
+        for safe in BAKER_LINK_SAFE_GPIO_LEVELS {
+            let set = GpioSet::new(safe.pin(), safe.high());
+            (kernel
+                .flow::<Msg<LABEL_GPIO_SET, GpioSet>>()
+                .expect("kernel flow<recoverable safe gpio>")
+                .send(&set))
+            .await
+            .expect("kernel sends recoverable safe gpio");
+            let received = (gpio.recv::<Msg<LABEL_GPIO_SET, GpioSet>>())
+                .await
+                .expect("gpio receives recoverable safe gpio");
+            assert_eq!(received, set);
+            (gpio
+                .flow::<Msg<LABEL_GPIO_SET_DONE, GpioSet>>()
+                .expect("gpio flow<recoverable safe done>")
+                .send(&received))
+            .await
+            .expect("gpio sends recoverable safe done");
+            assert_eq!(
+                (kernel.recv::<Msg<LABEL_GPIO_SET_DONE, GpioSet>>())
+                    .await
+                    .expect("kernel receives recoverable safe done"),
+                received
+            );
+        }
+
+        (kernel
+            .flow::<EngineAbortAckControl>()
+            .expect("kernel flow<recoverable abort ack>")
+            .send(()))
+        .await
+        .expect("kernel sends recoverable abort ack");
+        (engine.recv::<EngineAbortAckControl>())
+            .await
+            .expect("engine receives recoverable abort ack");
+
+        assert!(
+            engine
+                .flow::<Msg<LABEL_WASI_PROC_EXIT, EngineReq>>()
+                .is_err(),
+            "same activation must not continue after AbortAck"
+        );
+
+        let fresh_run = BudgetRun::new(2, 2, 250_000, 100);
+        (kernel
+            .flow::<BudgetRunMsg>()
+            .expect("kernel flow<fresh budget>")
+            .send(&fresh_run))
+        .await
+        .expect("kernel sends fresh budget");
+        assert_eq!(
+            (engine.recv::<BudgetRunMsg>())
+                .await
+                .expect("engine receives fresh budget"),
+            fresh_run
+        );
+
+        let exit = EngineReq::ProcExit(ProcExitStatus::new(0));
+        (engine
+            .flow::<Msg<LABEL_WASI_PROC_EXIT, EngineReq>>()
+            .expect("engine flow<fresh proc_exit>")
+            .send(&exit))
+        .await
+        .expect("fresh activation exits normally");
+        assert_eq!(
+            (kernel.recv::<Msg<LABEL_WASI_PROC_EXIT, EngineReq>>())
+                .await
+                .expect("kernel receives fresh proc_exit"),
+            exit
+        );
     });
 }
 

@@ -793,9 +793,12 @@ fn rust_built_std_sock_app_uses_network_object_without_p2() {
 fn rust_built_std_sock_accept_app_mints_network_object_without_socket_authority() {
     let artifact = artifact("wasip1-std-sock-accept-send-recv");
     let mut runner = HostRunner::new(&artifact).expect("create host/full accept runner");
-    runner.cap_grant_listener(31).expect("grant listener fd");
-    runner.enqueue_stream_accept(31, 32);
-    runner.enqueue_network_rx(32, b"pong");
+    runner
+        .fs_mut()
+        .install_network_listener(b"network/listener/control")
+        .expect("install control NetworkListener");
+    runner.enqueue_stream_accept(4, 5);
+    runner.enqueue_network_rx(5, b"pong");
 
     let report = runner
         .run_until_exit(768)
@@ -956,7 +959,10 @@ fn wasip1_network_smoke_sources_use_guest_facade_not_raw_sock_imports() {
 fn rust_built_bad_std_sock_accept_rejects_without_listener_route() {
     let artifact = artifact("wasip1-std-sock-accept-bad");
     let mut runner = HostRunner::new(&artifact).expect("create host/full bad sock runner");
-    runner.cap_grant_listener(31).expect("grant listener fd");
+    runner
+        .fs_mut()
+        .install_network_listener(b"network/listener/control")
+        .expect("install control NetworkListener");
     runner.trap_on_network_error(true);
 
     let error = runner

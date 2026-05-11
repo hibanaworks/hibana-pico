@@ -301,28 +301,28 @@ const WASM_BLOCKTYPE_EMPTY: u8 = 0x40;
 const CORE_WASM_MAX_TYPES: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
     32
 } else if cfg!(feature = "wasm-engine-wasip1-std-profile") {
-    20
+    13
 } else {
     16
 };
 const CORE_WASM_MAX_IMPORTS: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
     64
 } else if cfg!(feature = "wasm-engine-wasip1-std-profile") {
-    16
+    6
 } else {
     16
 };
 const CORE_WASM_MAX_FUNCTIONS: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
     192
 } else if cfg!(feature = "wasm-engine-wasip1-std-profile") {
-    148
+    112
 } else {
     32
 };
 const CORE_WASM_MAX_GLOBALS: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
     32
 } else if cfg!(feature = "wasm-engine-wasip1-std-profile") {
-    4
+    2
 } else {
     16
 };
@@ -344,6 +344,8 @@ const CORE_WASM_VALUE_STACK_CAPACITY: usize = if cfg!(feature = "wasm-engine-was
 };
 const CORE_WASM_LOCAL_CAPACITY: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
     256
+} else if cfg!(feature = "wasm-engine-wasip1-std-profile") {
+    14
 } else {
     32
 };
@@ -355,14 +357,14 @@ const CORE_WASM_CALL_STACK_CAPACITY: usize = if cfg!(feature = "wasm-engine-wasi
 const CORE_WASM_CONTROL_STACK_CAPACITY: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
     64
 } else if cfg!(feature = "wasm-engine-wasip1-std-profile") {
-    24
+    16
 } else {
     16
 };
 const CORE_WASM_CONTROL_TARGET_CAPACITY: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
     1024
 } else if cfg!(feature = "wasm-engine-wasip1-std-profile") {
-    128
+    56
 } else {
     56
 };
@@ -371,7 +373,7 @@ const CORE_WASIP1_PATH_CAPACITY: usize = 64;
 const CORE_WASM_TABLE_CAPACITY: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
     96
 } else if cfg!(feature = "wasm-engine-wasip1-std-profile") {
-    50
+    35
 } else {
     16
 };

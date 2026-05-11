@@ -244,6 +244,10 @@ fn choreofs_led_smoke_app_uses_safe_guest_wrapper_for_normal_device_access() {
             "normal ChoreoFS LED app should use the Baker-scoped safe guest wrapper API ({needle})"
         );
     }
+    assert!(
+        source.contains("fn main()") && !source.contains("#![no_main]"),
+        "normal ChoreoFS LED app must remain an ordinary Rust WASI P1 main"
+    );
     for needle in [
         "Led::open(\"/device/led/green\")",
         "Led::open(\"/device/led/orange\")",

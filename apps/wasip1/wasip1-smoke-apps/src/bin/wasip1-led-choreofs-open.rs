@@ -1,24 +1,48 @@
 use hibana_wasi_guest::baker::{Led, sleep_ms};
 
 fn main() {
-    let green = Led::open("/device/led/green").unwrap();
-    let orange = Led::open("/device/led/orange").unwrap();
-    let red = Led::open("/device/led/red").unwrap();
+    if run().is_err() {
+        abort();
+    }
+}
 
-    green.set(true).unwrap();
-    sleep_ms(180).unwrap();
+fn run() -> hibana_wasi_guest::Result<()> {
+    let green = must(Led::open("/device/led/green"));
+    let orange = must(Led::open("/device/led/orange"));
+    let red = must(Led::open("/device/led/red"));
 
-    orange.set(true).unwrap();
-    sleep_ms(40).unwrap();
-    orange.set(false).unwrap();
-    sleep_ms(40).unwrap();
-    orange.set(true).unwrap();
-    sleep_ms(40).unwrap();
-    orange.set(false).unwrap();
-    sleep_ms(40).unwrap();
-    orange.set(true).unwrap();
-    sleep_ms(40).unwrap();
+    must(green.set(true));
+    must(sleep_ms(180));
 
-    red.set(true).unwrap();
-    sleep_ms(180).unwrap();
+    must(orange.set(true));
+    must(sleep_ms(40));
+    must(orange.set(false));
+    must(sleep_ms(40));
+    must(orange.set(true));
+    must(sleep_ms(40));
+    must(orange.set(false));
+    must(sleep_ms(40));
+    must(orange.set(true));
+    must(sleep_ms(40));
+
+    must(red.set(true));
+    must(sleep_ms(180));
+    Ok(())
+}
+
+fn must<T>(result: hibana_wasi_guest::Result<T>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(_) => abort(),
+    }
+}
+
+#[cold]
+fn abort() -> ! {
+    #[cfg(target_arch = "wasm32")]
+    core::arch::wasm32::unreachable();
+    #[cfg(not(target_arch = "wasm32"))]
+    loop {
+        core::hint::spin_loop();
+    }
 }
