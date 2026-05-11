@@ -23,17 +23,8 @@ use crate::choreography::protocol::{
     LABEL_WASIP1_RANDOM_SEED_RET, LABEL_WASIP1_STDERR, LABEL_WASIP1_STDERR_RET, LABEL_WASIP1_STDIN,
     LABEL_WASIP1_STDIN_RET, LABEL_WASIP1_STDOUT, LABEL_WASIP1_STDOUT_RET, LABEL_YIELD_REQ,
     LABEL_YIELD_RET, MemBorrow, MemCommit, MemFence, MemReadGrantControl, MemRelease,
-    MemWriteGrantControl, UartWrite, UartWriteDone,
+    MemWriteGrantControl, UartWrite, UartWriteDone, seq_chain,
 };
-
-macro_rules! seq_chain {
-    ($head:expr, $($tail:expr),+ $(,)?) => {
-        g::seq($head, seq_chain!($($tail),+))
-    };
-    ($last:expr $(,)?) => {
-        $last
-    };
-}
 
 /// WASI stdout over a read lease:
 /// borrow-read -> grant -> fd/stdout write -> write-ret -> release.

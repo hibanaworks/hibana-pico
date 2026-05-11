@@ -12,5 +12,7 @@ pub mod network;
 pub mod policy;
 pub mod remote;
 pub mod resolver;
+pub mod state;
 pub mod swarm;
+pub mod transaction;
 pub mod wasi;

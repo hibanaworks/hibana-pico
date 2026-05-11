@@ -34,9 +34,10 @@ Rust-built WASI P1 app
 
 The app sees only `fd`, `ptr`, `len`, and errno-like results. It does not see
 GP22/GP21/GP20, route labels, lanes, ChoreoFS object ids, the resolver, SIO
-FIFO, `GuestLedger`, or hibana endpoints. Baker LED fds are minted from
-ChoreoFS `GpioDevice` resource objects; `GuestLedger` is app-local capability
-state only: fds, leases, pending syscall tokens, quotas, and errno mapping. The
+FIFO, `GuestLedger`, or hibana endpoints. Baker LED fds are materialized by the
+Baker project runtime after ChoreoFS `GpioDevice` object facts pass the
+projected route; `GuestLedger` is app-local capability state only: fds, leases,
+pending syscall tokens, quotas, and errno mapping. The
 choreography is still the protocol authority. The visible LED route table is
 `fd=3 -> GP22`, `fd=4 -> GP21`, and `fd=5 -> GP20`; the GPIO device role treats
 the bank as active-high and keeps it one-hot when a selected LED is turned on.
@@ -48,11 +49,13 @@ Source map:
 
 | Layer | File |
 | --- | --- |
-| Choreography | `src/choreography/local.rs::baker_led_blink_roles`, `baker_led_choreofs_blink_roles` |
-| Firmware localside | `src/projects/baker_link_led/main.rs` |
+| Choreography | `src/projects/baker_link_led/choreography.rs::{traffic_light_roles,choreofs_traffic_light_roles,abort_safe_terminal_roles,abort_safe_linear_roles}` |
+| Firmware entry | `src/projects/baker_link_led/main.rs` |
+| Firmware localside | `src/projects/baker_link_led/runtime.rs` |
 | WASI guest ledger | `src/kernel/guest_ledger.rs` |
 | fd/object route check | `src/kernel/fd_object.rs` |
-| Baker board fd/pin map | `src/machine/rp2040/baker_link.rs` |
+| Baker board pin/safe-state facts | `src/machine/rp2040/baker_link.rs` |
+| Baker LED project object/fd/route manifest | `src/projects/baker_link_led/manifest.rs` |
 | Timer top-half / raw readiness | `src/machine/rp2040/timer.rs` |
 | Resolver admission | `src/kernel/resolver.rs` |
 | Host parity tests | `tests/host_baker_led_fd.rs` |
@@ -173,7 +176,7 @@ Useful values:
 | Value | Meaning |
 | --- | --- |
 | `0x48494f4b` | success |
-| `0x48494641` | fail-closed |
+| `0x48494641` | typed-reject |
 | `0x48490001` | Core0 entered `core0_main` |
 | `0x4849000b` | first traffic-light `fd_write("1")` completed, GP22 green path reached |
 | `0x4849000d` | final traffic-light `fd_write` completed for the current app activation |
@@ -225,7 +228,7 @@ Then inside GDB:
 info registers pc sp xpsr
 bt
 x/8wx 0x20030ae0
-break hibana_pico_baker_led_demo::fail_closed
+break hibana_pico_baker_led_demo::hard_stop
 continue
 detach
 quit
@@ -402,11 +405,10 @@ poll_oneoff -> TIMER0 IRQ top-half -> resolver TimerSleepDone -> PollReady
 
 The current pattern mirrors the Baker traffic-light tutorial route order, but
 uses bring-up-friendly TIMER ticks for visual confirmation: GP22 green,
-GP21 orange blink phases, and GP20 red. The current machine-level constants are
-`250` ticks for green/red phases and `50` ticks for orange blink phases. If the
-board clock setup changes, keep the choreography and resolver path fixed and
-adjust only the machine-level tick constants in
-`src/machine/rp2040/baker_link.rs`.
+GP21 orange blink phases, and GP20 red. These are LED proof manifest constants,
+not Baker Link board authority. If the board clock setup changes, keep the
+choreography and resolver path fixed and adjust only
+`src/projects/baker_link_led/manifest.rs`.
 
 ## Final Known-Good Result
 
@@ -472,7 +474,7 @@ cargo test --test host_baker_led_fd \
   baker_link_bad_order_wasip1_poll_oneoff_is_rejected_before_fd_write_phase
 ```
 
-Firmware build for the fail-closed hardware variant:
+Firmware build for the typed-reject hardware variant:
 
 ```bash
 CARGO_TARGET_DIR=$PWD/target/wasip1-apps \
@@ -485,7 +487,7 @@ cargo build --target thumbv6m-none-eabi --release \
   --features "profile-rp2040-pico-min embed-wasip1-artifacts baker-bad-order-demo"
 ```
 
-The expected outcome is not LED success. It is a fail-closed stop before any
+The expected outcome is not LED success. It is a typed-reject stop before any
 hidden timer progress is created. On hardware the expected RAM markers are:
 
 ```text
@@ -558,9 +560,10 @@ open. Invalid-fd and bad-payload are rejected by the resolver after the legal
 
 ## ChoreoFS Path-Open Hardware Proof
 
-`wasip1-led-choreofs-open.wasm` is the physical Baker ChoreoFS proof. It is an
-ordinary Rust `fn main()` `wasm32-wasip1` app. The app opens LED objects by
-path, receives minted fds, then drives the same GPIO/timer choreography:
+`wasip1-led-choreofs-open.wasm` is the physical Baker ChoreoFS proof. It is the
+small RP2040 artifact: a `#![no_main]` `wasm32-wasip1` app exporting
+`__main_void`. The app opens LED objects by path, receives materialized fds, then
+drives the same GPIO/timer choreography:
 
 ```text
 path_open(9, "/device/led/green")  -> ChoreoFS GpioDevice -> fd 3
@@ -571,11 +574,14 @@ poll_oneoff(...)                   -> TIMER0 IRQ -> resolver -> PollReady
 ```
 
 The choreography is
-`src/choreography/local.rs::baker_led_choreofs_blink_roles`: three path-open
+`src/projects/baker_link_led/choreography.rs::choreofs_traffic_light_roles`: three path-open
 cycles, then the same Engine-owned `LoopContinue` / `LoopBreak` route as the
-traffic-light proof. Baker-specific ChoreoFS opens map `GpioDevice` objects to
-the explicit Baker GPIO route. Generic ChoreoFS object routes do not get to
-pretend to be GPIO.
+traffic-light proof. The bad-path proof uses
+`src/projects/baker_link_led/choreography.rs::choreofs_bad_path_roles`, a
+terminal one-path-open choreography, so the reject is not hidden behind a later
+traffic loop. Baker-specific ChoreoFS opens map `GpioDevice` objects to the
+explicit Baker GPIO route. Generic ChoreoFS object routes do not get to pretend
+to be GPIO.
 
 The negative ChoreoFS hardware patterns are:
 
@@ -583,7 +589,7 @@ The negative ChoreoFS hardware patterns are:
 | --- | --- | --- |
 | `choreofs-bad-path` | `/not/allowed` has no manifest object | `0x4849004b` |
 | `choreofs-bad-payload` | `fd_write("on")` reaches the LED object but violates LED payload policy | `0x4849004c` |
-| `choreofs-wrong-object` | `/device/not-gpio` mints an fd, then `fd_write("1")` rejects because the object is not GPIO | `0x4849004d` |
+| `choreofs-wrong-object` | `/device/not-gpio` materializes an fd, then `fd_write("1")` rejects because the object is not GPIO | `0x4849004d` |
 
 The verified hardware commands are:
 
@@ -592,7 +598,59 @@ scripts/run_baker_link_hardware_pattern.sh choreofs
 scripts/run_baker_link_hardware_pattern.sh choreofs-bad-path
 scripts/run_baker_link_hardware_pattern.sh choreofs-bad-payload
 scripts/run_baker_link_hardware_pattern.sh choreofs-wrong-object
+scripts/run_baker_link_hardware_pattern.sh fail-safe
 ```
+
+## Fail-Safe Hardware Proof
+
+The fail-safe profile proves the soft abort path as hibana choreography, not as
+a hard-stop or panic escape hatch. The full route is host-tested in
+`src/projects/baker_link_led/choreography.rs::abort_safe_terminal_roles`:
+
+```text
+Abort | Normal
+```
+
+The physical Baker profile runs the selected terminal fragment from
+`abort_safe_linear_roles` so the proof fits the same two-core RP2040 mapping:
+
+```text
+EngineAbort
+  -> AbortBegin
+  -> Fence
+  -> GpioSet(GP22 inactive) -> GpioSetDone
+  -> GpioSet(GP21 inactive) -> GpioSetDone
+  -> GpioSet(GP20 inactive) -> GpioSetDone
+  -> AbortAck
+```
+
+`Fence` is materialized by `GuestLedger::apply_abort_fence`: old fd views,
+leases, pending syscall tokens, and object views become stale by generation.
+The safe state uses the existing GPIO device choreography. Hard runtime panic
+still bypasses endpoints and applies the same Baker board safe state by direct
+MMIO.
+
+Host proof:
+
+```bash
+cargo test --test host_baker_led_fd baker_link_abort
+```
+
+Firmware build:
+
+```bash
+cargo build --target thumbv6m-none-eabi --release \
+  --bin hibana-pico-baker-led-demo \
+  --features "profile-rp2040-pico-min embed-wasip1-artifacts baker-abort-safe-demo"
+```
+
+Hardware proof:
+
+```bash
+scripts/run_baker_link_hardware_pattern.sh fail-safe
+```
+
+Expected result is `HIBANA_DEMO_RESULT = 0x48494653`.
 
 ## Chaser And Std-Source Variants
 

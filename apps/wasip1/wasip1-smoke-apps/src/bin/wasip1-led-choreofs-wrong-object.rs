@@ -1,12 +1,15 @@
+#![no_main]
+
 const PREOPEN_FD: u32 = 9;
 const FD_WRITE_RIGHT: u64 = 1 << 6;
-const ERRNO_SUCCESS: u16 = 0;
 
 #[repr(C)]
 struct Ciovec {
     buf: *const u8,
     buf_len: usize,
 }
+
+unsafe impl Sync for Ciovec {}
 
 #[link(wasm_import_module = "wasi_snapshot_preview1")]
 unsafe extern "C" {
@@ -24,28 +27,22 @@ unsafe extern "C" {
     fn fd_write(fd: u32, iovs: *const Ciovec, iovs_len: usize, nwritten: *mut usize) -> u16;
 }
 
-fn main() {
-    let _orange = open_path(b"device/led/orange");
-    let _red = open_path(b"device/led/red");
-    let fd = open_path(b"device/not-gpio");
-    let one = b"1";
-    let iov = [Ciovec {
-        buf: one.as_ptr(),
-        buf_len: one.len(),
-    }];
-    let mut written = 0usize;
-    let errno = unsafe { fd_write(fd, iov.as_ptr(), iov.len(), &mut written) };
-    assert_eq!(
-        errno,
-        ERRNO_SUCCESS,
-        "bad guest expects non-GPIO object fd_write success; kernel must fail closed before this point"
-    );
-}
+static ORANGE_PATH: &[u8] = b"device/led/orange";
+static RED_PATH: &[u8] = b"device/led/red";
+static NOT_GPIO_PATH: &[u8] = b"device/not-gpio";
+static ONE: [u8; 1] = *b"1";
+static ONE_IOV: Ciovec = Ciovec {
+    buf: ONE.as_ptr(),
+    buf_len: ONE.len(),
+};
+static mut ORANGE_FD: u32 = 0;
+static mut RED_FD: u32 = 0;
+static mut NOT_GPIO_FD: u32 = 0;
+static mut WRITTEN: usize = 0;
 
-fn open_path(path: &[u8]) -> u32 {
-    let mut fd = 0u32;
-    let errno = unsafe {
-        path_open(
+fn open_path(path: &[u8], fd: *mut u32) {
+    unsafe {
+        let _ = path_open(
             PREOPEN_FD,
             0,
             path.as_ptr(),
@@ -54,9 +51,17 @@ fn open_path(path: &[u8]) -> u32 {
             FD_WRITE_RIGHT,
             0,
             0,
-            &mut fd,
-        )
-    };
-    assert_eq!(errno, ERRNO_SUCCESS);
-    fd
+            fd,
+        );
+    }
+}
+
+#[unsafe(export_name = "__main_void")]
+pub extern "C" fn main_void() {
+    open_path(ORANGE_PATH, &raw mut ORANGE_FD);
+    open_path(RED_PATH, &raw mut RED_FD);
+    open_path(NOT_GPIO_PATH, &raw mut NOT_GPIO_FD);
+    unsafe {
+        let _ = fd_write(NOT_GPIO_FD, &ONE_IOV, 1, &raw mut WRITTEN);
+    }
 }

@@ -17,13 +17,14 @@ BAKER_FLASH_BUDGET=$((1280 * 1024))
 BAKER_STATIC_SRAM_BUDGET=$((208 * 1024))
 BAKER_PEAK_SRAM_BUDGET=$((260 * 1024))
 
-BINS=(
-  "hibana-pico-demo"
-  "hibana-pico-engine-demo"
-  "hibana-pico-wasm-demo"
-  "hibana-pico-wasm-route-demo"
-  "hibana-pico-wasm-route-bad-demo"
-  "hibana-pico-baker-led-demo"
+BUDGET_ENTRIES=(
+  "rp2040-sio-smoke|hibana-pico-rp2040-sio-smoke|profile-rp2040-pico-min|practical"
+  "baker-traffic|hibana-pico-baker-led-demo|profile-rp2040-pico-min embed-wasip1-artifacts|baker"
+  "baker-choreofs|hibana-pico-baker-led-demo|profile-rp2040-pico-min embed-wasip1-artifacts baker-choreofs-demo|baker"
+  "baker-choreofs-bad-path|hibana-pico-baker-led-demo|profile-rp2040-pico-min embed-wasip1-artifacts baker-choreofs-bad-path-demo|baker"
+  "baker-choreofs-bad-payload|hibana-pico-baker-led-demo|profile-rp2040-pico-min embed-wasip1-artifacts baker-choreofs-bad-payload-demo|baker"
+  "baker-choreofs-wrong-object|hibana-pico-baker-led-demo|profile-rp2040-pico-min embed-wasip1-artifacts baker-choreofs-wrong-object-demo|baker"
+  "baker-fail-safe|hibana-pico-baker-led-demo|profile-rp2040-pico-min embed-wasip1-artifacts baker-abort-safe-demo|baker"
 )
 
 RUSTUP=(rustup run "$TOOLCHAIN")
@@ -55,22 +56,6 @@ else
   echo "pico demo budget view requires llvm-nm" >&2
   exit 1
 fi
-
-BUILD_ARGS=(
-  build
-  --release
-  --target "$TARGET"
-  --target-dir "$TARGET_DIR"
-  --features "profile-rp2040-pico-min"
-)
-
-for bin in "${BINS[@]}"; do
-  BUILD_ARGS+=(--bin "$bin")
-done
-
-PATH="$TOOLCHAIN_BIN_DIR:$PATH" \
-RUSTC="$TOOLCHAIN_RUSTC" \
-  "$TOOLCHAIN_CARGO" "${BUILD_ARGS[@]}"
 
 symbol_addr() {
   local bin="$1"
@@ -115,8 +100,19 @@ printf 'baker-led budgets: flash<=%d static_sram<=%d peak_sram_upper<=%d\n' \
   "$BAKER_STATIC_SRAM_BUDGET" \
   "$BAKER_PEAK_SRAM_BUDGET"
 
-for bin_name in "${BINS[@]}"; do
-  bin="$TARGET_DIR/$TARGET/release/$bin_name"
+for entry in "${BUDGET_ENTRIES[@]}"; do
+  IFS='|' read -r label bin_name features budget_kind <<<"$entry"
+  entry_target_dir="$TARGET_DIR/$label"
+  PATH="$TOOLCHAIN_BIN_DIR:$PATH" \
+  RUSTC="$TOOLCHAIN_RUSTC" \
+    "$TOOLCHAIN_CARGO" build \
+      --release \
+      --target "$TARGET" \
+      --target-dir "$entry_target_dir" \
+      --bin "$bin_name" \
+      --features "$features"
+
+  bin="$entry_target_dir/$TARGET/release/$bin_name"
   if [[ ! -f "$bin" ]]; then
     echo "missing pico demo binary: $bin" >&2
     exit 1
@@ -131,7 +127,7 @@ for bin_name in "${BINS[@]}"; do
   flash_budget="$PRACTICAL_FLASH_BUDGET"
   static_sram_budget="$PRACTICAL_STATIC_SRAM_BUDGET"
   peak_sram_budget="$PRACTICAL_PEAK_SRAM_BUDGET"
-  if [[ "$bin_name" == "hibana-pico-baker-led-demo" ]]; then
+  if [[ "$budget_kind" == "baker" ]]; then
     flash_budget="$BAKER_FLASH_BUDGET"
     static_sram_budget="$BAKER_STATIC_SRAM_BUDGET"
     peak_sram_budget="$BAKER_PEAK_SRAM_BUDGET"
@@ -148,13 +144,14 @@ for bin_name in "${BINS[@]}"; do
   total_stack_reserve_bytes=$((stack_top_addr - stack_limit_addr))
   peak_sram_upper_bound_bytes=$((static_sram_bytes + total_stack_reserve_bytes))
 
-  report_practical_budget "flash bytes ($bin_name)" "$flash_bytes" "$flash_budget"
-  report_practical_budget "static sram bytes ($bin_name)" "$static_sram_bytes" "$static_sram_budget"
-  report_practical_budget "core0 kernel stack reserve bytes ($bin_name)" "$core0_stack_reserve_bytes" "$PRACTICAL_KERNEL_STACK_BUDGET"
-  report_practical_budget "core1 kernel stack reserve bytes ($bin_name)" "$core1_stack_reserve_bytes" "$PRACTICAL_KERNEL_STACK_BUDGET"
-  report_practical_budget "peak sram upper-bound bytes ($bin_name)" "$peak_sram_upper_bound_bytes" "$peak_sram_budget"
+  report_practical_budget "flash bytes ($label)" "$flash_bytes" "$flash_budget"
+  report_practical_budget "static sram bytes ($label)" "$static_sram_bytes" "$static_sram_budget"
+  report_practical_budget "core0 kernel stack reserve bytes ($label)" "$core0_stack_reserve_bytes" "$PRACTICAL_KERNEL_STACK_BUDGET"
+  report_practical_budget "core1 kernel stack reserve bytes ($label)" "$core1_stack_reserve_bytes" "$PRACTICAL_KERNEL_STACK_BUDGET"
+  report_practical_budget "peak sram upper-bound bytes ($label)" "$peak_sram_upper_bound_bytes" "$peak_sram_budget"
 
-  printf '== %s ==\n' "$bin_name"
+  printf '== %s (%s) ==\n' "$label" "$bin_name"
+  printf 'features: %s\n' "$features"
   printf 'flash bytes: %d (%s practical budget %d)\n' \
     "$flash_bytes" "$(budget_status "$flash_bytes" "$flash_budget")" "$flash_budget"
   printf 'static sram bytes: %d (%s practical budget %d)\n' \

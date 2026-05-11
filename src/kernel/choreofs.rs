@@ -1,14 +1,12 @@
 use crate::{
     choreography::protocol::FdRead,
     kernel::{
-        guest_ledger::{GuestFd, GuestFdKind, GuestLedger, GuestLedgerError},
+        guest_ledger::GuestFd,
+        guest_ledger::{GuestFdKind, GuestLedger, GuestLedgerError},
+        transaction::ObjectTransaction,
         wasi::{ChoreoResourceKind, PicoFdError, PicoFdRights},
     },
 };
-
-pub const CHOREOFS_ROUTE_PREOPEN: u8 = 0;
-pub const CHOREOFS_ROUTE_OBJECT: u8 = 1;
-pub const CHOREOFS_ROUTE_DIRECTORY: u8 = 2;
 
 pub const CHOREOFS_WASI_ERRNO_NOENT: u16 = 44;
 pub const CHOREOFS_WASI_ERRNO_NOSYS: u16 = 52;
@@ -244,6 +242,16 @@ impl<const N: usize, const PATH: usize, const DATA: usize> ChoreoFsStore<N, PATH
         self.install(ChoreoFsObjectKind::StaticBlob, path, data)
     }
 
+    pub fn install_static_blob_in_tx(
+        &mut self,
+        path: &[u8],
+        data: &[u8],
+        tx: ObjectTransaction,
+    ) -> Result<u16, ChoreoFsError> {
+        self.require_object_tx(tx, self.next_generation)?;
+        self.install_static_blob(path, data)
+    }
+
     pub fn install_config_cell(&mut self, path: &[u8], data: &[u8]) -> Result<u16, ChoreoFsError> {
         self.install(ChoreoFsObjectKind::ConfigCell, path, data)
     }
@@ -262,6 +270,16 @@ impl<const N: usize, const PATH: usize, const DATA: usize> ChoreoFsStore<N, PATH
         data: &[u8],
     ) -> Result<u16, ChoreoFsError> {
         self.install(ChoreoFsObjectKind::StateSnapshot, path, data)
+    }
+
+    pub fn install_state_snapshot_in_tx(
+        &mut self,
+        path: &[u8],
+        data: &[u8],
+        tx: ObjectTransaction,
+    ) -> Result<u16, ChoreoFsError> {
+        self.require_object_tx(tx, self.next_generation)?;
+        self.install_state_snapshot(path, data)
     }
 
     pub fn install_directory(&mut self, path: &[u8]) -> Result<u16, ChoreoFsError> {
@@ -302,78 +320,6 @@ impl<const N: usize, const PATH: usize, const DATA: usize> ChoreoFsStore<N, PATH
 
     pub fn install_telemetry_object(&mut self, path: &[u8]) -> Result<u16, ChoreoFsError> {
         self.install(ChoreoFsObjectKind::TelemetryObject, path, &[])
-    }
-
-    pub fn grant_preopen_root<const FDS: usize, const LEASES: usize, const PENDING: usize>(
-        &self,
-        ledger: &mut GuestLedger<FDS, LEASES, PENDING>,
-        fd: u8,
-    ) -> Result<GuestFd, ChoreoFsError> {
-        Ok(ledger.apply_fd_cap_grant(
-            fd,
-            PicoFdRights::Read,
-            ChoreoResourceKind::PreopenRoot,
-            7,
-            CHOREOFS_ROUTE_PREOPEN,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )?)
-    }
-
-    pub fn open_with_ledger<const FDS: usize, const LEASES: usize, const PENDING: usize>(
-        &self,
-        ledger: &mut GuestLedger<FDS, LEASES, PENDING>,
-        preopen_fd: u8,
-        new_fd: u8,
-        path: &[u8],
-        rights: PicoFdRights,
-    ) -> Result<GuestFd, ChoreoFsError> {
-        ledger.resolve_fd(
-            preopen_fd,
-            PicoFdRights::Read,
-            ChoreoResourceKind::PreopenRoot,
-        )?;
-        let opened = self.open(path, rights)?;
-        Ok(ledger.apply_fd_cap_mint(
-            new_fd,
-            rights,
-            opened.resource(),
-            8,
-            match opened.resource() {
-                ChoreoResourceKind::DirectoryView => CHOREOFS_ROUTE_DIRECTORY,
-                _ => CHOREOFS_ROUTE_OBJECT,
-            },
-            opened.object_id(),
-            0,
-            opened.object_id(),
-            0,
-            opened.generation(),
-            0,
-        )?)
-    }
-
-    pub fn open_wasip1_path_with_ledger<
-        const FDS: usize,
-        const LEASES: usize,
-        const PENDING: usize,
-    >(
-        &self,
-        ledger: &mut GuestLedger<FDS, LEASES, PENDING>,
-        preopen_fd: u8,
-        new_fd: u8,
-        path: &[u8],
-        rights_base: u64,
-    ) -> Result<GuestFd, ChoreoFsError> {
-        self.open_with_ledger(
-            ledger,
-            preopen_fd,
-            new_fd,
-            path,
-            pico_rights_from_wasip1_base(rights_base),
-        )
     }
 
     pub fn open(&self, path: &[u8], rights: PicoFdRights) -> Result<ChoreoFsOpened, ChoreoFsError> {
@@ -566,6 +512,31 @@ impl<const N: usize, const PATH: usize, const DATA: usize> ChoreoFsStore<N, PATH
                 Ok(bytes.len())
             }
         }
+    }
+
+    pub fn write_in_tx(
+        &mut self,
+        fd: GuestFd,
+        offset: usize,
+        bytes: &[u8],
+        tx: ObjectTransaction,
+    ) -> Result<usize, ChoreoFsError> {
+        self.require_object_tx(tx, fd.generation())?;
+        self.write(fd, offset, bytes)
+    }
+
+    fn require_object_tx(
+        &self,
+        tx: ObjectTransaction,
+        generation: u16,
+    ) -> Result<(), ChoreoFsError> {
+        if tx.generation() != generation {
+            return Err(ChoreoFsError::BadObjectId);
+        }
+        if !tx.is_commit() {
+            return Err(ChoreoFsError::PermissionDenied);
+        }
+        Ok(())
     }
 
     pub fn read_directory(

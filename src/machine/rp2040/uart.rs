@@ -2,7 +2,7 @@
 use core::ptr::{read_volatile, write_volatile};
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-use crate::substrate::exec::signal;
+use crate::port::exec::signal;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const SIO_BASE: usize = 0xD000_0000;
@@ -86,19 +86,57 @@ fn putc(byte: u8) {
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-pub fn write_bytes(bytes: &[u8]) {
-    lock();
+fn write_hex(value: u32) {
+    for shift in (0..8).rev() {
+        let nibble = ((value >> (shift * 4)) & 0xf) as u8;
+        let ch = match nibble {
+            0..=9 => b'0' + nibble,
+            _ => b'a' + (nibble - 10),
+        };
+        putc(ch);
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn write_bytes_unlocked(bytes: &[u8]) {
     for &byte in bytes {
         if byte == b'\n' {
             putc(b'\r');
         }
         putc(byte);
     }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn write_bytes(bytes: &[u8]) {
+    lock();
+    write_bytes_unlocked(bytes);
     unlock();
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 pub fn line(text: &str) {
-    write_bytes(text.as_bytes());
-    write_bytes(b"\n");
+    lock();
+    write_bytes_unlocked(text.as_bytes());
+    putc(b'\r');
+    putc(b'\n');
+    unlock();
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn prefixed_bytes(prefix: &str, bytes: &[u8]) {
+    lock();
+    write_bytes_unlocked(prefix.as_bytes());
+    write_bytes_unlocked(bytes);
+    unlock();
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn hex_line(prefix: &str, value: u32) {
+    lock();
+    write_bytes_unlocked(prefix.as_bytes());
+    write_hex(value);
+    putc(b'\r');
+    putc(b'\n');
+    unlock();
 }

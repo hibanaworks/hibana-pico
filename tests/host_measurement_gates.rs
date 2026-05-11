@@ -53,7 +53,7 @@ fn plan_pico_swarm_measurements_stay_bounded() {
     assert_eq!(metrics.wifi_ping_pong_messages, 2);
     assert_eq!(metrics.remote_fd_read_messages, 2);
     assert_eq!(metrics.remote_actuator_command_messages, 2);
-    assert_eq!(metrics.packet_loss_retry_frames, 1);
+    assert_eq!(metrics.packet_loss_redelivery_frames, 1);
     assert_eq!(metrics.provisioning_join_messages, 4);
     assert_eq!(metrics.leave_revoke_messages, 4);
     assert_eq!(metrics.qemu_swarm_default_nodes, 6);
@@ -130,8 +130,8 @@ fn plan_pico_source_tree_keeps_no_p2_runtime_surface() {
         ("README.md", include_str!("../README.md")),
         ("src/kernel/app.rs", include_str!("../src/kernel/app.rs")),
         (
-            "src/substrate/host_queue.rs",
-            include_str!("../src/substrate/host_queue.rs"),
+            "src/port/host_queue.rs",
+            include_str!("../src/port/host_queue.rs"),
         ),
         (
             "src/kernel/budget.rs",
@@ -150,18 +150,21 @@ fn plan_pico_source_tree_keeps_no_p2_runtime_surface() {
             "src/kernel/metrics.rs",
             include_str!("../src/kernel/metrics.rs"),
         ),
-        ("src/kernel/mgmt.rs", include_str!("../src/kernel/mgmt.rs")),
         (
-            "src/kernel/network.rs",
-            include_str!("../src/kernel/network.rs"),
+            "src/kernel/mgmt/mod.rs",
+            include_str!("../src/kernel/mgmt/mod.rs"),
+        ),
+        (
+            "src/kernel/network/mod.rs",
+            include_str!("../src/kernel/network/mod.rs"),
         ),
         (
             "src/kernel/policy.rs",
             include_str!("../src/kernel/policy.rs"),
         ),
         (
-            "src/kernel/remote.rs",
-            include_str!("../src/kernel/remote.rs"),
+            "src/kernel/remote/mod.rs",
+            include_str!("../src/kernel/remote/mod.rs"),
         ),
         (
             "src/kernel/resolver.rs",
@@ -172,25 +175,28 @@ fn plan_pico_source_tree_keeps_no_p2_runtime_surface() {
             include_str!("../src/kernel/guest_ledger.rs"),
         ),
         (
-            "src/kernel/swarm.rs",
-            include_str!("../src/kernel/swarm.rs"),
+            "src/kernel/swarm/mod.rs",
+            include_str!("../src/kernel/swarm/mod.rs"),
         ),
         (
-            "src/choreography/protocol.rs",
-            include_str!("../src/choreography/protocol.rs"),
+            "src/choreography/protocol/mod.rs",
+            include_str!("../src/choreography/protocol/mod.rs"),
         ),
         (
             "src/kernel/device/timer.rs",
             include_str!("../src/kernel/device/timer.rs"),
         ),
         (
-            "src/substrate/transport.rs",
-            include_str!("../src/substrate/transport.rs"),
+            "src/port/transport.rs",
+            include_str!("../src/port/transport.rs"),
         ),
-        ("src/kernel/wasi.rs", include_str!("../src/kernel/wasi.rs")),
         (
-            "src/kernel/engine/wasm.rs",
-            include_str!("../src/kernel/engine/wasm.rs"),
+            "src/kernel/wasi/mod.rs",
+            include_str!("../src/kernel/wasi/mod.rs"),
+        ),
+        (
+            "src/kernel/engine/wasm/mod.rs",
+            include_str!("../src/kernel/engine/wasm/mod.rs"),
         ),
     ];
 
@@ -218,8 +224,8 @@ fn plan_pico_source_tree_keeps_no_bridge_runtime_surface() {
     const SOURCES: &[(&str, &str)] = &[
         ("src/kernel/app.rs", include_str!("../src/kernel/app.rs")),
         (
-            "src/substrate/host_queue.rs",
-            include_str!("../src/substrate/host_queue.rs"),
+            "src/port/host_queue.rs",
+            include_str!("../src/port/host_queue.rs"),
         ),
         (
             "src/kernel/budget.rs",
@@ -238,18 +244,21 @@ fn plan_pico_source_tree_keeps_no_bridge_runtime_surface() {
             "src/kernel/metrics.rs",
             include_str!("../src/kernel/metrics.rs"),
         ),
-        ("src/kernel/mgmt.rs", include_str!("../src/kernel/mgmt.rs")),
         (
-            "src/kernel/network.rs",
-            include_str!("../src/kernel/network.rs"),
+            "src/kernel/mgmt/mod.rs",
+            include_str!("../src/kernel/mgmt/mod.rs"),
+        ),
+        (
+            "src/kernel/network/mod.rs",
+            include_str!("../src/kernel/network/mod.rs"),
         ),
         (
             "src/kernel/policy.rs",
             include_str!("../src/kernel/policy.rs"),
         ),
         (
-            "src/kernel/remote.rs",
-            include_str!("../src/kernel/remote.rs"),
+            "src/kernel/remote/mod.rs",
+            include_str!("../src/kernel/remote/mod.rs"),
         ),
         (
             "src/kernel/resolver.rs",
@@ -260,25 +269,28 @@ fn plan_pico_source_tree_keeps_no_bridge_runtime_surface() {
             include_str!("../src/kernel/guest_ledger.rs"),
         ),
         (
-            "src/kernel/swarm.rs",
-            include_str!("../src/kernel/swarm.rs"),
+            "src/kernel/swarm/mod.rs",
+            include_str!("../src/kernel/swarm/mod.rs"),
         ),
         (
-            "src/choreography/protocol.rs",
-            include_str!("../src/choreography/protocol.rs"),
+            "src/choreography/protocol/mod.rs",
+            include_str!("../src/choreography/protocol/mod.rs"),
         ),
         (
             "src/kernel/device/timer.rs",
             include_str!("../src/kernel/device/timer.rs"),
         ),
         (
-            "src/substrate/transport.rs",
-            include_str!("../src/substrate/transport.rs"),
+            "src/port/transport.rs",
+            include_str!("../src/port/transport.rs"),
         ),
-        ("src/kernel/wasi.rs", include_str!("../src/kernel/wasi.rs")),
         (
-            "src/kernel/engine/wasm.rs",
-            include_str!("../src/kernel/engine/wasm.rs"),
+            "src/kernel/wasi/mod.rs",
+            include_str!("../src/kernel/wasi/mod.rs"),
+        ),
+        (
+            "src/kernel/engine/wasm/mod.rs",
+            include_str!("../src/kernel/engine/wasm/mod.rs"),
         ),
     ];
 
@@ -315,23 +327,29 @@ fn plan_pico_source_tree_keeps_removed_compatibility_names_out() {
             "src/kernel/metrics.rs",
             include_str!("../src/kernel/metrics.rs"),
         ),
-        ("src/kernel/mgmt.rs", include_str!("../src/kernel/mgmt.rs")),
         (
-            "src/kernel/network.rs",
-            include_str!("../src/kernel/network.rs"),
+            "src/kernel/mgmt/mod.rs",
+            include_str!("../src/kernel/mgmt/mod.rs"),
         ),
         (
-            "src/kernel/remote.rs",
-            include_str!("../src/kernel/remote.rs"),
+            "src/kernel/network/mod.rs",
+            include_str!("../src/kernel/network/mod.rs"),
+        ),
+        (
+            "src/kernel/remote/mod.rs",
+            include_str!("../src/kernel/remote/mod.rs"),
         ),
         (
             "src/kernel/guest_ledger.rs",
             include_str!("../src/kernel/guest_ledger.rs"),
         ),
-        ("src/kernel/wasi.rs", include_str!("../src/kernel/wasi.rs")),
         (
-            "src/kernel/engine/wasip1_host.rs",
-            include_str!("../src/kernel/engine/wasip1_host.rs"),
+            "src/kernel/wasi/mod.rs",
+            include_str!("../src/kernel/wasi/mod.rs"),
+        ),
+        (
+            "src/kernel/wasi/host_runner.rs",
+            include_str!("../src/kernel/wasi/host_runner.rs"),
         ),
     ];
 
@@ -346,6 +364,125 @@ fn plan_pico_source_tree_keeps_removed_compatibility_names_out() {
 }
 
 #[test]
+fn plan_wasi_vm_hot_path_keeps_control_structure_scans_out() {
+    let vm = include_str!("../src/kernel/engine/wasm/vm.rs");
+
+    assert!(
+        vm.contains("CoreControlTarget"),
+        "Wasm VM should materialize decoded control targets before execution"
+    );
+    assert!(
+        vm.contains("decode_core_control_targets"),
+        "Wasm VM should decode control targets before execution"
+    );
+    assert!(
+        !vm.contains("cfg!(any(test"),
+        "Wasm VM capacity must be selected by explicit profile features, not by test builds"
+    );
+    assert!(
+        vm.contains("feature = \"wasm-engine-wasip1-std-profile\") {\n    24"),
+        "embedded std profile must keep active control-stack capacity measured, not padded"
+    );
+    assert!(
+        vm.contains("feature = \"wasm-engine-wasip1-std-profile\") {\n    128"),
+        "embedded std profile must keep active control-target capacity measured, not padded"
+    );
+    for needle in [
+        concat!("find", "_matching"),
+        concat!("find", "_matching_end"),
+        concat!("find", "_matching_else_or_end"),
+    ] {
+        assert!(
+            !vm.contains(needle),
+            "Wasm VM hot path must not rescan raw control structure with {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn plan_wasi_engine_facade_keeps_placement_and_vm_internals_private() {
+    let facade = include_str!("../src/kernel/engine/wasm/mod.rs");
+    let vm = include_str!("../src/kernel/engine/wasm/vm.rs");
+    let baker_guest = include_str!("../src/projects/baker_link_led/guest.rs");
+
+    assert!(
+        !facade.contains("write_new_in_place"),
+        "engine facade must expose Guest::new and Guest::resume, not an embedded placement constructor"
+    );
+    assert!(
+        !vm.contains("write_new_in_place") && !vm.contains("parse_in_place"),
+        "VM placement internals must not be a second construction path"
+    );
+    assert!(
+        !facade.contains("pub fn place_in_static_slot")
+            && facade.contains("pub(crate) fn place_in_static_slot"),
+        "Pico static-slot capacity may exist only as crate-internal engine capacity"
+    );
+    assert!(
+        baker_guest.contains("Guest::place_in_static_slot"),
+        "Baker loader may use only the crate-internal static-slot capacity, not a public placement API"
+    );
+    for needle in [
+        "pub enum VmEvent",
+        "pub struct Vm",
+        "pub struct FdWriteCall",
+        "pub struct PathCall",
+        "pub struct SocketCall",
+        "pub struct Module",
+        "pub struct Interpreter",
+        "pub fn complete_fd_write",
+    ] {
+        assert!(
+            !vm.contains(needle),
+            "private VM implementation leaks facade-internal surface marker {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn baker_project_uses_common_choreography_fragments_without_warning_suppression() {
+    let baker = include_str!("../src/projects/baker_link_led/choreography.rs");
+    let runtime = include_str!("../src/projects/baker_link_led/runtime.rs");
+    let stages = include_str!("../src/projects/baker_link_led/stages.rs");
+    let guest = include_str!("../src/projects/baker_link_led/guest.rs");
+    let fragments = include_str!("../src/choreography/protocol/fragments.rs");
+
+    for source in [runtime, stages, guest] {
+        assert!(
+            !source.contains("allow(dead_code") && !source.contains("allow(unused_imports"),
+            "Baker proof modules must be split or cfg-gated instead of suppressing responsibility leaks"
+        );
+    }
+    assert!(
+        fragments.contains("local_fd_write_gpio_cycle")
+            && fragments.contains("local_path_open_cycle")
+            && fragments.contains("local_poll_timer_cycle")
+            && fragments.contains("ChoreoFsOpenAdmitRouteMsg")
+            && fragments.contains("ChoreoFsOpenRejectRouteMsg"),
+        "common syscall/device choreography fragments must live in the shared protocol layer"
+    );
+    let choreofs = include_str!("../src/kernel/choreofs.rs");
+    assert!(
+        !choreofs.contains("open_with_ledger")
+            && !choreofs.contains("open_wasip1_path_with_ledger")
+            && !choreofs.contains("apply_fd_cap_mint")
+            && !choreofs.contains("grant_preopen_root"),
+        "ChoreoFS must remain an object identity store; fd materialization belongs to projected Kernel localside after hibana route control"
+    );
+    for needle in [
+        "macro_rules! fd_write_cycle",
+        "macro_rules! path_open_cycle",
+        "macro_rules! poll_cycle",
+        "abort_safe_gpio_cycle",
+    ] {
+        assert!(
+            !baker.contains(needle),
+            "Baker choreography should assemble common fragments, not duplicate {needle:?}"
+        );
+    }
+}
+
+#[test]
 fn plan_pico_document_keeps_wasi_import_trampoline_no_bridge_naming() {
     let plan = include_str!("../plan.md");
 
@@ -356,5 +493,150 @@ fn plan_pico_document_keeps_wasi_import_trampoline_no_bridge_naming() {
     assert!(
         plan.contains("WASI P1 import trampoline"),
         "plan.md should name the WASI import boundary without bridge naming"
+    );
+}
+
+#[test]
+fn plan_pico_keeps_abort_out_of_loop_control_shape() {
+    let plan = include_str!("../plan.md");
+    assert!(
+        plan.contains("Abort is not a third loop arm."),
+        "plan.md must keep abort separate from Continue/Break loop control"
+    );
+    assert!(
+        plan.contains("Abort | Normal"),
+        "plan.md must describe Abort|Normal as a separate fault choice"
+    );
+    assert!(
+        plan.contains("LoopContinue | LoopBreak"),
+        "plan.md must describe Continue|Break as the only loop choice"
+    );
+
+    const FORBIDDEN_SOURCE_MARKERS: &[&str] = &[
+        "abortable_loop",
+        "terminal_route",
+        "BakerTrafficLoopAbort",
+        "LoopBreakKind as abort",
+    ];
+    const SOURCES: &[(&str, &str)] = &[
+        (
+            "src/projects/baker_link_led/choreography.rs",
+            include_str!("../src/projects/baker_link_led/choreography.rs"),
+        ),
+        (
+            "src/choreography/protocol/mod.rs",
+            include_str!("../src/choreography/protocol/mod.rs"),
+        ),
+        (
+            "src/projects/baker_link_led/runtime.rs",
+            include_str!("../src/projects/baker_link_led/runtime.rs"),
+        ),
+    ];
+
+    for (path, source) in SOURCES {
+        for marker in FORBIDDEN_SOURCE_MARKERS {
+            assert!(
+                !source.contains(marker),
+                "{path} contains forbidden abort/loop conflation marker {marker:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn abort_normal_continue_break_shape_has_projection_proof() {
+    let proof = include_str!("host_swarm_plan.rs");
+
+    for needle in [
+        "abort_normal_route_contains_inner_continue_break_loop_projection",
+        "EngineAbortRouteControl",
+        "EngineNormalRouteControl",
+        "BakerTrafficLoopContinueControl",
+        "BakerTrafficLoopBreakControl",
+    ] {
+        assert!(
+            proof.contains(needle),
+            "host_swarm_plan.rs must keep an explicit projection proof for Abort | (LoopContinue | LoopBreak)"
+        );
+    }
+}
+
+#[test]
+fn plan_required_control_vocabulary_is_bound_to_protocol_types() {
+    let plan = include_str!("../plan.md");
+    let protocol = concat!(
+        include_str!("../src/choreography/protocol/mod.rs"),
+        include_str!("../src/choreography/protocol/labels.rs"),
+        include_str!("../src/choreography/protocol/route.rs"),
+        include_str!("../src/choreography/protocol/control.rs"),
+        include_str!("../src/choreography/protocol/wasi.rs"),
+        include_str!("../src/choreography/protocol/device.rs"),
+        include_str!("../src/choreography/protocol/management.rs"),
+    );
+
+    for needle in [
+        "RouteDecision",
+        "LoopContinue",
+        "LoopBreak",
+        "StateSnapshot",
+        "StateRestore",
+        "TopologyBegin",
+        "TopologyAck",
+        "TopologyCommit",
+        "CapDelegate",
+        "AbortBegin",
+        "AbortAck",
+        "Fence",
+        "TxCommit",
+        "TxAbort",
+    ] {
+        assert!(
+            plan.contains(needle),
+            "plan.md must keep normative control vocabulary entry {needle}"
+        );
+    }
+
+    for needle in [
+        "ControlOp::StateSnapshot",
+        "ControlOp::StateRestore",
+        "ControlOp::TopologyBegin",
+        "ControlOp::TopologyAck",
+        "ControlOp::TopologyCommit",
+        "ControlOp::TxCommit",
+        "ControlOp::TxAbort",
+        "pub type StateSnapshotControl",
+        "pub type StateRestoreControl",
+        "pub type TopologyBeginControl",
+        "pub type TopologyAckControl",
+        "pub type TopologyCommitControl",
+        "pub type TxCommitControl",
+        "pub type TxAbortControl",
+        "ActivationAuthorityKind",
+        "ActivationKind",
+        "LABEL_ACTIVATION_AUTHORITY_CONTROL",
+        "LABEL_ACTIVATION_CONTROL",
+    ] {
+        assert!(
+            protocol.contains(needle),
+            "src/choreography/protocol/ module tree must bind plan control vocabulary {needle}"
+        );
+    }
+}
+
+#[test]
+fn publication_text_keeps_physical_wireless_claims_gated() {
+    let readme = include_str!("../README.md");
+
+    assert!(
+        readme.contains("Pico W is currently represented as a capacity/profile target"),
+        "README must keep Pico W as pending capacity/profile until physical gates pass"
+    );
+    assert!(
+        readme.contains("physical CYW43439 gates are still pending"),
+        "README must name pending Pico W physical CYW43439 gates"
+    );
+    assert!(
+        readme.contains("must not be read as physical Pico W"),
+        "README must prevent interpreting QEMU/Baker proof as physical Pico W success"
     );
 }

@@ -5,7 +5,7 @@ use core::{
 };
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-use crate::substrate::exec::signal;
+use crate::port::exec::signal;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const TIMER_BASE: usize = 0x4005_4000;

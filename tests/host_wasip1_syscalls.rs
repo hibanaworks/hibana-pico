@@ -37,13 +37,11 @@ use hibana_pico::{
     },
     kernel::wasi::{
         ChoreoResourceKind, MemoryLeaseTable, PicoFdError, PicoFdRights, PicoFdView,
-        WASIP1_CLOCK_DEMO_NANOS, WASIP1_EXIT_DEMO_CODE, WASIP1_RANDOM_DEMO_SEED_HI,
-        WASIP1_RANDOM_DEMO_SEED_LO, WASIP1_STDERR_DEMO_TEXT, WASIP1_STDIN_DEMO_INPUT,
-        WASIP1_STDIN_DEMO_MAX_LEN, WASIP1_STDOUT_DEMO_TEXT, Wasip1ClockModule, Wasip1ExitModule,
-        Wasip1RandomModule, Wasip1StderrModule, Wasip1StdinModule, Wasip1StdoutModule,
+        Wasip1ClockModule, Wasip1ExitModule, Wasip1RandomModule, Wasip1StderrModule,
+        Wasip1StdinModule, Wasip1StdoutModule,
     },
-    substrate::host_queue::HostQueueBackend,
-    substrate::transport::SioTransport,
+    port::host_queue::HostQueueBackend,
+    port::transport::SioTransport,
 };
 
 static WASIP1_STDOUT_GUEST: &[u8] =
@@ -63,13 +61,23 @@ const TEST_MEMORY_EPOCH: u32 = 1;
 const TEST_STDOUT_PTR: u32 = 1024;
 const TEST_STDERR_PTR: u32 = 2048;
 const TEST_STDIN_PTR: u32 = 3072;
+const TEST_STDOUT_TEXT: &[u8] = b"hibana wasip1 stdout\n";
+const TEST_STDERR_TEXT: &[u8] = b"hibana wasip1 stderr\n";
+const TEST_STDIN_INPUT: &[u8] = b"hibana stdin\n";
+const TEST_STDIN_MAX_LEN: u8 = 24;
+const TEST_CLOCK_NANOS: u64 = 123_456_789;
+const TEST_RANDOM_SEED_LO: u64 = 0x4849_4241_5241_4e44;
+const TEST_RANDOM_SEED_HI: u64 = 0x5345_4544_0000_0001;
+const TEST_EXIT_CODE: u8 = 7;
 
 #[test]
 fn rust_wasm32_wasip1_stdout_module_reaches_supervisor() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let module = Wasip1StdoutModule::parse(WASIP1_STDOUT_GUEST).expect("parse module");
-        let chunk = module.demo_stdout_chunk().expect("stdout chunk");
-        assert_eq!(chunk.as_bytes(), WASIP1_STDOUT_DEMO_TEXT);
+        let chunk = module
+            .stdout_chunk_for(TEST_STDOUT_TEXT)
+            .expect("stdout chunk");
+        assert_eq!(chunk.as_bytes(), TEST_STDOUT_TEXT);
 
         let backend = HostQueueBackend::new();
 
@@ -187,10 +195,12 @@ fn rust_wasm32_wasip1_stdout_module_reaches_supervisor() {
 
 #[test]
 fn rust_wasm32_wasip1_stderr_module_reaches_supervisor() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let module = Wasip1StderrModule::parse(WASIP1_STDERR_GUEST).expect("parse module");
-        let chunk = module.demo_stderr_chunk().expect("stderr chunk");
-        assert_eq!(chunk.as_bytes(), WASIP1_STDERR_DEMO_TEXT);
+        let chunk = module
+            .stderr_chunk_for(TEST_STDERR_TEXT)
+            .expect("stderr chunk");
+        assert_eq!(chunk.as_bytes(), TEST_STDERR_TEXT);
 
         let backend = HostQueueBackend::new();
 
@@ -308,12 +318,16 @@ fn rust_wasm32_wasip1_stderr_module_reaches_supervisor() {
 
 #[test]
 fn rust_wasm32_wasip1_stdin_module_reaches_engine() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let module = Wasip1StdinModule::parse(WASIP1_STDIN_GUEST).expect("parse module");
-        let request = module.demo_stdin_request().expect("stdin request");
-        let chunk = module.demo_stdin_chunk().expect("stdin chunk");
-        assert_eq!(request.max_len(), WASIP1_STDIN_DEMO_MAX_LEN);
-        assert_eq!(chunk.as_bytes(), WASIP1_STDIN_DEMO_INPUT);
+        let request = module
+            .stdin_request_for(TEST_STDIN_MAX_LEN)
+            .expect("stdin request");
+        let chunk = module
+            .stdin_chunk_for(TEST_STDIN_INPUT)
+            .expect("stdin chunk");
+        assert_eq!(request.max_len(), TEST_STDIN_MAX_LEN);
+        assert_eq!(chunk.as_bytes(), TEST_STDIN_INPUT);
 
         let backend = HostQueueBackend::new();
 
@@ -451,10 +465,10 @@ fn rust_wasm32_wasip1_stdin_module_reaches_engine() {
 
 #[test]
 fn rust_wasm32_wasip1_clock_module_reaches_engine() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let module = Wasip1ClockModule::parse(WASIP1_CLOCK_GUEST).expect("parse module");
-        let now = module.demo_clock_now();
-        assert_eq!(now.nanos(), WASIP1_CLOCK_DEMO_NANOS);
+        let now = module.clock_now(TEST_CLOCK_NANOS);
+        assert_eq!(now.nanos(), TEST_CLOCK_NANOS);
 
         let backend = HostQueueBackend::new();
 
@@ -519,11 +533,11 @@ fn rust_wasm32_wasip1_clock_module_reaches_engine() {
 
 #[test]
 fn rust_wasm32_wasip1_random_module_reaches_engine() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let module = Wasip1RandomModule::parse(WASIP1_RANDOM_GUEST).expect("parse module");
-        let seed = module.demo_random_seed();
-        assert_eq!(seed.lo(), WASIP1_RANDOM_DEMO_SEED_LO);
-        assert_eq!(seed.hi(), WASIP1_RANDOM_DEMO_SEED_HI);
+        let seed = module.random_seed(TEST_RANDOM_SEED_LO, TEST_RANDOM_SEED_HI);
+        assert_eq!(seed.lo(), TEST_RANDOM_SEED_LO);
+        assert_eq!(seed.hi(), TEST_RANDOM_SEED_HI);
 
         let backend = HostQueueBackend::new();
 
@@ -588,10 +602,10 @@ fn rust_wasm32_wasip1_random_module_reaches_engine() {
 
 #[test]
 fn rust_wasm32_wasip1_exit_module_reaches_supervisor() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let module = Wasip1ExitModule::parse(WASIP1_EXIT_GUEST).expect("parse module");
-        let status = module.demo_exit_status();
-        assert_eq!(status.code(), WASIP1_EXIT_DEMO_CODE);
+        let status = module.exit_status(TEST_EXIT_CODE);
+        assert_eq!(status.code(), TEST_EXIT_CODE);
 
         let backend = HostQueueBackend::new();
 
@@ -643,7 +657,7 @@ fn rust_wasm32_wasip1_exit_module_reaches_supervisor() {
 
 #[test]
 fn generic_wasi_sched_yield_is_choreography_wired() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let backend = HostQueueBackend::new();
 
         let clock0 = CounterClock::new();
@@ -705,7 +719,7 @@ fn generic_wasi_sched_yield_is_choreography_wired() {
 
 #[test]
 fn generic_wasi_clock_res_get_is_choreography_wired() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let backend = HostQueueBackend::new();
 
         let clock0 = CounterClock::new();
@@ -773,7 +787,7 @@ fn generic_wasi_clock_res_get_is_choreography_wired() {
 
 #[test]
 fn generic_wasi_fd_read_stat_close_are_lease_and_choreography_wired() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let backend = HostQueueBackend::new();
 
         let clock0 = CounterClock::new();
@@ -1010,7 +1024,7 @@ fn generic_wasi_fd_read_stat_close_are_lease_and_choreography_wired() {
 
 #[test]
 fn generic_wasi_poll_oneoff_is_choreography_wired() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let backend = HostQueueBackend::new();
 
         let clock0 = CounterClock::new();

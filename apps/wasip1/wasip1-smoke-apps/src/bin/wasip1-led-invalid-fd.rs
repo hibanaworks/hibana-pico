@@ -24,6 +24,9 @@ static mut WRITTEN: usize = 0;
 #[unsafe(export_name = "__main_void")]
 pub extern "C" fn main_void() {
     unsafe {
-        fd_write(6, &ON_IOV, 1, &raw mut WRITTEN);
+        let errno = fd_write(6, &ON_IOV, 1, &raw mut WRITTEN);
+        if errno != 0 {
+            core::arch::wasm32::unreachable();
+        }
     }
 }

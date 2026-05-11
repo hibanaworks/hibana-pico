@@ -569,7 +569,7 @@ impl Wasip1HandlerSet {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Wasip1ControlSubstrate {
+pub struct Wasip1ControlCapacity {
     pub fd_view: bool,
     pub memory_lease: bool,
     pub errno: bool,
@@ -578,7 +578,7 @@ pub struct Wasip1ControlSubstrate {
     pub memory_grow_fence: bool,
 }
 
-impl Wasip1ControlSubstrate {
+impl Wasip1ControlCapacity {
     pub const FULL: Self = Self {
         fd_view: true,
         memory_lease: true,
@@ -635,7 +635,7 @@ pub struct FeatureMatrix {
     pub profiles: FeatureProfiles,
     pub engine: WasmEngineProfile,
     pub wasip1_handlers: Wasip1HandlerSet,
-    pub wasip1_control: Wasip1ControlSubstrate,
+    pub wasip1_control: Wasip1ControlCapacity,
 }
 
 impl FeatureMatrix {
@@ -644,7 +644,7 @@ impl FeatureMatrix {
             profiles: FeatureProfiles::active(),
             engine: WasmEngineProfile::active(),
             wasip1_handlers: Wasip1HandlerSet::active(),
-            wasip1_control: Wasip1ControlSubstrate::active(),
+            wasip1_control: Wasip1ControlCapacity::active(),
         }
     }
 
@@ -666,7 +666,7 @@ pub const ACTIVE_FEATURE_MATRIX: FeatureMatrix = FeatureMatrix::active();
 #[cfg(test)]
 mod tests {
     use super::{
-        FeatureMatrix, Wasip1ControlSubstrate, Wasip1HandlerSet, Wasip1Syscall, WasmEngineProfile,
+        FeatureMatrix, Wasip1ControlCapacity, Wasip1HandlerSet, Wasip1Syscall, WasmEngineProfile,
     };
 
     #[test]
@@ -688,7 +688,7 @@ mod tests {
             profiles: Default::default(),
             engine: WasmEngineProfile::Core,
             wasip1_handlers: Wasip1HandlerSet::EMPTY,
-            wasip1_control: Wasip1ControlSubstrate::FULL,
+            wasip1_control: Wasip1ControlCapacity::FULL,
         };
 
         assert!(matrix.engine.can_run_core_wasip1());
@@ -698,12 +698,12 @@ mod tests {
     }
 
     #[test]
-    fn full_profile_requires_engine_handlers_and_common_control_substrate() {
+    fn full_profile_requires_engine_handlers_and_common_control_capacity() {
         let matrix = FeatureMatrix {
             profiles: Default::default(),
             engine: WasmEngineProfile::Wasip1Full,
             wasip1_handlers: Wasip1HandlerSet::FULL,
-            wasip1_control: Wasip1ControlSubstrate::FULL,
+            wasip1_control: Wasip1ControlCapacity::FULL,
         };
 
         assert!(matrix.can_claim_wasip1_profile());

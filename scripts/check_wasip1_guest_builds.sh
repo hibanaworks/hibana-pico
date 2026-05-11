@@ -225,16 +225,16 @@ if ! rg -a -q 'path_open' "$artifact_dir/wasip1-std-bad-path.wasm"; then
   echo "WASI P1 std bad-path artifact lacks path_open: $artifact_dir/wasip1-std-bad-path.wasm" >&2
   exit 1
 fi
-if ! rg -a -q 'forbidden path must fail closed' "$artifact_dir/wasip1-std-bad-path.wasm"; then
-  echo "WASI P1 std bad-path artifact lacks fail-closed marker: $artifact_dir/wasip1-std-bad-path.wasm" >&2
+if ! rg -a -q 'forbidden path must reject' "$artifact_dir/wasip1-std-bad-path.wasm"; then
+  echo "WASI P1 std bad-path artifact lacks typed-reject marker: $artifact_dir/wasip1-std-bad-path.wasm" >&2
   exit 1
 fi
 if ! rg -a -q 'path_open' "$artifact_dir/wasip1-std-choreofs-static-write.wasm"; then
   echo "WASI P1 std static-write artifact lacks path_open: $artifact_dir/wasip1-std-choreofs-static-write.wasm" >&2
   exit 1
 fi
-if ! rg -a -q 'readonly static write must fail closed' "$artifact_dir/wasip1-std-choreofs-static-write.wasm"; then
-  echo "WASI P1 std static-write artifact lacks fail-closed marker: $artifact_dir/wasip1-std-choreofs-static-write.wasm" >&2
+if ! rg -a -q 'readonly static write must reject' "$artifact_dir/wasip1-std-choreofs-static-write.wasm"; then
+  echo "WASI P1 std static-write artifact lacks typed-reject marker: $artifact_dir/wasip1-std-choreofs-static-write.wasm" >&2
   exit 1
 fi
 if ! rg -a -q 'path_open' "$artifact_dir/wasip1-std-sock-send-recv.wasm"; then
@@ -281,8 +281,8 @@ if ! rg -a -q 'sock_accept' "$artifact_dir/wasip1-std-sock-accept-bad.wasm"; the
   echo "WASI P1 std bad sock artifact lacks sock_accept: $artifact_dir/wasip1-std-sock-accept-bad.wasm" >&2
   exit 1
 fi
-if ! rg -a -q 'sock_accept must fail closed' "$artifact_dir/wasip1-std-sock-accept-bad.wasm"; then
-  echo "WASI P1 std bad sock artifact lacks fail-closed marker: $artifact_dir/wasip1-std-sock-accept-bad.wasm" >&2
+if ! rg -a -q 'sock_accept must reject' "$artifact_dir/wasip1-std-sock-accept-bad.wasm"; then
+  echo "WASI P1 std bad sock artifact lacks typed-reject marker: $artifact_dir/wasip1-std-sock-accept-bad.wasm" >&2
   exit 1
 fi
 if ! rg -a -q 'path_open' "$artifact_dir/wasip1-std-stream-control.wasm"; then
@@ -409,7 +409,7 @@ HIBANA_WASIP1_GUEST_DIR="$artifact_dir" \
   cargo test \
     --test host_wasip1_artifacts \
     --features profile-host-linux-wasip1-full \
-    rust_built_bad_std_path_app_fails_closed_before_hidden_host_fs \
+    rust_built_bad_std_path_app_rejects_before_hidden_host_fs \
     -- \
     --ignored \
     --exact
@@ -418,7 +418,7 @@ HIBANA_WASIP1_GUEST_DIR="$artifact_dir" \
   cargo test \
     --test host_wasip1_artifacts \
     --features profile-host-linux-wasip1-full \
-    rust_built_bad_std_static_write_fails_closed_at_choreofs_control \
+    rust_built_bad_std_static_write_rejects_at_choreofs_control \
     -- \
     --ignored \
     --exact
@@ -454,7 +454,7 @@ HIBANA_WASIP1_GUEST_DIR="$artifact_dir" \
   cargo test \
     --test host_wasip1_artifacts \
     --features profile-host-linux-wasip1-full \
-    rust_built_bad_std_sock_accept_fails_closed_without_listener_route \
+    rust_built_bad_std_sock_accept_rejects_without_listener_route \
     -- \
     --ignored \
     --exact

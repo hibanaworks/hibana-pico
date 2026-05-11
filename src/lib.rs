@@ -13,4 +13,5 @@ extern crate std;
 pub mod choreography;
 pub mod kernel;
 pub mod machine;
-pub mod substrate;
+pub mod port;
+pub mod projects;

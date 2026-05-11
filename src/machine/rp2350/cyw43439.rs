@@ -522,7 +522,8 @@ pub fn qemu_take_last_rx_meta(local_role: u8) -> Option<QemuCyw43439RxMeta> {
     if index >= QEMU_CYW43439_MAX_ROLES {
         return None;
     }
-    let encoded = QEMU_CYW43439_RX_META[index].swap(0, Ordering::Relaxed);
+    let encoded = QEMU_CYW43439_RX_META[index].load(Ordering::Relaxed);
+    QEMU_CYW43439_RX_META[index].store(0, Ordering::Relaxed);
     if encoded & QEMU_RX_META_VALID == 0 {
         return None;
     }
@@ -753,7 +754,7 @@ impl Transport for QemuCyw43439Transport {
         let len = frame.encode_into(&mut wire)?;
         let result = DRIVER.send_frame(peer_node, &wire[..len]);
         if result.is_ok() {
-            crate::substrate::exec::signal();
+            crate::port::exec::signal();
         }
         Poll::Ready(result)
     }

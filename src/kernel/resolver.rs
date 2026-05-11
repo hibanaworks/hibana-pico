@@ -1,16 +1,5 @@
 use core::cell::Cell;
 
-use hibana::substrate::{
-    cap::{
-        ResourceKind,
-        advanced::{LoopBreakKind, LoopContinueKind},
-    },
-    policy::{
-        LoopResolution as HibanaLoopResolution, ResolverContext as HibanaResolverContext,
-        ResolverError as HibanaResolverError, signals::core as policy_core,
-    },
-};
-
 use crate::{
     choreography::protocol::{BudgetExpired, GpioEdge, GpioWait, TimerSleepDone, TimerSleepUntil},
     kernel::device::timer::{TimerError, TimerSleepId, TimerSleepTable},
@@ -130,39 +119,6 @@ pub enum ResolvedInterrupt {
     GpioWaitSatisfied(GpioEdge),
     TransportRxReady { role: u8, lane: u8, label_hint: u8 },
     BudgetExpired(BudgetExpired),
-}
-
-/// Resolver for the Baker traffic loop policy site.
-///
-/// The Engine role controls the hibana loop with builtin continue/break control
-/// messages. Passive roles do not consult side-channel state; they enter the
-/// selected arm with `offer().decode()` according to their projection.
-pub struct BakerTrafficLoopResolver;
-
-impl BakerTrafficLoopResolver {
-    pub const fn new() -> Self {
-        Self
-    }
-
-    pub fn resolve_policy(
-        &self,
-        ctx: HibanaResolverContext,
-    ) -> Result<HibanaLoopResolution, HibanaResolverError> {
-        let Some(tag) = ctx.attr(policy_core::TAG).map(|value| value.as_u8()) else {
-            return Err(HibanaResolverError::Reject);
-        };
-        match tag {
-            LoopContinueKind::TAG => Ok(HibanaLoopResolution::Continue),
-            LoopBreakKind::TAG => Ok(HibanaLoopResolution::Break),
-            _ => Err(HibanaResolverError::Reject),
-        }
-    }
-}
-
-impl Default for BakerTrafficLoopResolver {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -448,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn gpio_edges_fail_closed_until_a_wait_is_registered() {
+    fn gpio_edges_reject_until_a_wait_is_registered() {
         let mut resolver: PicoInterruptResolver<1, 2, 1> = PicoInterruptResolver::new();
 
         resolver

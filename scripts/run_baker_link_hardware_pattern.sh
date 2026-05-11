@@ -53,8 +53,12 @@ case "$pattern" in
     expected_result="4849524a"
     expected_stage="4849004d"
     ;;
+  fail-safe|abort-safe)
+    features="$features baker-abort-safe-demo"
+    expected_result="48494653"
+    ;;
   *)
-    echo "usage: $0 {traffic|chaser|ordinary-std|choreofs|bad-order|invalid-fd|bad-payload|choreofs-bad-path|choreofs-bad-payload|choreofs-wrong-object}" >&2
+    echo "usage: $0 {traffic|chaser|ordinary-std|choreofs|bad-order|invalid-fd|bad-payload|choreofs-bad-path|choreofs-bad-payload|choreofs-wrong-object|fail-safe|abort-safe}" >&2
     exit 2
     ;;
 esac
@@ -105,6 +109,8 @@ result_addr="$(symbol_addr HIBANA_DEMO_RESULT)"
 stage_addr="$(symbol_addr HIBANA_DEMO_FAILURE_STAGE)"
 core0_stack_addr="$(symbol_addr HIBANA_DEMO_CORE0_STACK_MAX_USED_BYTES)"
 core1_stack_addr="$(symbol_addr HIBANA_DEMO_CORE1_STACK_MAX_USED_BYTES)"
+core0_stage_addr="$(symbol_addr HIBANA_DEMO_CORE0_STAGE)"
+core1_stage_addr="$(symbol_addr HIBANA_DEMO_CORE1_STAGE)"
 result=""
 stage=""
 deadline=$((SECONDS + ${HIBANA_BAKER_TIMEOUT_SECONDS:-45}))
@@ -131,6 +137,10 @@ core0_stack="$(read_word "$core0_stack_addr")"
 core1_stack="$(read_word "$core1_stack_addr")"
 printf 'core0_stack_high_water_addr=%s used=0x%s\n' "$core0_stack_addr" "$core0_stack"
 printf 'core1_stack_high_water_addr=%s used=0x%s\n' "$core1_stack_addr" "$core1_stack"
+core0_stage="$(read_word "$core0_stage_addr")"
+core1_stage="$(read_word "$core1_stage_addr")"
+printf 'core0_stage_addr=%s stage=0x%s\n' "$core0_stage_addr" "$core0_stage"
+printf 'core1_stage_addr=%s stage=0x%s\n' "$core1_stage_addr" "$core1_stage"
 
 if [[ "$result" != "$expected_result" ]]; then
   echo "Baker hardware pattern $pattern failed: result mismatch" >&2

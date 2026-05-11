@@ -13,11 +13,11 @@ cargo test --test host_feature_profiles --features profile-host-linux-wasip1-ful
 cargo test --manifest-path apps/wasip1/hibana-wasi-guest/Cargo.toml
 HIBANA_PICO_ENFORCE_PRACTICAL=1 bash ./scripts/check_pico_demo_budget.sh
 cargo test --lib kernel::budget::tests
-cargo test --lib kernel::engine::wasm::tests::fuel_exhaustion_becomes_budget_expired_event
+cargo test --lib kernel::engine::wasm::vm::tests::fuel_exhaustion_becomes_budget_expired_event
 cargo test --lib kernel::resolver::tests::resolved_ready_facts_are_consumed_once
 cargo test --lib kernel::resolver::tests::budget_timer_expiry_is_readiness_not_direct_kill
 cargo test --lib kernel::resolver::tests::gpio_wait_fence_revokes_subscription_before_old_edge_can_progress
-cargo test --lib kernel::network::tests::network_object_table_revoke_and_quiesce_fail_closed
+cargo test --lib kernel::network::tests::network_object_table_revoke_and_quiesce_reject
 cargo test --lib kernel::network::tests::authenticated_network_object_control_rejects_forged_or_stale_grants
 cargo test --lib kernel::policy::tests::policy_slot_table_requires_explicit_allowed_slot
 cargo test --lib choreography::protocol::tests::route_control_arm_ids_are_distinct_and_scope_preserving
@@ -30,11 +30,11 @@ cargo test --lib kernel::wasi::tests::pico_fd_view_rejects_invalid_stale_closed_
 cargo test --lib kernel::wasi::tests::pico_fd_view_tracks_interrupt_subscription_control_grant
 cargo test --lib kernel::wasi::tests::pico_fd_view_tracks_gateway_route_metadata
 cargo test --lib kernel::wasi::tests::memory_lease_table_memory_grow_fence_rejects_stale_read_write_and_old_epoch
-cargo test --test host_engine_supervisor budget_expiry_is_choreography_before_suspend_or_restart
-cargo test --test host_engine_supervisor wasm_fuel_exhaustion_reaches_kernel_as_budget_expired_choreography
-cargo test --test host_gpio_set host_backend_gpio_wait_completes_only_through_resolver_admitted_fact
+cargo test --lib kernel::engine::wasm::vm::tests::fuel_exhaustion_becomes_budget_expired_event
+cargo test --lib kernel::resolver::tests::timer_irq_resolves_only_after_a_matching_sleep_request_is_due
+cargo test --lib kernel::resolver::tests::gpio_edges_reject_until_a_wait_is_registered
 cargo test --test host_management_hotswap host_backend_management_install_requires_mem_fence_before_activate
-cargo test --test host_timer_sleep
+cargo test --test host_baker_led_fd baker_link_abort
 cargo test --test host_swarm_plan swarm_fragmentation_is_explicit_bounded_and_reassembles_secure_frames
 cargo test --test host_swarm_plan swarm_auth_and_replay_failures_drop_and_update_telemetry_without_payload_authority
 cargo test --test host_swarm_plan swarm_transport_copies_payload_and_does_not_share_node_memory
@@ -43,12 +43,12 @@ cargo test --test host_swarm_plan phone_local_provisioning_triggers_wifi_join_bu
 cargo test --test host_swarm_plan ble_provisioning_installs_local_config_but_swarm_join_remains_runtime_authority
 cargo test --test host_swarm_plan swarm_leave_revoke_choreography_quiesces_objects_leases_and_neighbors
 cargo test --test host_swarm_plan swarm_policy_route_selects_app_scope_from_budget_telemetry
-cargo test --test host_swarm_plan wifi_packet_loss_does_not_create_semantic_fallback_and_requires_retry
+cargo test --test host_swarm_plan wifi_packet_loss_does_not_create_semantic_fallback_and_requires_explicit_redelivery
 cargo test --test host_swarm_plan one_choreography_connects_all_swarm_nodes_with_sample_wasi_and_aggregate
 cargo test --test host_swarm_plan six_process_swarm_choreography_connects_coordinator_and_five_sensors
 cargo test --test host_swarm_plan --features profile-host-qemu-swarm production_qemu_swarm_routes_network_objects_over_swarm_transport
 cargo test --test host_swarm_plan one_choreography_connects_sensor_actuator_and_gateway_telemetry
-cargo test --test host_swarm_plan swarm_wrong_payload_and_wrong_localside_label_fail_closed
+cargo test --test host_swarm_plan swarm_wrong_payload_and_wrong_localside_label_reject
 cargo test --test host_swarm_plan remote_object_control_selects_explicit_route_arm_without_bridge
 cargo test --test host_swarm_plan remote_management_object_control_selects_management_route_arm_without_bridge
 cargo test --test host_swarm_plan remote_telemetry_object_control_selects_telemetry_route_arm_without_bridge
@@ -78,6 +78,11 @@ do
     --bin hibana-pico-baker-led-demo \
     --features "profile-rp2040-pico-min embed-wasip1-artifacts ${baker_choreofs_feature}"
 done
+cargo build \
+  --target thumbv6m-none-eabi \
+  --release \
+  --bin hibana-pico-baker-led-demo \
+  --features "profile-rp2040-pico-min embed-wasip1-artifacts baker-abort-safe-demo"
 cargo build \
   --target thumbv8m.main-none-eabi \
   --release \

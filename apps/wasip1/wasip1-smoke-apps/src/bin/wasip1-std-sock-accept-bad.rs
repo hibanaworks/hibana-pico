@@ -1,9 +1,9 @@
 use hibana_wasi_guest::net::Listener;
 
-const FAIL_MARKER: &str = "sock_accept must fail closed";
+const REJECT_MARKER: &str = "sock_accept must reject";
 
 fn main() -> hibana_wasi_guest::Result<()> {
     let listener = Listener::control()?;
-    let _stream = listener.accept_stream().expect(FAIL_MARKER);
+    let _stream = listener.accept_stream().expect(REJECT_MARKER);
     Ok(())
 }

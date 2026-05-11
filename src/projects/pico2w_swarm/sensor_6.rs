@@ -5,7 +5,11 @@
 mod runtime;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-const SWARM_KERNEL_ROLE: runtime::SwarmKernelRole = runtime::SwarmKernelRole::Sensor6Of6;
+const SWARM_KERNEL_ROLE: runtime::SwarmKernelRole = runtime::SwarmKernelRole {
+    node_role: Some(1),
+    fixed_node_count: Some(6),
+    fixed_sensor_hibana_role: Some(5),
+};
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
 fn main() {}

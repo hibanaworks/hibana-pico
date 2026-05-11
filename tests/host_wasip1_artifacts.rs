@@ -46,18 +46,14 @@ use hibana_pico::{
         MemoryLeaseError, MemoryLeaseTable, Wasip1ClockModule, Wasip1ImportSummary,
         Wasip1StderrModule, Wasip1StdinModule, Wasip1StdoutModule,
     },
-    substrate::host_queue::HostQueueBackend,
-    substrate::transport::SioTransport,
+    port::host_queue::HostQueueBackend,
+    port::transport::SioTransport,
 };
 
 #[cfg(feature = "profile-host-linux-wasip1-full")]
 use hibana_pico::kernel::{
     choreofs::ChoreoFsError,
-    engine::{
-        wasip1_host::{CoreWasip1HostRunError, CoreWasip1HostRunReport, CoreWasip1HostRunner},
-        wasm::CoreWasip1Instance,
-    },
-    features::Wasip1HandlerSet,
+    wasi::host_runner::{HostRunError, HostRunReport, HostRunner},
 };
 
 type TestTransport<'a> = SioTransport<&'a HostQueueBackend>;
@@ -78,6 +74,9 @@ const TEST_MEMORY_EPOCH: u32 = 1;
 const TEST_STDOUT_PTR: u32 = 1024;
 const TEST_STDERR_PTR: u32 = 2048;
 const TEST_STDIN_PTR: u32 = 3072;
+const TEST_STDIN_INPUT: &[u8] = b"hibana stdin\n";
+const TEST_STDIN_MAX_LEN: u8 = 24;
+const TEST_CLOCK_NANOS: u64 = 123_456_789;
 
 macro_rules! seq_chain {
     ($head:expr, $($tail:expr),+ $(,)?) => {
@@ -209,7 +208,7 @@ fn bytes_contain(bytes: &[u8], marker: &[u8]) -> bool {
 #[test]
 #[ignore = "requires scripts/check_wasip1_guest_builds.sh to build wasm32-wasip1 artifacts first"]
 fn rust_built_wasip1_smoke_artifacts_cover_timer_trap_and_infinite_loop() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         for name in [
             "wasip1-stdout",
             "wasip1-stderr",
@@ -365,8 +364,8 @@ fn rust_built_wasip1_smoke_artifacts_cover_timer_trap_and_infinite_loop() {
             "ordinary std bad-path app must exercise a real WASI P1 path_open reject"
         );
         assert!(
-            bytes_contain(&std_bad_path, b"forbidden path must fail closed"),
-            "ordinary std bad-path app must carry the fail-closed assertion marker"
+            bytes_contain(&std_bad_path, b"forbidden path must reject"),
+            "ordinary std bad-path app must carry the typed-reject assertion marker"
         );
 
         let std_static_write = artifact("wasip1-std-choreofs-static-write");
@@ -375,8 +374,8 @@ fn rust_built_wasip1_smoke_artifacts_cover_timer_trap_and_infinite_loop() {
             "ordinary std static-write app must exercise a real WASI P1 path_open reject"
         );
         assert!(
-            bytes_contain(&std_static_write, b"readonly static write must fail closed"),
-            "ordinary std static-write app must carry the fail-closed assertion marker"
+            bytes_contain(&std_static_write, b"readonly static write must reject"),
+            "ordinary std static-write app must carry the typed-reject assertion marker"
         );
 
         let std_sock = artifact("wasip1-std-sock-send-recv");
@@ -411,8 +410,8 @@ fn rust_built_wasip1_smoke_artifacts_cover_timer_trap_and_infinite_loop() {
             "ordinary std bad socket app must exercise WASI P1 sock_accept"
         );
         assert!(
-            bytes_contain(&std_sock_bad, b"sock_accept must fail closed"),
-            "ordinary std bad socket app must carry the fail-closed assertion marker"
+            bytes_contain(&std_sock_bad, b"sock_accept must reject"),
+            "ordinary std bad socket app must carry the typed-reject assertion marker"
         );
 
         let std_stream = artifact("wasip1-std-stream-control");
@@ -445,7 +444,7 @@ fn rust_built_wasip1_smoke_artifacts_cover_timer_trap_and_infinite_loop() {
 #[test]
 #[ignore = "requires scripts/check_wasip1_guest_builds.sh to build wasm32-wasip1 artifacts first"]
 fn rust_built_wasip1_memory_grow_artifacts_exercise_fence_and_stale_lease_rejection() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let ok_artifact = artifact("wasip1-memory-grow-ok");
         let stale_artifact = artifact("wasip1-memory-grow-stale-lease");
         let ok_module = Wasip1StdoutModule::parse(&ok_artifact).expect("memory grow ok module");
@@ -603,12 +602,7 @@ fn rust_built_wasip1_memory_grow_artifacts_exercise_fence_and_stale_lease_reject
 #[ignore = "requires scripts/check_wasip1_guest_builds.sh to build wasm32-wasip1 artifacts first"]
 fn rust_built_ordinary_std_core_coverage_runs_on_host_full_profile() {
     let artifact = artifact("wasip1-std-core-coverage");
-    assert!(
-        CoreWasip1Instance::new(&artifact, Wasip1HandlerSet::PICO_MIN).is_err(),
-        "ordinary std coverage app must not fit the tiny RP2040/Pico profile"
-    );
-
-    let mut runner = CoreWasip1HostRunner::new(&artifact).expect("create host/full std runner");
+    let mut runner = HostRunner::new(&artifact).expect("create host/full std runner");
     let report = runner
         .run_until_exit(512)
         .expect("run ordinary std core coverage through host/full typed runner");
@@ -636,8 +630,7 @@ fn rust_built_ordinary_std_core_coverage_runs_on_host_full_profile() {
 #[ignore = "requires scripts/check_wasip1_guest_builds.sh to build wasm32-wasip1 artifacts first"]
 fn rust_built_std_choreofs_app_uses_resource_store_through_host_full_runner() {
     let artifact = artifact("wasip1-std-choreofs-read");
-    let mut runner =
-        CoreWasip1HostRunner::new(&artifact).expect("create host/full ChoreoFS runner");
+    let mut runner = HostRunner::new(&artifact).expect("create host/full ChoreoFS runner");
     runner
         .fs_mut()
         .install_static_blob(b"config.txt", b"ok")
@@ -681,8 +674,7 @@ fn rust_built_std_choreofs_app_uses_resource_store_through_host_full_runner() {
 #[ignore = "requires scripts/check_wasip1_guest_builds.sh to build wasm32-wasip1 artifacts first"]
 fn rust_built_std_choreofs_append_app_writes_and_reads_resource_store() {
     let artifact = artifact("wasip1-std-choreofs-append");
-    let mut runner =
-        CoreWasip1HostRunner::new(&artifact).expect("create host/full ChoreoFS append runner");
+    let mut runner = HostRunner::new(&artifact).expect("create host/full ChoreoFS append runner");
     runner
         .fs_mut()
         .install_append_log(b"log.txt")
@@ -714,17 +706,16 @@ fn rust_built_std_choreofs_append_app_writes_and_reads_resource_store() {
 #[test]
 #[cfg(feature = "profile-host-linux-wasip1-full")]
 #[ignore = "requires scripts/check_wasip1_guest_builds.sh to build wasm32-wasip1 artifacts first"]
-fn rust_built_bad_std_path_app_fails_closed_before_hidden_host_fs() {
+fn rust_built_bad_std_path_app_rejects_before_hidden_host_fs() {
     let artifact = artifact("wasip1-std-bad-path");
-    let mut runner =
-        CoreWasip1HostRunner::new(&artifact).expect("create host/full bad-path runner");
-    runner.fail_closed_on_path_error(true);
+    let mut runner = HostRunner::new(&artifact).expect("create host/full bad-path runner");
+    runner.trap_on_path_error(true);
 
     let error = runner
         .run_until_exit(128)
-        .expect_err("bad std path must fail closed at the typed ChoreoFS boundary");
+        .expect_err("bad std path must reject at the typed ChoreoFS boundary");
     assert!(
-        matches!(error, CoreWasip1HostRunError::PathRejected(_)),
+        matches!(error, HostRunError::PathRejected(_)),
         "bad std path must reject through ChoreoFS, got {error:?}"
     );
 }
@@ -732,24 +723,20 @@ fn rust_built_bad_std_path_app_fails_closed_before_hidden_host_fs() {
 #[test]
 #[cfg(feature = "profile-host-linux-wasip1-full")]
 #[ignore = "requires scripts/check_wasip1_guest_builds.sh to build wasm32-wasip1 artifacts first"]
-fn rust_built_bad_std_static_write_fails_closed_at_choreofs_control() {
+fn rust_built_bad_std_static_write_rejects_at_choreofs_control() {
     let artifact = artifact("wasip1-std-choreofs-static-write");
-    let mut runner =
-        CoreWasip1HostRunner::new(&artifact).expect("create host/full static-write runner");
+    let mut runner = HostRunner::new(&artifact).expect("create host/full static-write runner");
     runner
         .fs_mut()
         .install_static_blob(b"readonly.txt", b"fixed")
         .expect("install read-only ChoreoFS object");
-    runner.fail_closed_on_path_error(true);
+    runner.trap_on_path_error(true);
 
     let error = runner
         .run_until_exit(128)
-        .expect_err("static blob write must fail closed at object control");
+        .expect_err("static blob write must reject at object control");
     assert!(
-        matches!(
-            error,
-            CoreWasip1HostRunError::ChoreoFs(ChoreoFsError::ReadOnly)
-        ),
+        matches!(error, HostRunError::ChoreoFs(ChoreoFsError::ReadOnly)),
         "static blob write must reject through ChoreoFS, got {error:?}"
     );
 }
@@ -759,7 +746,7 @@ fn rust_built_bad_std_static_write_fails_closed_at_choreofs_control() {
 #[ignore = "requires scripts/check_wasip1_guest_builds.sh to build wasm32-wasip1 artifacts first"]
 fn rust_built_std_sock_app_uses_network_object_without_p2() {
     let artifact = artifact("wasip1-std-sock-send-recv");
-    let mut runner = CoreWasip1HostRunner::new(&artifact).expect("create host/full sock runner");
+    let mut runner = HostRunner::new(&artifact).expect("create host/full sock runner");
     runner
         .fs_mut()
         .install_network_datagram(b"network/datagram/ping-pong")
@@ -805,13 +792,10 @@ fn rust_built_std_sock_app_uses_network_object_without_p2() {
 #[ignore = "requires scripts/check_wasip1_guest_builds.sh to build wasm32-wasip1 artifacts first"]
 fn rust_built_std_sock_accept_app_mints_network_object_without_socket_authority() {
     let artifact = artifact("wasip1-std-sock-accept-send-recv");
-    let mut runner = CoreWasip1HostRunner::new(&artifact).expect("create host/full accept runner");
-    runner
-        .fs_mut()
-        .install_network_listener(b"network/listener/control")
-        .expect("install control NetworkListener");
-    runner.enqueue_stream_accept(4, 5);
-    runner.enqueue_network_rx(5, b"pong");
+    let mut runner = HostRunner::new(&artifact).expect("create host/full accept runner");
+    runner.cap_grant_listener(31).expect("grant listener fd");
+    runner.enqueue_stream_accept(31, 32);
+    runner.enqueue_network_rx(32, b"pong");
 
     let report = runner
         .run_until_exit(768)
@@ -859,7 +843,7 @@ fn rust_built_std_sock_accept_app_mints_network_object_without_socket_authority(
 #[ignore = "requires scripts/check_wasip1_guest_builds.sh to build wasm32-wasip1 artifacts first"]
 fn rust_built_std_stream_control_app_uses_network_object_without_socket_authority() {
     let artifact = artifact("wasip1-std-stream-control");
-    let mut runner = CoreWasip1HostRunner::new(&artifact).expect("create host/full stream runner");
+    let mut runner = HostRunner::new(&artifact).expect("create host/full stream runner");
     runner
         .fs_mut()
         .install_network_stream(b"network/stream/control")
@@ -907,7 +891,7 @@ fn rust_built_std_stream_control_app_uses_network_object_without_socket_authorit
 }
 
 #[cfg(feature = "profile-host-linux-wasip1-full")]
-fn assert_host_full_runner_drives_projected_localside(report: &CoreWasip1HostRunReport) {
+fn assert_host_full_runner_drives_projected_localside(report: &HostRunReport) {
     assert!(
         report.localside_drive_count > 0,
         "host/full runner must drive projected localside, not just record EngineReq/EngineRet"
@@ -969,21 +953,17 @@ fn wasip1_network_smoke_sources_use_guest_facade_not_raw_sock_imports() {
 #[test]
 #[cfg(feature = "profile-host-linux-wasip1-full")]
 #[ignore = "requires scripts/check_wasip1_guest_builds.sh to build wasm32-wasip1 artifacts first"]
-fn rust_built_bad_std_sock_accept_fails_closed_without_listener_route() {
+fn rust_built_bad_std_sock_accept_rejects_without_listener_route() {
     let artifact = artifact("wasip1-std-sock-accept-bad");
-    let mut runner =
-        CoreWasip1HostRunner::new(&artifact).expect("create host/full bad sock runner");
-    runner
-        .fs_mut()
-        .install_network_listener(b"network/listener/control")
-        .expect("install control NetworkListener");
-    runner.fail_closed_on_network_error(true);
+    let mut runner = HostRunner::new(&artifact).expect("create host/full bad sock runner");
+    runner.cap_grant_listener(31).expect("grant listener fd");
+    runner.trap_on_network_error(true);
 
     let error = runner
-        .run_until_exit(256)
-        .expect_err("sock_accept must fail closed without explicit accept route");
+        .run_until_exit(128)
+        .expect_err("sock_accept must reject without explicit accept route");
     assert!(
-        matches!(error, CoreWasip1HostRunError::NetworkRejected(_)),
+        matches!(error, HostRunError::NetworkRejected(_)),
         "bad sock_accept must reject through NetworkObject, got {error:?}"
     );
 }
@@ -1296,7 +1276,7 @@ async fn exchange_stdin<const ENGINE: u8>(
 #[test]
 #[ignore = "requires scripts/check_wasip1_guest_builds.sh to build wasm32-wasip1 artifacts first"]
 fn rust_built_swarm_wasip1_artifacts_exercise_localside_choreography() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let coordinator = artifact("swarm-coordinator");
         let clock =
             Wasip1ClockModule::parse(&coordinator).expect("coordinator imports clock_time_get");
@@ -1305,7 +1285,12 @@ fn rust_built_swarm_wasip1_artifacts_exercise_localside_choreography() {
             .stdout_chunk_for(b"hibana swarm coordinator")
             .expect("coordinator marker chunk");
         with_pair!(310, project_clock_stdout_roles(), supervisor, engine, {
-            exchange_clock(&mut supervisor, &mut engine, clock.demo_clock_now()).await;
+            exchange_clock(
+                &mut supervisor,
+                &mut engine,
+                clock.clock_now(TEST_CLOCK_NANOS),
+            )
+            .await;
             exchange_stdout(&mut supervisor, &mut engine, coordinator_marker).await;
         });
 
@@ -1321,8 +1306,12 @@ fn rust_built_swarm_wasip1_artifacts_exercise_localside_choreography() {
         let actuator = artifact("swarm-actuator");
         let stdin = Wasip1StdinModule::parse(&actuator).expect("actuator imports fd_read");
         let stdout = Wasip1StdoutModule::parse(&actuator).expect("actuator imports fd_write");
-        let stdin_request = stdin.demo_stdin_request().expect("actuator stdin request");
-        let stdin_chunk = stdin.demo_stdin_chunk().expect("actuator stdin chunk");
+        let stdin_request = stdin
+            .stdin_request_for(TEST_STDIN_MAX_LEN)
+            .expect("actuator stdin request");
+        let stdin_chunk = stdin
+            .stdin_chunk_for(TEST_STDIN_INPUT)
+            .expect("actuator stdin chunk");
         let actuator_marker = stdout
             .stdout_chunk_for(b"hibana swarm actuator")
             .expect("actuator marker chunk");
@@ -1345,7 +1334,7 @@ fn rust_built_swarm_wasip1_artifacts_exercise_localside_choreography() {
 #[test]
 #[ignore = "requires scripts/check_wasip1_guest_builds.sh to build wasm32-wasip1 artifacts first"]
 fn rust_built_swarm_wasip1_artifacts_exercise_one_global_swarm_choreography() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let coordinator = artifact("swarm-coordinator");
         let coordinator_clock =
             Wasip1ClockModule::parse(&coordinator).expect("coordinator imports clock_time_get");
@@ -1366,10 +1355,10 @@ fn rust_built_swarm_wasip1_artifacts_exercise_one_global_swarm_choreography() {
         let actuator_stdout =
             Wasip1StdoutModule::parse(&actuator).expect("actuator imports fd_write");
         let actuator_stdin_request = actuator_stdin
-            .demo_stdin_request()
+            .stdin_request_for(TEST_STDIN_MAX_LEN)
             .expect("actuator stdin request");
         let actuator_stdin_chunk = actuator_stdin
-            .demo_stdin_chunk()
+            .stdin_chunk_for(TEST_STDIN_INPUT)
             .expect("actuator stdin chunk");
         let actuator_marker = actuator_stdout
             .stdout_chunk_for(b"hibana swarm actuator")
@@ -1505,7 +1494,7 @@ fn rust_built_swarm_wasip1_artifacts_exercise_one_global_swarm_choreography() {
         exchange_clock(
             &mut supervisor,
             &mut coordinator_app,
-            coordinator_clock.demo_clock_now(),
+            coordinator_clock.clock_now(TEST_CLOCK_NANOS),
         )
         .await;
         exchange_stdout(&mut supervisor, &mut coordinator_app, coordinator_marker).await;
@@ -1672,7 +1661,7 @@ fn rust_built_swarm_wasip1_artifacts_exercise_one_global_swarm_choreography() {
 #[test]
 #[ignore = "requires scripts/check_wasip1_guest_builds.sh to build wasm32-wasip1 artifacts first"]
 fn rust_built_wasip1_artifact_installs_as_hotswap_image_and_requires_fence() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let image = artifact("swarm-sensor");
         assert!(image.len() > MGMT_IMAGE_CHUNK_CAPACITY);
 

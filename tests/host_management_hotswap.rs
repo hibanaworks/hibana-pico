@@ -21,8 +21,8 @@ use hibana_pico::{
     kernel::resolver::PicoInterruptResolver,
     kernel::swarm::{NodeId, SwarmCredential},
     kernel::wasi::MemoryLeaseTable,
-    substrate::host_queue::HostQueueBackend,
-    substrate::transport::SioTransport,
+    port::host_queue::HostQueueBackend,
+    port::transport::SioTransport,
 };
 
 type TestTransport<'a> = SioTransport<&'a HostQueueBackend>;
@@ -95,7 +95,7 @@ fn project_management_roles() -> (RoleProgram<0>, RoleProgram<1>) {
 
 #[test]
 fn host_backend_management_install_requires_mem_fence_before_activate() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let backend = HostQueueBackend::new();
 
         let clock0 = CounterClock::new();

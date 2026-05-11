@@ -115,7 +115,7 @@ mod tests {
     }
 
     #[test]
-    fn sleep_table_fails_closed_when_full() {
+    fn sleep_table_rejects_when_full() {
         let mut timers: TimerSleepTable<1> = TimerSleepTable::new();
         timers
             .request_sleep(TimerSleepUntil::new(10))

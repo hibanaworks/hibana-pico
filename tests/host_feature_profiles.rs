@@ -1,7 +1,7 @@
 use hibana_pico::kernel::features::{
-    FeatureMatrix, WASIP1_PREVIEW1_IMPORT_COVERAGE, WASIP1_PREVIEW1_IMPORTS,
-    Wasip1ControlSubstrate, Wasip1HandlerSet, Wasip1ImportDisposition,
-    Wasip1ImportEffectiveDisposition, Wasip1ImportName, Wasip1Syscall, WasmEngineProfile,
+    FeatureMatrix, WASIP1_PREVIEW1_IMPORT_COVERAGE, WASIP1_PREVIEW1_IMPORTS, Wasip1ControlCapacity,
+    Wasip1HandlerSet, Wasip1ImportDisposition, Wasip1ImportEffectiveDisposition, Wasip1ImportName,
+    Wasip1Syscall, WasmEngineProfile,
 };
 
 fn cargo_toml() -> &'static str {
@@ -45,13 +45,13 @@ fn feature_control_matrix_keeps_pico_small_and_host_full_as_separate_axes() {
         profiles: Default::default(),
         engine: WasmEngineProfile::Core,
         wasip1_handlers: Wasip1HandlerSet::PICO_MIN,
-        wasip1_control: Wasip1ControlSubstrate::FULL,
+        wasip1_control: Wasip1ControlCapacity::FULL,
     };
     let host = FeatureMatrix {
         profiles: Default::default(),
         engine: WasmEngineProfile::Wasip1Full,
         wasip1_handlers: Wasip1HandlerSet::FULL,
-        wasip1_control: Wasip1ControlSubstrate::FULL,
+        wasip1_control: Wasip1ControlCapacity::FULL,
     };
 
     assert!(pico.can_claim_wasip1_profile());
@@ -124,7 +124,7 @@ fn wasi_p1_import_coverage_table_is_the_source_of_truth_for_profiles() {
         WASIP1_PREVIEW1_IMPORT_COVERAGE
             .iter()
             .any(|entry| entry.disposition == Wasip1ImportDisposition::TypedReject),
-        "coverage table must make fail-closed reject imports explicit"
+        "coverage table must make typed-reject reject imports explicit"
     );
 
     let pico = Wasip1HandlerSet::PICO_MIN;
@@ -157,10 +157,13 @@ fn wasi_p1_import_coverage_table_is_the_source_of_truth_for_profiles() {
 #[test]
 fn wasi_p1_import_names_are_not_redeclared_as_manual_byte_tables() {
     for (path, source) in [
-        ("src/kernel/wasi.rs", include_str!("../src/kernel/wasi.rs")),
         (
-            "src/kernel/engine/wasm.rs",
-            include_str!("../src/kernel/engine/wasm.rs"),
+            "src/kernel/wasi/mod.rs",
+            include_str!("../src/kernel/wasi/mod.rs"),
+        ),
+        (
+            "src/kernel/engine/wasm/mod.rs",
+            include_str!("../src/kernel/engine/wasm/mod.rs"),
         ),
     ] {
         for import in WASIP1_PREVIEW1_IMPORTS {
@@ -177,8 +180,8 @@ fn wasi_p1_import_names_are_not_redeclared_as_manual_byte_tables() {
 fn choreography_sources_do_not_use_feature_cfg_as_protocol_authority() {
     const CHOREOGRAPHY_SOURCES: &[(&str, &str)] = &[
         (
-            "src/choreography/protocol.rs",
-            include_str!("../src/choreography/protocol.rs"),
+            "src/choreography/protocol/mod.rs",
+            include_str!("../src/choreography/protocol/mod.rs"),
         ),
         (
             "src/choreography/local.rs",

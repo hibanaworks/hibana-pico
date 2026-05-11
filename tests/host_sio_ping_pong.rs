@@ -10,7 +10,7 @@ use hibana::{
         tap::TapEvent,
     },
 };
-use hibana_pico::{substrate::host_queue::HostQueueBackend, substrate::transport::SioTransport};
+use hibana_pico::{port::host_queue::HostQueueBackend, port::transport::SioTransport};
 
 const LABEL_PING: u8 = 1;
 const LABEL_PONG: u8 = 2;
@@ -39,7 +39,7 @@ fn project_ping_pong_roles() -> (RoleProgram<0>, RoleProgram<1>) {
 
 #[test]
 fn host_backend_roundtrips_hibana_localside_ping_pong() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let backend = HostQueueBackend::new();
 
         let clock0 = CounterClock::new();

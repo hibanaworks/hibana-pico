@@ -24,20 +24,22 @@ use hibana_pico::choreography::swarm::{
 };
 use hibana_pico::{
     choreography::protocol::{
-        EngineLabelUniverse, EngineReq, EngineRet, FdError, FdErrorMsg, FdRead, FdReadDone,
-        FdWrite, FdWriteDone, GpioWait, LABEL_MEM_BORROW_READ, LABEL_MEM_FENCE, LABEL_MEM_RELEASE,
-        LABEL_MGMT_IMAGE_ACTIVATE, LABEL_MGMT_IMAGE_BEGIN, LABEL_MGMT_IMAGE_CHUNK,
-        LABEL_MGMT_IMAGE_END, LABEL_MGMT_IMAGE_STATUS, LABEL_NET_DATAGRAM_RECV,
-        LABEL_NET_DATAGRAM_SEND, LABEL_NET_STREAM_WRITE, LABEL_REMOTE_ACTUATE_REQ,
-        LABEL_REMOTE_SAMPLE_REQ, LABEL_SWARM_TELEMETRY, LABEL_WASI_FD_READ, LABEL_WASI_FD_READ_RET,
-        LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET, MEM_LEASE_NONE, MGMT_IMAGE_CHUNK_CAPACITY,
+        EngineAbortRouteControl, EngineLabelUniverse, EngineNormalRouteControl, EngineReq,
+        EngineRet, FdError, FdErrorMsg, FdRead, FdReadDone, FdWrite, FdWriteDone, GpioWait,
+        LABEL_MEM_BORROW_READ, LABEL_MEM_FENCE, LABEL_MEM_RELEASE, LABEL_MGMT_IMAGE_ACTIVATE,
+        LABEL_MGMT_IMAGE_BEGIN, LABEL_MGMT_IMAGE_CHUNK, LABEL_MGMT_IMAGE_END,
+        LABEL_MGMT_IMAGE_STATUS, LABEL_NET_DATAGRAM_RECV, LABEL_NET_DATAGRAM_SEND,
+        LABEL_NET_STREAM_WRITE, LABEL_REMOTE_ACTUATE_REQ, LABEL_REMOTE_SAMPLE_REQ,
+        LABEL_SWARM_TELEMETRY, LABEL_WASI_FD_READ, LABEL_WASI_FD_READ_RET, LABEL_WASI_FD_WRITE,
+        LABEL_WASI_FD_WRITE_RET, LABEL_WASI_PROC_EXIT, MEM_LEASE_NONE, MGMT_IMAGE_CHUNK_CAPACITY,
         MemBorrow, MemFence, MemFenceReason, MemReadGrantControl, MemRelease, MemRights,
         MgmtImageActivate, MgmtImageBegin, MgmtImageChunk, MgmtImageEnd, MgmtStatus,
         MgmtStatusCode, NetworkDatagramRecvRouteControl, NetworkDatagramSendRouteControl,
         NetworkRejectRouteControl, NetworkStreamReadRouteControl, NetworkStreamWriteRouteControl,
         PublishAlertControl, PublishNormalControl, RemoteActuatorRouteControl,
         RemoteManagementRouteControl, RemoteRejectRouteControl, RemoteSensorRouteControl,
-        RemoteTelemetryRouteControl,
+        RemoteTelemetryRouteControl, StateRestoreControl, StateSnapshotControl, TopologyAckControl,
+        TopologyBeginControl, TopologyCommitControl, TxAbortControl, TxCommitControl,
     },
     kernel::app::{AppId, AppLeaseTable, AppScopeError, AppStreamTable},
     kernel::metrics::{PICO2W_SWARM_DEFAULT_AGGREGATE, pico2w_swarm_sample_value},
@@ -74,9 +76,13 @@ use hibana_pico::{
         SWARM_FRAME_PAYLOAD_CAPACITY, SwarmCredential, SwarmError, SwarmFragment, SwarmFrame,
         SwarmReassemblyBuffer, SwarmSecurity,
     },
-    kernel::wasi::{MemoryLeaseTable, WASIP1_STDOUT_DEMO_TEXT, Wasip1StdoutModule},
-    substrate::host_queue::HostQueueBackend,
-    substrate::transport::SioTransport,
+    kernel::wasi::{MemoryLeaseTable, Wasip1StdoutModule},
+    port::host_queue::HostQueueBackend,
+    port::transport::SioTransport,
+    projects::baker_link_led::choreography::{
+        BakerTrafficLoopBreakControl, BakerTrafficLoopContinueControl,
+        POLICY_BAKER_ENGINE_ABORT_ROUTE, POLICY_BAKER_TRAFFIC_LOOP,
+    },
 };
 
 type TestTransport<'a> = SioTransport<&'a HostQueueBackend>;
@@ -105,6 +111,7 @@ const QEMU_REMOTE_ACTUATOR_FD: u8 = 21;
 const TEST_MEMORY_LEN: u32 = 4096;
 const TEST_MEMORY_EPOCH: u32 = 1;
 const TEST_STDOUT_PTR: u32 = 1024;
+const TEST_STDOUT_TEXT: &[u8] = b"hibana wasip1 stdout\n";
 const TEST_STDOUT_FD: u8 = 1;
 const TEST_WASI_START_VALUE: u32 = 0x5741_5349;
 const LABEL_SWARM_PING: u8 = 1;
@@ -747,7 +754,7 @@ async fn exchange_swarm_wasip1_fd_write<const ROLE: u8>(
     };
     assert_eq!(received_write.fd(), TEST_STDOUT_FD);
     assert_eq!(received_write.lease_id(), grant.lease_id());
-    assert_eq!(received_write.as_bytes(), WASIP1_STDOUT_DEMO_TEXT);
+    assert_eq!(received_write.as_bytes(), TEST_STDOUT_TEXT);
 
     let reply = EngineRet::FdWriteDone(FdWriteDone::new(
         received_write.fd(),
@@ -784,7 +791,7 @@ async fn exchange_swarm_wasip1_fd_write<const ROLE: u8>(
 
 #[test]
 fn swarm_frame_is_bounded_authenticated_and_label_hint_is_not_authority() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let mut encoded_payload = [0u8; 8];
         let sample_req = RemoteSampleRequest::new(4, 9, 3);
         let payload_len = sample_req
@@ -842,7 +849,7 @@ fn swarm_frame_is_bounded_authenticated_and_label_hint_is_not_authority() {
 
 #[test]
 fn swarm_auth_and_replay_failures_drop_and_update_telemetry_without_payload_authority() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let medium: HostSwarmMedium<4> = HostSwarmMedium::new();
         let payload = [0xAA, 0xBB];
         let secure = SwarmFrame::new(
@@ -930,7 +937,7 @@ fn swarm_auth_and_replay_failures_drop_and_update_telemetry_without_payload_auth
 
 #[test]
 fn swarm_transport_copies_payload_and_does_not_share_node_memory() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let mut source_memory = [0x11, 0x22, 0x33, 0x44];
         let original_payload = source_memory;
         let frame = SwarmFrame::new(
@@ -964,7 +971,7 @@ fn swarm_transport_copies_payload_and_does_not_share_node_memory() {
 
 #[test]
 fn swarm_fragmentation_is_explicit_bounded_and_reassembles_secure_frames() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         const PAYLOAD_LEN: usize = SWARM_FRAGMENT_CHUNK_CAPACITY + 17;
         let mut payload = [0u8; PAYLOAD_LEN];
         for (index, byte) in payload.iter_mut().enumerate() {
@@ -1052,7 +1059,7 @@ fn swarm_fragmentation_is_explicit_bounded_and_reassembles_secure_frames() {
 
 #[test]
 fn swarm_medium_rejects_replay_and_revoked_neighbors() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let mut neighbors: NeighborTable<3> = NeighborTable::new();
         neighbors
             .add(NeighborEntry::new(COORDINATOR, 0, SESSION_GENERATION))
@@ -1128,7 +1135,7 @@ fn swarm_medium_rejects_replay_and_revoked_neighbors() {
 
 #[test]
 fn phone_local_provisioning_triggers_wifi_join_but_swarm_grant_is_runtime_authority() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let sensor_roles = RoleMask::single(NodeRole::Sensor);
         let mut provisioning = ProvisioningRecord::new(
             SENSOR,
@@ -1345,7 +1352,7 @@ fn phone_local_provisioning_triggers_wifi_join_but_swarm_grant_is_runtime_author
 
 #[test]
 fn ble_provisioning_installs_local_config_but_swarm_join_remains_runtime_authority() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let sensor_roles = RoleMask::single(NodeRole::Sensor);
         let ble_bundle = BleProvisioningBundle::new(
             SENSOR,
@@ -1499,7 +1506,7 @@ fn ble_provisioning_installs_local_config_but_swarm_join_remains_runtime_authori
 
 #[test]
 fn swarm_leave_revoke_choreography_quiesces_objects_leases_and_neighbors() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let medium: HostSwarmMedium<64> = HostSwarmMedium::new();
         let observer_node = ACTUATOR;
         let role_nodes = [COORDINATOR, SENSOR, observer_node, NodeId::new(4)];
@@ -1727,7 +1734,7 @@ fn swarm_leave_revoke_choreography_quiesces_objects_leases_and_neighbors() {
 
 #[test]
 fn remote_sensor_and_actuator_objects_are_wired_through_hibana_messages() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let mut caps: RemoteObjectTable<4> = RemoteObjectTable::new();
         let sensor_cap = caps
             .apply_cap_grant(
@@ -1940,7 +1947,7 @@ fn remote_sensor_and_actuator_objects_are_wired_through_hibana_messages() {
 
 #[test]
 fn remote_object_control_selects_explicit_route_arm_without_bridge() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let medium: HostSwarmMedium<64> = HostSwarmMedium::new();
         let role_nodes = [COORDINATOR, GATEWAY, SENSOR, ACTUATOR];
 
@@ -2469,7 +2476,7 @@ fn remote_object_control_selects_explicit_route_arm_without_bridge() {
 
 #[test]
 fn remote_management_object_control_selects_management_route_arm_without_bridge() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let medium: HostSwarmMedium<64> = HostSwarmMedium::new();
         let role_nodes = [COORDINATOR, SENSOR, GATEWAY, ACTUATOR];
 
@@ -2684,7 +2691,7 @@ fn remote_management_object_control_selects_management_route_arm_without_bridge(
 
 #[test]
 fn remote_telemetry_object_control_selects_telemetry_route_arm_without_bridge() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let medium: HostSwarmMedium<64> = HostSwarmMedium::new();
         let role_nodes = [COORDINATOR, SENSOR, GATEWAY, ACTUATOR];
 
@@ -2897,7 +2904,7 @@ fn remote_telemetry_object_control_selects_telemetry_route_arm_without_bridge() 
 
 #[test]
 fn remote_sample_is_wired_through_hibana_over_swarm_transport() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let medium: HostSwarmMedium<8> = HostSwarmMedium::new();
 
         let clock0 = CounterClock::new();
@@ -2981,7 +2988,7 @@ fn remote_sample_is_wired_through_hibana_over_swarm_transport() {
 
 #[test]
 fn two_node_wifi_ping_pong_is_wired_through_hibana_over_swarm_transport() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let medium: HostSwarmMedium<8> = HostSwarmMedium::new();
 
         let clock0 = CounterClock::new();
@@ -3051,8 +3058,8 @@ fn two_node_wifi_ping_pong_is_wired_through_hibana_over_swarm_transport() {
 }
 
 #[test]
-fn wifi_packet_loss_does_not_create_semantic_fallback_and_requires_retry() {
-    hibana_pico::substrate::exec::run_current_task(async {
+fn wifi_packet_loss_does_not_create_semantic_fallback_and_requires_explicit_redelivery() {
+    hibana_pico::port::exec::run_current_task(async {
         let medium: HostSwarmMedium<8> = HostSwarmMedium::new();
 
         let clock0 = CounterClock::new();
@@ -3111,8 +3118,8 @@ fn wifi_packet_loss_does_not_create_semantic_fallback_and_requires_retry() {
         let mut payload = [0u8; SWARM_FRAME_PAYLOAD_CAPACITY];
         let payload_len = request
             .encode_into(&mut payload)
-            .expect("encode retry sample request");
-        let retry = SwarmFrame::new(
+            .expect("encode redelivered sample request");
+        let redelivery = SwarmFrame::new(
             COORDINATOR,
             SENSOR,
             212,
@@ -3124,26 +3131,26 @@ fn wifi_packet_loss_does_not_create_semantic_fallback_and_requires_retry() {
             &payload[..payload_len],
             SECURE,
         )
-        .expect("build transport retry frame");
-        medium.send(retry).expect("deliver retry frame");
+        .expect("build transport redelivery frame");
+        medium.send(redelivery).expect("deliver redelivery frame");
         assert_eq!(
             (pending_recv)
                 .await
-                .expect("retry lets typed receive progress"),
+                .expect("redelivery lets typed receive progress"),
             request
         );
 
         let sample = RemoteSample::new(12, 0, 31_000, 100);
         (sensor
             .flow::<RemoteSampleRetMsg>()
-            .expect("sensor flow<sample ret after retry>")
+            .expect("sensor flow<sample ret after redelivery>")
             .send(&sample))
         .await
-        .expect("send sample after retry");
+        .expect("send sample after redelivery");
         assert_eq!(
             (coordinator.recv::<RemoteSampleRetMsg>())
                 .await
-                .expect("coordinator recv sample after retry"),
+                .expect("coordinator recv sample after redelivery"),
             sample
         );
     });
@@ -3151,11 +3158,13 @@ fn wifi_packet_loss_does_not_create_semantic_fallback_and_requires_retry() {
 
 #[test]
 fn wasip1_fd_write_guest_is_wired_through_hibana_over_swarm_transport() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let module = Wasip1StdoutModule::parse(WASIP1_STDOUT_GUEST).expect("parse stdout guest");
-        let chunk = module.demo_stdout_chunk().expect("stdout chunk");
+        let chunk = module
+            .stdout_chunk_for(TEST_STDOUT_TEXT)
+            .expect("stdout chunk");
         assert_eq!(chunk.lease_id(), MEM_LEASE_NONE);
-        assert_eq!(chunk.as_bytes(), WASIP1_STDOUT_DEMO_TEXT);
+        assert_eq!(chunk.as_bytes(), TEST_STDOUT_TEXT);
 
         let medium: HostSwarmMedium<8> = HostSwarmMedium::new();
 
@@ -3239,7 +3248,7 @@ fn wasip1_fd_write_guest_is_wired_through_hibana_over_swarm_transport() {
         };
         assert_eq!(received_write.fd(), TEST_STDOUT_FD);
         assert_eq!(received_write.lease_id(), grant.lease_id());
-        assert_eq!(received_write.as_bytes(), WASIP1_STDOUT_DEMO_TEXT);
+        assert_eq!(received_write.as_bytes(), TEST_STDOUT_TEXT);
 
         let reply = EngineRet::FdWriteDone(FdWriteDone::new(
             received_write.fd(),
@@ -3808,10 +3817,12 @@ async fn exchange_qemu_network_object_route<const GATEWAY_ROLE: u8>(
 
 #[test]
 fn one_choreography_connects_all_swarm_nodes_with_sample_wasi_and_aggregate() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let module = Wasip1StdoutModule::parse(WASIP1_STDOUT_GUEST).expect("parse stdout guest");
-        let chunk = module.demo_stdout_chunk().expect("stdout chunk");
-        assert_eq!(chunk.as_bytes(), WASIP1_STDOUT_DEMO_TEXT);
+        let chunk = module
+            .stdout_chunk_for(TEST_STDOUT_TEXT)
+            .expect("stdout chunk");
+        assert_eq!(chunk.as_bytes(), TEST_STDOUT_TEXT);
 
         let medium: HostSwarmMedium<64> = HostSwarmMedium::new();
         let role_nodes = [COORDINATOR, SENSOR, ACTUATOR, NodeId::new(4)];
@@ -4085,10 +4096,12 @@ fn one_choreography_connects_all_swarm_nodes_with_sample_wasi_and_aggregate() {
 
 #[test]
 fn six_process_swarm_choreography_connects_coordinator_and_five_sensors() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let module = Wasip1StdoutModule::parse(WASIP1_STDOUT_GUEST).expect("parse stdout guest");
-        let chunk = module.demo_stdout_chunk().expect("stdout chunk");
-        assert_eq!(chunk.as_bytes(), WASIP1_STDOUT_DEMO_TEXT);
+        let chunk = module
+            .stdout_chunk_for(TEST_STDOUT_TEXT)
+            .expect("stdout chunk");
+        assert_eq!(chunk.as_bytes(), TEST_STDOUT_TEXT);
 
         let medium: HostSwarmMedium<192> = HostSwarmMedium::new();
         let node2 = NodeId::new(2);
@@ -4584,7 +4597,7 @@ fn qemu_swarm_runtime_checks_transport_rx_metadata_for_network_objects() {
 
 #[test]
 fn one_choreography_connects_sensor_actuator_and_gateway_telemetry() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let medium: HostSwarmMedium<64> = HostSwarmMedium::new();
         let role_nodes = [COORDINATOR, SENSOR, ACTUATOR, GATEWAY];
 
@@ -4772,8 +4785,8 @@ fn one_choreography_connects_sensor_actuator_and_gateway_telemetry() {
 }
 
 #[test]
-fn swarm_wrong_payload_and_wrong_localside_label_fail_closed() {
-    hibana_pico::substrate::exec::run_current_task(async {
+fn swarm_wrong_payload_and_wrong_localside_label_reject() {
+    hibana_pico::port::exec::run_current_task(async {
         let medium: HostSwarmMedium<8> = HostSwarmMedium::new();
 
         let clock0 = CounterClock::new();
@@ -4878,7 +4891,7 @@ fn swarm_wrong_payload_and_wrong_localside_label_fail_closed() {
 
 #[test]
 fn datagram_fd_protocol_is_bounded_and_wired_through_hibana_messages() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let mut fds: NetworkObjectTable<2> = NetworkObjectTable::new();
         let fd = fds
             .apply_cap_grant_datagram(
@@ -5032,7 +5045,7 @@ fn datagram_fd_protocol_is_bounded_and_wired_through_hibana_messages() {
 
 #[test]
 fn wasi_fd_selects_network_datagram_route_without_p2_or_bridge() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let mut fds: NetworkObjectTable<4> = NetworkObjectTable::new();
         let datagram_fd = fds
             .apply_cap_grant_datagram_with_policy(
@@ -5508,7 +5521,7 @@ fn wasi_fd_selects_network_datagram_route_without_p2_or_bridge() {
 
 #[test]
 fn wasi_fd_selects_network_stream_route_without_p2_or_bridge() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let mut fds: NetworkObjectTable<2> = NetworkObjectTable::new();
         let stream_fd = fds
             .apply_cap_grant_stream_with_policy(
@@ -5835,7 +5848,7 @@ fn wasi_fd_selects_network_stream_route_without_p2_or_bridge() {
 
 #[test]
 fn three_node_policy_and_remote_management_are_wired_and_fenced() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let backend = HostQueueBackend::new();
         let clock0 = CounterClock::new();
         let mut tap0 = [TapEvent::zero(); 128];
@@ -6023,7 +6036,7 @@ fn three_node_policy_and_remote_management_are_wired_and_fenced() {
 
 #[test]
 fn swarm_policy_route_selects_app_scope_from_budget_telemetry() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let medium: HostSwarmMedium<8> = HostSwarmMedium::new();
 
         let clock0 = CounterClock::new();
@@ -6189,8 +6202,51 @@ fn swarm_policy_route_selects_app_scope_from_budget_telemetry() {
 }
 
 #[test]
+fn topology_tx_and_state_controls_project_as_hibana_control_messages() {
+    let program = seq_chain!(
+        send::<Role<0>, Role<1>, TopologyBeginControl, 19>(),
+        send::<Role<1>, Role<0>, TopologyAckControl, 19>(),
+        send::<Role<0>, Role<1>, TopologyCommitControl, 19>(),
+        send::<Role<0>, Role<1>, TxCommitControl, 19>(),
+        send::<Role<1>, Role<0>, TxAbortControl, 19>(),
+        send::<Role<1>, Role<0>, StateSnapshotControl, 19>(),
+        send::<Role<0>, Role<1>, StateRestoreControl, 19>(),
+    );
+    let _coordinator_program: RoleProgram<0> = project(&program);
+    let _node_program: RoleProgram<1> = project(&program);
+
+    assert!(EngineLabelUniverse::MAX_LABEL >= 144);
+}
+
+#[test]
+fn abort_normal_route_contains_inner_continue_break_loop_projection() {
+    let abort = send::<Role<1>, Role<1>, EngineAbortRouteControl, 1>()
+        .policy::<POLICY_BAKER_ENGINE_ABORT_ROUTE>();
+    let normal = g::seq(
+        send::<Role<1>, Role<1>, EngineNormalRouteControl, 1>()
+            .policy::<POLICY_BAKER_ENGINE_ABORT_ROUTE>(),
+        g::route(
+            g::seq(
+                send::<Role<1>, Role<1>, BakerTrafficLoopContinueControl, 1>()
+                    .policy::<POLICY_BAKER_TRAFFIC_LOOP>(),
+                send::<Role<1>, Role<0>, Msg<LABEL_MEM_BORROW_READ, MemBorrow>, 1>(),
+            ),
+            g::seq(
+                send::<Role<1>, Role<1>, BakerTrafficLoopBreakControl, 1>()
+                    .policy::<POLICY_BAKER_TRAFFIC_LOOP>(),
+                send::<Role<1>, Role<0>, Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 1>(),
+            ),
+        ),
+    );
+    let program = g::route(abort, normal);
+
+    let _kernel_program: RoleProgram<0> = project(&program);
+    let _engine_program: RoleProgram<1> = project(&program);
+}
+
+#[test]
 fn remote_management_image_install_is_wired_through_hibana_over_swarm_transport() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         static IMAGE: &[u8] = b"\0asm\x01\0\0\0wasi_snapshot_preview1 fd_write stdout\n";
         let plan = ImageTransferPlan::new(IMAGE.len()).expect("plan remote image transfer");
         assert_eq!(plan.chunk_count(), 2);
@@ -6545,7 +6601,7 @@ fn remote_management_image_install_is_wired_through_hibana_over_swarm_transport(
 
 #[test]
 fn remote_management_rejects_bad_image_over_swarm_transport() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         static BAD_IMAGE: &[u8] = b"not-wasm";
         let plan = ImageTransferPlan::new(BAD_IMAGE.len()).expect("plan invalid image transfer");
         assert_eq!(plan.chunk_count(), 1);
@@ -6710,7 +6766,7 @@ fn remote_management_rejects_bad_image_over_swarm_transport() {
 
 #[test]
 fn remote_management_activation_emits_node_image_update_to_swarm_observer() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         static IMAGE: &[u8] = b"\0asm\x01\0\0\0wasi_snapshot_preview1";
         let plan = ImageTransferPlan::new(IMAGE.len()).expect("plan observer image transfer");
         assert_eq!(plan.chunk_count(), 1);

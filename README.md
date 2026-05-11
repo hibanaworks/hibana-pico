@@ -1,8 +1,21 @@
 # hibana-pico
 
-`hibana-pico` is a downstream proof set showing that one `hibana` choreography can span both RP2040 cores without changing the `hibana` surface.
+`hibana-pico` is a choreographic WASI Preview 1 microkernel swarm OS for
+Raspberry Pi Pico-class boards.
 
-The demos are intentionally narrow. One demo keeps the original `PING/PONG` proof. A second demo advances the same substrate one step closer to the eventual Wasm shape: Core 1 acts as an engine role, Core 0 acts as a supervisor role, and they exchange a small `EngineReq` / `EngineRet` request-reply sequence while both cores print the handled values over UART. A third demo goes one step further and runs a tiny no-alloc Wasm subset interpreter on Core 1 so the requests originate from actual Wasm bytes instead of hard-coded Rust control flow. A fourth demo keeps the same tiny Wasm guest model but makes the backend choreography visible: Core 1 sends one typed sample request, Core 0 chooses a publish arm with a route control token, and Core 1 receives that arm through `offer().decode()`. A fifth demo is intentionally wrong: the Wasm guest asks for `yield` before the choreography has opened that phase, and the backend fails closed instead of inventing a rescue path. A sixth demo targets Baker link Dev Rev1 / RP2040 hardware: a Rust-built WASI Preview 1 app imports `wasi_snapshot_preview1.fd_write` and `poll_oneoff`, and those real import calls drive the board's traffic-light LEDs through the same memory-lease, fd, GPIO, timer, and resolver choreography. A seventh demo targets Raspberry Pi Pico 2 W: QEMU models RP2350 plus a bounded CYW43439 SPI-facing Wi-Fi device, and a single M33/QEMU swarm choreography connects all nodes for typed sample collection, WASI Preview 1 guest-driven `fd_write`, and aggregate broadcast.
+The public proof surface is intentionally small:
+
+- Baker link Dev Rev1 / RP2040: Rust-built `wasm32-wasip1` apps call real
+  `wasi_snapshot_preview1.path_open`, `fd_write`, `poll_oneoff`, and
+  `proc_exit`; those imports drive ChoreoFS, GuestLedger, memory leases, GPIO,
+  timer resolver facts, and fail-safe abort/fence choreography on physical
+  hardware.
+- Pico 2 W / RP2350 QEMU: one composed swarm choreography connects coordinator
+  and sensor nodes over a CYW43439 byte-transport model for remote samples,
+  WASI P1 guest `fd_write`, network-object routes, telemetry, and management
+  image activation.
+- RP2040 SIO smoke: a low-level board diagnostic used only to keep the local
+  two-core substrate honest.
 
 The important point is not the payload itself. The important point is that the application logic stays in plain localside form:
 
@@ -33,15 +46,16 @@ package. The important state is:
   `MemFenceReason::MemoryGrow`: old leases and old memory generations are
   rejected, and syscall access must borrow again under the new epoch.
 - The first physical RP2040 smoke target is Baker link Dev Rev1. The
-  Baker traffic guest is executed by `CoreWasip1Instance`: core Wasm execution
+  Baker traffic guest is executed by `kernel::engine::wasm::Guest`: core Wasm execution
   stays syscall-agnostic, and the WASI P1 import trampoline maps
   `wasi_snapshot_preview1.path_open`, `fd_write`, and `poll_oneoff` into typed
   Engine requests. `GuestLedger` is the app-local materialized view for this
   path: fds, memory leases, pending `poll_oneoff` tokens, quotas, and errno
   mapping live there, while choreography control messages still own authority
   and legal order. In the ChoreoFS Baker proof,
-  `path_open("device/led/green")` mints fd `3`, orange mints fd `4`, and red
-  mints fd `5`; those fds route to GP22, GP21, and GP20. Each visible
+  `path_open("device/led/green")` admits the Baker object route, then the
+  Baker project runtime materializes fd `3`; orange and red materialize fds
+  `4` and `5`. Those fds route to GP22, GP21, and GP20. Each visible
   transition is a real WASI import trap that enters the Engine localside; each
   wait is admitted through the timer resolver before Kernel can return
   `PollReady`. The guest does not see the GPIO pins, route label, resolver, or
@@ -79,7 +93,7 @@ package. The important state is:
 - Single-board RP2040 hardware is at public alpha quality. On Baker link Dev
   Rev1, the hardware runner has flashed and verified the original pre-minted
   LED patterns (`traffic`, `chaser`, `ordinary-std`), the ChoreoFS `path_open`
-  LED pattern (`choreofs`), and fail-closed patterns for bad order, invalid fd,
+  LED pattern (`choreofs`), and typed-reject patterns for bad order, invalid fd,
   bad payload, forbidden ChoreoFS path, ChoreoFS bad payload, and wrong ChoreoFS
   object. Pico 2 W Wi-Fi swarm remains a QEMU and porting-track proof, not a
   physical Wi-Fi hardware claim.
@@ -120,7 +134,8 @@ license copy stay ignored.
 - A board-local substrate can provide async wakeups through RP2040 SIO FIFO and still let the session logic read like normal localside code.
 - `hibana` core does not need a Pico-only rescue path for this first proof.
 - A narrow engine/supervisor request-reply slice can be expressed as ordinary localside code before introducing a Wasm guest.
-- A tiny Wasm guest can trap into the same request-reply substrate without changing the visible localside model on the supervisor side.
+- Rust-built WASI P1 guests trap into the same projected localside model without
+  changing Kernel protocol authority.
 - The backend can expose a real `g::route(...)` decision to the application localside, with Core 0 selecting an arm and Core 1 handling it through `offer().decode()`.
 - A Rust-built WASI Preview 1 app can use ordinary `fd_write` plus
   `poll_oneoff` to drive real board-visible GPIO object controls: fds `3,4,5`
@@ -129,7 +144,7 @@ license copy stay ignored.
   resolver and Kernel role, not through app-side GPIO authority.
 - Rust-built WASI Preview 1 memory-grow smoke apps prove both sides of the
   lease rule: a post-grow syscall can proceed after a `MemoryGrow` fence and new
-  borrow, while a stale pre-grow lease is rejected fail-closed.
+  borrow, while a stale pre-grow lease is rejected typed-reject.
 - Remote sensor, remote actuator, datagram fd, telemetry, and app-policy payloads are represented as bounded `WirePayload` types and exercised through `hibana::g::Msg` in host parity tests.
 - The swarm frame/replay/neighbor/provisioning layer remains a Pico-local transport boundary; semantic authority still comes from hibana labels, projected programs, fd generations, rights, and session generations.
 - The Pico 2 W path keeps that same boundary on an RP2350/CYW43439 substrate: Wi-Fi is a transport carrier, while the sample and WASI guest request/reply authority is still wired through hibana.
@@ -244,7 +259,8 @@ The host/full gate includes `wasip1-std-core-coverage.wasm`, an ordinary Rust
 function pointers, `f32`/`f64`, and `memory.grow`. It is deliberately a larger
 platform proof: the choreography is unchanged, while the engine profile decides
 whether that artifact can be loaded and driven. The host/full proof uses
-`src/kernel/engine/wasip1_host.rs::CoreWasip1HostRunner`: it runs the core Wasm
+`kernel::wasi::host_runner::HostRunner`: it runs the public
+`kernel::engine::wasm::Guest` facade,
 engine, converts Preview 1 traps into `EngineReq`, completes them through the
 bounded fd view / ChoreoFS resource store / network-object ingress, and records the
 typed syscall stream. Preview 1 `sock_*` imports are treated only as import
@@ -260,20 +276,21 @@ The fastest way to audit a proof is to read one row left to right:
 
 | Proof | Choreography source | Localside driver | Resolver / device boundary |
 | --- | --- | --- | --- |
-| Timer sleep | `src/choreography/local.rs::timer_sleep_roles` | `tests/host_timer_sleep.rs` drives `flow::<TimerSleepUntil>().send`, `recv`, resolver admission, then `flow::<TimerSleepDone>().send` | `src/kernel/resolver.rs` converts `InterruptEvent::TimerTick` into `ResolvedInterrupt::TimerSleepDone`; `src/kernel/device/timer.rs` only completes due waits |
-| WASI clock | `src/choreography/local.rs::wasip1_clock_now_roles` | `tests/host_wasip1_syscalls.rs` and `src/projects/rp2040_wasm/main.rs` drive request/reply with `Wasip1ClockNow` | no interrupt resolver; this is a synchronous clock syscall returning `ClockNow` |
-| Baker traffic light | `src/choreography/baker_link_led.rs::traffic_light_roles` | `src/kernel/engine/wasm.rs::CoreWasip1Instance` executes the no-main `wasm32-wasip1` artifact and maps real `wasi_snapshot_preview1.fd_write` / `poll_oneoff` imports; `tests/host_baker_led_fd.rs` and `src/projects/baker_link_led/main.rs` turn those traps into `fd_write("1" / "0") -> Kernel->GPIO -> poll_oneoff -> Kernel->Timer`; `src/kernel/guest_ledger.rs::GuestLedger` owns the app-local fd view, lease, pending, quota, and errno facts | `src/machine/rp2040/baker_link.rs` installs ChoreoFS `GpioDevice` objects, mints fds `3,4,5`, and supplies only the Baker fd/pin/active-high map for GP22/GP21/GP20; `src/kernel/fd_object.rs` checks the materialized fd view, explicit GPIO route, and payload; `src/machine/rp2040/timer.rs` owns TIMER0 top-half/raw readiness; `src/kernel/resolver.rs` admits each timeout as `TimerSleepDone`; UART is a separate local device proof and fail-diagnostic path, not the Baker success criterion |
-| Baker ChoreoFS LED open | `src/choreography/baker_link_led.rs::choreofs_traffic_light_roles` | `apps/wasip1/wasip1-smoke-apps/src/bin/wasip1-led-choreofs-open.rs` is an ordinary Rust `fn main` `wasm32-wasip1` app that calls preopen-relative `path_open("device/led/green")`, `path_open("device/led/orange")`, `path_open("device/led/red")`, then `fd_write("1"/"0")` and `poll_oneoff`; `src/projects/baker_link_led/main.rs` drives every `path_open` as `MemBorrowRead -> PathOpen -> PathOpened -> MemRelease` before the fd_write loop | `src/machine/rp2040/baker_link.rs` maps ChoreoFS `GpioDevice` objects into the explicit Baker GPIO route, not a generic object route; bad `not/allowed`, `fd_write("on")`, and `fd_write` to a non-GPIO ChoreoFS object are hardware-verified fail-closed patterns |
-| WASI memory grow | `src/choreography/local.rs::memory_grow_stdout_roles` | `tests/host_wasip1_artifacts.rs` drives `MemFence(MemoryGrow)`, rejects the old lease, then borrows again under the new epoch | `src/kernel/wasi.rs::MemoryLeaseTable` invalidates outstanding leases and rejects stale epochs |
-| Ordinary std core coverage | no new choreography | `tests/host_wasip1_artifacts.rs::rust_built_ordinary_std_core_coverage_runs_on_host_full_profile` runs the Rust std artifact through `CoreWasip1HostRunner` | core Wasm handles control/result values, bulk memory, table/ref, floats, and `memory.grow`; unsupported syscalls remain typed rejects |
+| Timer sleep | `src/choreography/local.rs::timer_sleep_roles` | `tests/host_baker_led_fd.rs` and `src/projects/baker_link_led/runtime.rs` drive `flow::<TimerSleepUntil>().send`, resolver admission, then `flow::<TimerSleepDone>().send` through the typed poll path | `src/kernel/resolver.rs` converts `InterruptEvent::TimerTick` into `ResolvedInterrupt::TimerSleepDone`; `src/kernel/device/timer.rs` only completes due waits |
+| WASI clock | `src/choreography/local.rs::wasip1_clock_now_roles` | `tests/host_wasip1_syscalls.rs` drives request/reply with `Wasip1ClockNow` | no interrupt resolver; this is a synchronous clock syscall returning `ClockNow` |
+| Baker traffic light | `src/projects/baker_link_led/choreography.rs::traffic_light_roles` | `kernel::engine::wasm::Guest` executes the no-main `wasm32-wasip1` artifact and maps real `wasi_snapshot_preview1.fd_write` / `poll_oneoff` imports into typed `Event::Call` values; `tests/host_baker_led_fd.rs` and `src/projects/baker_link_led/runtime.rs` turn those pending calls into `fd_write("1" / "0") -> Kernel->GPIO -> poll_oneoff -> Kernel->Timer`; `src/kernel/guest_ledger.rs::GuestLedger` owns the app-local fd view, lease, pending, quota, and errno facts | `src/machine/rp2040/baker_link.rs` supplies only Baker Link board facts: the visible GP22/GP21/GP20 user LED pins and safe inactive levels. `src/projects/baker_link_led/manifest.rs` is the LED proof manifest: ChoreoFS `GpioDevice` objects plus fd/pin/active-high/route facts. `src/projects/baker_link_led/ledger.rs` applies those manifest facts to the Baker project `GuestLedger`; `src/kernel/fd_object.rs` checks the materialized fd view, explicit GPIO route, and payload; `src/machine/rp2040/timer.rs` owns TIMER0 top-half/raw readiness; `src/kernel/resolver.rs` admits each timeout as `TimerSleepDone`; UART is a separate local device proof and fail-diagnostic path, not the Baker success criterion |
+| Baker ChoreoFS LED open | `src/projects/baker_link_led/choreography.rs::choreofs_traffic_light_roles` | `apps/wasip1/wasip1-smoke-apps/src/bin/wasip1-led-choreofs-open.rs` is the small physical RP2040 proof artifact: a `#![no_main]` `wasm32-wasip1` app exporting `__main_void` that calls preopen-relative `path_open("device/led/green")`, `path_open("device/led/orange")`, `path_open("device/led/red")`, then `fd_write("1"/"0")` and `poll_oneoff`; `src/projects/baker_link_led/runtime.rs` drives every `path_open` as `MemBorrowRead -> PathOpen -> PathOpened -> MemRelease` before the fd_write loop | `src/projects/baker_link_led/manifest.rs` maps ChoreoFS `GpioDevice` objects into the explicit Baker GPIO route, not a generic object route; bad `not/allowed`, `fd_write("on")`, and `fd_write` to a non-GPIO ChoreoFS object are hardware-verified typed-reject patterns |
+| Baker fail-safe terminal | `src/projects/baker_link_led/choreography.rs::abort_safe_terminal_roles` and `abort_safe_linear_roles` | `tests/host_baker_led_fd.rs::baker_link_abort_terminal_fences_ledger_and_uses_gpio_choreography_for_safe_state` verifies the full Engine-owned `Abort | Normal` terminal route; the physical `baker-abort-safe-demo` profile drives the selected terminal fragment as `EngineAbort -> AbortBegin -> Fence -> GPIO safe-state -> AbortAck` | `src/kernel/guest_ledger.rs::GuestLedger::apply_abort_fence` makes old fds, leases, and pending tokens stale by generation; Baker safe state uses the existing `Kernel -> GPIO -> Kernel` `GpioSet/GpioSetDone` choreography for GP22/GP21/GP20, while hard panic remains endpoint-free direct MMIO |
+| WASI memory grow | `src/choreography/local.rs::memory_grow_stdout_roles` | `tests/host_wasip1_artifacts.rs` drives `MemFence(MemoryGrow)`, rejects the old lease, then borrows again under the new epoch | `kernel::wasi::MemoryLeaseTable` invalidates outstanding leases and rejects stale epochs |
+| Ordinary std core coverage | no new choreography | `tests/host_wasip1_artifacts.rs::rust_built_ordinary_std_core_coverage_runs_on_host_full_profile` runs the Rust std artifact through `HostRunner` | core Wasm handles control/result values, bulk memory, table/ref, floats, and `memory.grow`; unsupported syscalls remain typed rejects |
 | Ordinary std ChoreoFS read | no new choreography | `tests/host_wasip1_artifacts.rs::rust_built_std_choreofs_app_uses_resource_store_through_host_full_runner` runs `File::open` / `Read` from a Rust std app through `path_open` and `fd_read` | `src/kernel/choreofs.rs` is the bounded resource store; the app never reaches host filesystem authority |
 | Ordinary std ChoreoFS append | no new choreography | `tests/host_wasip1_artifacts.rs::rust_built_std_choreofs_append_app_writes_and_reads_resource_store` runs `OpenOptions::append` then `File::open` through `path_open`, `fd_write`, and `fd_read` | append is object control state in ChoreoFS, not host filesystem authority |
-| Bad ordinary std path | no new choreography | `tests/host_wasip1_artifacts.rs::rust_built_bad_std_path_app_fails_closed_before_hidden_host_fs` runs a Rust std app that opens a forbidden path | ChoreoFS rejects before fallback host FS access; failure is typed and fail-closed |
-| Bad ordinary std ChoreoFS write | no new choreography | `tests/host_wasip1_artifacts.rs::rust_built_bad_std_static_write_fails_closed_at_choreofs_control` runs a Rust std app that writes to a static blob | read-only object control rejects in ChoreoFS before hidden persistence semantics appear |
+| Bad ordinary std path | no new choreography | `tests/host_wasip1_artifacts.rs::rust_built_bad_std_path_app_rejects_before_hidden_host_fs` runs a Rust std app that opens a forbidden path | ChoreoFS rejects before fallback host FS access; failure is a typed reject |
+| Bad ordinary std ChoreoFS write | no new choreography | `tests/host_wasip1_artifacts.rs::rust_built_bad_std_static_write_rejects_at_choreofs_control` runs a Rust std app that writes to a static blob | read-only object control rejects in ChoreoFS before hidden persistence semantics appear |
 | WASI P1 network object ingress | no new choreography | `tests/host_wasip1_artifacts.rs::rust_built_std_sock_app_uses_network_object_without_p2` runs Preview 1 `sock_send` / `sock_recv` / `sock_shutdown` imports from an ordinary std app | imports normalize into typed `FdWrite` / `FdRead` / `FdClose` over ChoreoFS network objects; there is no P2 socket/resource/stream authority |
 | WASI P1 NetworkListener accept | `NetworkAcceptRouteControl` only, no socket vocabulary | `tests/host_wasip1_artifacts.rs::rust_built_std_sock_accept_app_mints_network_object_without_socket_authority` runs Preview 1 `sock_accept`, then uses the returned fd with `sock_send` / `sock_recv` / `sock_shutdown` | NetworkListener route CapMints an accepted network object; follow-up imports still normalize into typed fd syscall stream |
-| Bad network accept | no new choreography | `tests/host_wasip1_artifacts.rs::rust_built_bad_std_sock_accept_fails_closed_without_listener_route` runs Preview 1 `sock_accept` without an explicit accept route | NetworkListener accept is not present, so the network-object ingress rejects fail-closed |
-| Pico 2 W swarm | `src/choreography/swarm.rs` | `src/projects/pico2w_swarm/runtime/mod.rs` drives projected node roles over the CYW43439 swarm carrier, including NetworkObjectTable-routed datagram/stream messages | `src/machine/rp2350/cyw43439.rs` and `src/kernel/swarm.rs` keep Wi-Fi as transport/readiness, not semantic authority |
+| Bad network accept | no new choreography | `tests/host_wasip1_artifacts.rs::rust_built_bad_std_sock_accept_rejects_without_listener_route` runs Preview 1 `sock_accept` without an explicit accept route | NetworkListener accept is not present, so the network-object ingress rejects typed-reject |
+| Pico 2 W swarm | `src/choreography/swarm.rs` | `src/projects/pico2w_swarm/runtime/mod.rs` drives projected node roles over the CYW43439 swarm carrier, including NetworkObjectTable-routed datagram/stream messages | `src/machine/rp2350/cyw43439.rs` and `src/kernel/swarm/mod.rs` keep Wi-Fi as transport/readiness, not semantic authority |
 
 This split is intentional. `src/choreography/local.rs` and
 `src/choreography/swarm.rs` should answer “what is the legal order?” The
@@ -285,11 +302,9 @@ events become admitted readiness without becoming protocol authority?”
 
 Current scope is still proof-oriented:
 
-- `hibana-pico-demo`: `Role 1` on Core 1 sends `PING`, `Role 0` on Core 0 returns `PONG`, and both cores print the handled value
-- `hibana-pico-engine-demo`: Core 1 sends `EngineReq::LogU32` and `EngineReq::Yield`, Core 0 returns `EngineRet::Logged` and `EngineRet::Yielded`, and both cores print the handled value or action
-- `hibana-pico-wasm-demo`: Core 1 runs a tiny Wasm guest that imports `hibana.log_u32(i32)` and `hibana.yield_now()`, and Core 0 still sees the same `EngineReq` / `EngineRet` localside sequence
-- `hibana-pico-wasm-route-demo`: Core 1 runs the same tiny Wasm guest model, sends a typed sample request, and then handles Core 0's `publish_normal | publish_alert` route choice through `offer().decode()`
-- `hibana-pico-wasm-route-bad-demo`: Core 1 runs an intentionally invalid Wasm guest that asks for `yield` before the `sample -> publish -> yield` choreography reaches that phase, and the backend rejects it fail-closed
+- `hibana-pico-rp2040-sio-smoke`: low-level RP2040 diagnostic; `Role 1` on
+  Core 1 sends `PING`, `Role 0` on Core 0 returns `PONG`, and both cores print
+  the handled value. This is a bring-up smoke, not a public application demo
 - `hibana-pico-baker-led-demo`: Baker link Dev Rev1 / RP2040 physical smoke;
   Core 1 executes a minimal WASI P1 traffic-light guest with real
   `wasi_snapshot_preview1.fd_write` and `poll_oneoff` imports. Those import
@@ -300,7 +315,7 @@ Current scope is still proof-oriented:
 - `hibana-pico2w-swarm-coordinator` and `hibana-pico2w-swarm-sensor`: role-fixed Pico 2 W swarm firmware images using the same shared choreography library and runtime module; these are the size-oriented path for QEMU swarm experiments
 - `hibana-pico2w-swarm-coordinator-6` and `hibana-pico2w-swarm-sensor-2` through `hibana-pico2w-swarm-sensor-6`: default-six-node minimal projection images; each image directly references only the projected role program for its own node in the six-node choreography
 - `apps/wasip1/swarm-node-apps`: Rust-built `wasm32-wasip1` guest apps for the coordinator, sensor, actuator, and gateway node roles; the gate verifies the generated `.wasm` artifact import sections use only Preview 1 modules, contain no P2/WIT/Component surface, exercise hibana localside syscall choreography from those artifact bytes, put all four app artifacts into one projected swarm choreography, and install a Rust-built artifact through the bounded image-transfer/hot-swap boundary with lease/control-message fencing
-- `apps/wasip1/wasip1-smoke-apps`: Rust-built `wasm32-wasip1` smoke apps for stdout, stderr, stdin, clock, random, exit, timer, trap, infinite-loop, Baker LED `fd_write`, ordinary Rust std core coverage, ChoreoFS read/append/static-write rejection, bad std path rejection, network object `sock_*` WASI P1 import ingress, explicit NetworkListener accept, bad `sock_accept` rejection, and memory-grow lease/fence coverage; the same gate checks these artifacts stay Preview 1 and No-P2, including the timer `poll_oneoff`, trap marker, LED `fd_write`, std core coverage marker, ChoreoFS `path_open`/`fd_read`/`fd_write`, network object `sock_send`/`sock_recv`/`sock_shutdown`, NetworkListener `sock_accept`, bad-path / bad-accept fail-closed markers, and memory-grow artifacts
+- `apps/wasip1/wasip1-smoke-apps`: Rust-built `wasm32-wasip1` smoke apps for stdout, stderr, stdin, clock, random, exit, timer, trap, infinite-loop, Baker LED `fd_write`, ordinary Rust std core coverage, ChoreoFS read/append/static-write rejection, bad std path rejection, network object `sock_*` WASI P1 import ingress, explicit NetworkListener accept, bad `sock_accept` rejection, and memory-grow lease/fence coverage; the same gate checks these artifacts stay Preview 1 and No-P2, including the timer `poll_oneoff`, trap marker, LED `fd_write`, std core coverage marker, ChoreoFS `path_open`/`fd_read`/`fd_write`, network object `sock_send`/`sock_recv`/`sock_shutdown`, NetworkListener `sock_accept`, bad-path / bad-accept typed-reject markers, and memory-grow artifacts
 - host-only swarm plan proofs: bounded swarm frames, remote object route routing, datagram fd protocol, three logical node policy flow, and remote-management fencing over ordinary hibana messages
 
 Still in progress for this crate revision:
@@ -316,35 +331,38 @@ Still in progress for this crate revision:
 - physical Pico 2 W CYW43439 firmware-load and driver integration beyond the
   QEMU CYW43439 transport proof
 - driver stacks beyond the minimal UART/SIO/Baker LED board glue
-- raw SIO smoke binaries that bypass `hibana`
+- RP2040 SIO smoke remains diagnostic-only; Baker is the RP2040 public proof
 
 ## Layout
 
-- `src/choreography/`: common protocol source. `protocol.rs` is the local
+- `src/choreography/`: common protocol source. `protocol/` is the local
   syscall/device/memory/control payload vocabulary, `swarm.rs` is the shared
   Pico 2 W swarm choreography and per-role projection accessors, and
   `local.rs` documents the local composition layer.
 - `src/kernel/`: reusable WASI microkernel pieces that are not board specific.
   This includes app-scoped stream/lease helpers, budget, interrupt resolver,
   management/hot-swap, policy, remote object controls, network object protocols,
-  metrics, local swarm transport state, the WASI P1 import trampoline in
-  `wasi.rs`, the tiny Wasm engine in `engine/wasm.rs`, and device roles under
+  metrics, local swarm transport state, the WASI P1 import trampoline module,
+  the bounded Wasm engine facade in `engine::wasm`, and device roles under
   `device/`.
-- `src/substrate/`: transport and executor substrate glue. `transport.rs`
+- `src/port/`: board/host byte-port and executor glue. `transport.rs`
   implements the board-local FIFO `hibana::substrate::Transport`,
   `host_queue.rs` contains host queue plus RP2040 SIO backend primitives, and
   `exec.rs` is the tiny no-std poll/park/signal layer.
 - `src/machine/`: machine-specific bindings. `rp2040/sio.rs` exposes the SIO
-  backend, `rp2040/baker_link.rs` resolves Baker link Dev Rev1 LED
-  fds `3,4,5` to active-high GP22/GP21/GP20 one-hot selection while each wait is
-  admitted by the timer resolver, `rp2040/timer.rs` owns the TIMER0 IRQ
+  backend, `rp2040/baker_link.rs` is the Baker Link Dev Rev1 board fact module
+  for physical pins and safe levels
+  for ChoreoFS LED object facts, active-high GP22/GP21/GP20 one-hot selection,
+  and board safe state. It does not own `GuestLedger` fd materialization;
+  the Baker project runtime applies those facts after the projected route
+  admits progress. `rp2040/timer.rs` owns the TIMER0 IRQ
   top-half and raw readiness slot, `rp2040/uart.rs` owns the UART0 MMIO/debug
   sink used by the local UART device role, and `rp2350/cyw43439.rs` is the
   RP2350 SPI-facing CYW43439 driver for the QEMU swarm carrier.
-- `src/projects/`: concrete firmware entrypoints. The Cargo bin names are kept
-  stable, but their sources now live by project: `rp2040_ping`,
-  `rp2040_engine`, `rp2040_wasm`, `rp2040_wasm_route`,
-  `rp2040_wasm_route_bad`, `baker_link_led`, and `pico2w_swarm`.
+- `src/projects/`: concrete firmware entrypoints. Public proof binaries live by
+  purpose: `rp2040_sio_smoke` is a low-level bring-up diagnostic,
+  `baker_link_led` is the RP2040 physical WASI P1 + ChoreoFS + fail-safe proof,
+  and `pico2w_swarm` is the RP2350/CYW43439 swarm proof.
 - `src/projects/pico2w_swarm/runtime/mod.rs`: shared RP2350/CYW43439 boot,
   runtime, localside session, and WASI P1 `fd_write` harness used by all Pico
   2 W swarm firmware entrypoints.
@@ -355,13 +373,13 @@ Still in progress for this crate revision:
 - `scripts/run_choreofs_demo.sh`: supplemental host/full ChoreoFS demo; it
   builds ordinary Rust std `wasm32-wasip1` apps that use `File::open`,
   `OpenOptions::append`, and intentionally bad paths, then runs them through
-  `CoreWasip1HostRunner` so `path_open`, `fd_read`, and `fd_write` become
+  `HostRunner` so `path_open`, `fd_read`, and `fd_write` become
   typed WASI P1 boundary events over the bounded ChoreoFS resource store
 - `scripts/run_pico2w_swarm_qemu.sh`: multi-process Pico 2 W QEMU swarm runner
 - `tests/host_sio_ping_pong.rs`: host parity proof of the same localside ping-pong sequence
-- `tests/host_engine_supervisor.rs`: host parity proof of the engine/supervisor request-reply sequence
-- `tests/host_wasm_guest.rs`: host parity proof that the tiny Wasm guest traps into the same request-reply sequence
-- `tests/host_wasm_route_guest.rs`: host parity proof of both `publish_normal` and `publish_alert` route branches plus an early-yield rejection guard
+- `tests/host_baker_led_fd.rs`: host parity proof of Baker Engine/Kernel
+  lifecycle, abort/fence/safe-state, fd object routing, and timer-poll progress
+  over projected choreography
 - `tests/host_wasip1_syscalls.rs`: host parity proof for the local WASI P1 syscall subset over typed hibana messages, including direct localside `fd_read` with write lease/commit/release, `fd_fdstat_get`, `fd_close`, and `poll_oneoff`
 - `tests/host_feature_profiles.rs`: Cargo feature profile proof that Pico
   small and host full-ish WASI P1 capacities are separate implementation
@@ -384,11 +402,7 @@ rustup target add thumbv6m-none-eabi
 rustup target add thumbv8m.main-none-eabi
 rustup target add wasm32-wasip1
 cargo test
-cargo build --target thumbv6m-none-eabi --release --bin hibana-pico-demo
-cargo build --target thumbv6m-none-eabi --release --bin hibana-pico-engine-demo
-cargo build --target thumbv6m-none-eabi --release --bin hibana-pico-wasm-demo
-cargo build --target thumbv6m-none-eabi --release --bin hibana-pico-wasm-route-demo
-cargo build --target thumbv6m-none-eabi --release --bin hibana-pico-wasm-route-bad-demo
+cargo build --target thumbv6m-none-eabi --release --bin hibana-pico-rp2040-sio-smoke
 bash ./scripts/check_wasip1_guest_builds.sh
 cargo build --target thumbv6m-none-eabi --release \
   --bin hibana-pico-baker-led-demo \
@@ -419,7 +433,7 @@ bash ./scripts/check_plan_pico_gates.sh
 ```
 
 This runs the measurement gate tests, including fixed Pico 2 W swarm proof
-counts for two-node ping/pong, modeled packet-loss retry, join/revoke messages,
+counts for two-node ping/pong, modeled packet-loss redelivery, join/revoke messages,
 and the default six-process sample, WASI, and aggregate phases. It also runs the
 resolver-backed timer and rejection-telemetry smoke, the bounded swarm fragmentation smoke, the auth/replay drop-telemetry smoke, the
 one-shot interrupt ready-fact consumption smoke, the
@@ -430,16 +444,16 @@ Wasm fuel-exhaustion-to-budget-event smoke, the
 artifact-free host fuel-exhaustion-to-budget choreography smoke, the
 GPIO wait-through-resolver admitted fact smoke, the
 management activation-boundary smoke covering memory leases, interrupt subscriptions, remote object quiescence, network object quiescence, and stale fence-epoch rejection, the
-authenticated management install smoke covering forged credentials, stale session generations, wrong-slot grants, bounded rejection telemetry, and management status-code roundtrips for those fail-closed reasons, the
+authenticated management install smoke covering forged credentials, stale session generations, wrong-slot grants, bounded rejection telemetry, and management status-code roundtrips for those typed-reject reasons, the
 authenticated remote object/resource grant smokes covering forged credentials, stale session generations, wrong-node grants, tampered route metadata, bounded rejection telemetry, and management/telemetry resource route arms, the
-routed fd metadata fail-closed smoke, the
+routed fd metadata typed-reject smoke, the
 two-node Wi-Fi ping/pong-over-swarm smoke, the phone-local and BLE-local
 provisioning to swarm-join smokes, the swarm leave/revoke choreography smoke with stale session-generation revoke rejection, the budget-telemetry app
 policy route smoke, the single global swarm choreography smoke, the
 six-process coordinator-plus-five-sensors swarm choreography smoke, the
 production QEMU swarm NetworkObject-to-transport route smoke, the
 coordinator/sensor/actuator/gateway telemetry smoke, the wrong-payload and
-wrong-localside-label fail-closed smoke, the explicit policy-slot resolver smoke, the remote object route metadata and policy-slot fail-closed smoke, the remote management-fd and telemetry-fd explicit route-arm smokes, the remote packet-loss-no-fallback
+wrong-localside-label typed-reject smoke, the explicit policy-slot resolver smoke, the remote object route metadata and policy-slot typed-reject smoke, the remote management-fd and telemetry-fd explicit route-arm smokes, the remote packet-loss-no-fallback
 smoke, the datagram and bounded stream-segment network-fd-without-P2 smokes with route metadata and authorized policy-slot rejection, the remote image-install-over-swarm smoke, the node-image-update
 observer smoke, the remote bad-image rejection smoke, the Rust `wasm32-wasip1` swarm guest build gate for all node
 roles, the Rust `wasm32-wasip1` stdout/stderr/stdin/clock/random/exit/timer/trap/infinite-loop/LED-fd-write/LED-blink
@@ -474,11 +488,8 @@ Current normalized view from the latest run:
 
 | demo | flash bytes | static sram bytes | kernel stack reserve bytes per core | peak sram upper-bound bytes |
 | --- | ---: | ---: | ---: | ---: |
-| `hibana-pico-demo` | 689612 | 48992 | 24576 | 98144 |
-| `hibana-pico-engine-demo` | 697460 | 48992 | 24576 | 98144 |
-| `hibana-pico-wasm-demo` | 745956 | 48992 | 24576 | 98144 |
-| `hibana-pico-wasm-route-demo` | 704348 | 49024 | 24576 | 98176 |
-| `hibana-pico-wasm-route-bad-demo` | 691912 | 49024 | 24576 | 98176 |
+| `hibana-pico-rp2040-sio-smoke` | 686588 | 47600 | 24576 | 96752 |
+| `hibana-pico-baker-led-demo` | 1097532 | 211952 | 24576 | 261104 |
 
 What this means today:
 
@@ -649,7 +660,7 @@ resource-store side of the same design: ordinary Rust std `wasm32-wasip1` apps
 issue Preview 1 `path_open`, `fd_read`, and `fd_write`; the host/full engine
 turns those imports into typed boundary events; ChoreoFS grants only manifest
 objects such as `config.txt` and `log.txt`; forbidden paths and read-only
-objects reject fail-closed before any ambient host filesystem authority appears.
+objects reject typed-reject before any ambient host filesystem authority appears.
 The Baker Link hardware ChoreoFS proof below is the small RP2040 physical
 `path_open -> GpioDevice -> fd_write -> GPIO` version of that idea.
 
@@ -660,12 +671,12 @@ scripts/run_choreofs_demo.sh
 Use the Baker link Dev Rev1 / RP2040 LED smoke for the first physical-board
 validation. The guest-visible interface is ordinary WASI P1: write ASCII `1`
 or `0` to fds `3,4,5` and call `poll_oneoff` after each write. The Kernel role
-resolves those fds through ChoreoFS `GpioDevice` objects minted into the Baker
-Pico-Min `GuestLedger`, then through the explicit GPIO route arm, to active-high
+checks fds materialized by the Baker project runtime from ChoreoFS `GpioDevice`
+object facts, then through the explicit GPIO route arm, to active-high
 GP22, GP21, and GP20. The visible
 sequence matches the Baker traffic-light tutorial route order: GP22 green,
 GP21 orange blink phases, and GP20 red. The current bring-up timing constants
-are tuned in `src/machine/rp2040/baker_link.rs` for visible real-board
+are tuned in `src/projects/baker_link_led/manifest.rs` for visible real-board
 feedback. Do not use fd numbers `0` or `1` for the LEDs; those retain their
 standard stdin/stdout meaning. The payload byte selects on/off, while the fd
 selects which LED route arm is legal.
@@ -785,11 +796,13 @@ scripts/run_baker_link_hardware_pattern.sh bad-payload
 scripts/run_baker_link_hardware_pattern.sh choreofs-bad-path
 scripts/run_baker_link_hardware_pattern.sh choreofs-bad-payload
 scripts/run_baker_link_hardware_pattern.sh choreofs-wrong-object
+scripts/run_baker_link_hardware_pattern.sh fail-safe
 ```
 
 The Baker ChoreoFS hardware proof embeds
-`wasip1-led-choreofs-open.wasm`. It is an ordinary Rust `fn main`
-`wasm32-wasip1` app whose first actions are:
+`wasip1-led-choreofs-open.wasm`. It is the small physical RP2040 artifact:
+a `#![no_main]` `wasm32-wasip1` app exporting `__main_void`. Its first actions
+are:
 
 ```text
 path_open(9, "device/led/green")  -> ChoreoFS GpioDevice -> fd 3
@@ -800,16 +813,37 @@ poll_oneoff(...)                   -> Timer IRQ -> resolver -> PollReady
 ```
 
 The matching choreography is
-`src/choreography/baker_link_led.rs::choreofs_traffic_light_roles`: three
+`src/projects/baker_link_led/choreography.rs::choreofs_traffic_light_roles`: three
 `MemBorrowRead -> PathOpen -> PathOpened -> MemRelease` cycles followed by the
 same Engine-owned `LoopContinue` / `LoopBreak` route used by the normal Baker
-traffic light. The bad ChoreoFS hardware patterns are:
+traffic light. The forbidden-path variant uses
+`src/projects/baker_link_led/choreography.rs::choreofs_bad_path_roles`, a
+terminal one-`path_open` proof, so rejection is not hidden by a later traffic
+loop. The bad ChoreoFS hardware patterns are:
 
 | Pattern | Expected result |
 | --- | --- |
 | `choreofs-bad-path` | `not/allowed` rejects at ChoreoFS lookup, `stage=0x4849004b` |
 | `choreofs-bad-payload` | `fd_write("on")` reaches the LED object route and rejects at payload policy, `stage=0x4849004c` |
 | `choreofs-wrong-object` | `device/not-gpio` can mint an fd, but `fd_write("1")` rejects because the object is not GPIO, `stage=0x4849004d` |
+
+The fail-safe hardware pattern proves the recoverable terminal path without
+using a hard-stop escape hatch for a soft abort:
+
+```text
+EngineAbort
+  -> AbortBegin
+  -> Fence
+  -> GpioSet(GP22 inactive) -> GpioSetDone
+  -> GpioSet(GP21 inactive) -> GpioSetDone
+  -> GpioSet(GP20 inactive) -> GpioSetDone
+  -> AbortAck
+```
+
+The host test keeps the full `Abort | Normal` route proof. The physical Baker
+profile runs the selected terminal fragment so the same RP2040 two-core mapping
+can keep the safe-state proof small enough for the board. Expected hardware
+result is `HIBANA_DEMO_RESULT = 0x48494653`.
 
 The app-owned behavior proof swaps only the WASI guest artifact. The same
 `traffic_light_roles()` choreography, same fd view, same memory lease path,
@@ -860,7 +894,7 @@ artifact when it is built with a Pico-sized 64 KiB initial memory. That profile
 is not full WASI: it links only the std startup and traffic-light surface
 (`args/env`, `fd_write`, `poll_oneoff`, `proc_exit`). The std startup imports are
 not answered by a side-channel adapter. This particular app does not emit
-`environ_*` at runtime; if it did, Baker would fail closed because those labels
+`environ_*` at runtime; if it did, Baker would typed reject because those labels
 are not part of the Baker traffic choreography. Wider ordinary std coverage
 remains the `profile-host-linux-wasip1-full` / larger-platform track.
 
@@ -970,63 +1004,6 @@ kernel directly references only its own projected role program from the shared
 six-node choreography. You can override individual paths with
 `HIBANA_PICO_SENSOR_2_KERNEL` through `HIBANA_PICO_SENSOR_6_KERNEL` when testing
 custom node images.
-
-Use the RP2040 route demo if you want the clearest single-node Wasm route proof:
-
-```bash
-cargo build --target thumbv6m-none-eabi --release --bin hibana-pico-wasm-route-demo
-
-timeout 8s ../qemu-rp2040/build/qemu-system-arm \
-  -M raspberrypi-pico \
-  -kernel target/thumbv6m-none-eabi/release/hibana-pico-wasm-route-demo \
-  -nographic \
-  -serial mon:stdio
-```
-
-macOS does not ship GNU `timeout`. Either install `coreutils` and use
-`gtimeout`, or omit the timeout and stop QEMU with `Ctrl-A X`. The same
-replacement applies to the Pico 2 W command above:
-
-```bash
-brew install coreutils
-gtimeout 8s ../qemu-rp2040/build/qemu-system-arm \
-  -M raspberrypi-pico \
-  -kernel target/thumbv6m-none-eabi/release/hibana-pico-wasm-route-demo \
-  -nographic \
-  -serial mon:stdio
-```
-
-Typical output looks like this:
-
-```text
-[core0] hibana wasm route
-[core0] init runtime
-[core0] wait sample
-[core1] wasm trap sample 0x48494241
-[core0] recv sample 0x48494241
-[core0] sent publish alert 0x48494241
-[core0] wait yield
-[core1] offer publish alert 0x48494241
-[core1] wasm trap yield
-[core0] recv yield
-[core0] sent yield ack
-[core1] recv yield ack
-[core1] hibana wasm route ok
-```
-
-Line order between cores can vary slightly because the two CPUs race, but the sample value, the selected publish arm, and the final `ok` must all appear.
-
-If you want the original minimal proof instead, swap the kernel path to `hibana-pico-demo`.
-
-If you want the negative proof, swap the kernel path to `hibana-pico-wasm-route-bad-demo`. The expected outcome there is not `ok`; it is an explicit fail-closed UART trace such as:
-
-```text
-[core0] hibana wasm route bad
-[core0] wait sample
-[core1] wasm trap yield
-[core1] reject early yield
-[core1] phase invariant fail
-```
 
 ## QEMU Assets
 

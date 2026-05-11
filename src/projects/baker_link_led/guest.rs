@@ -9,7 +9,8 @@
             feature = "baker-choreofs-demo",
             feature = "baker-choreofs-bad-path-demo",
             feature = "baker-choreofs-bad-payload-demo",
-            feature = "baker-choreofs-wrong-object-demo"
+            feature = "baker-choreofs-wrong-object-demo",
+            feature = "baker-abort-safe-demo"
         )
     ),
     all(
@@ -21,7 +22,8 @@
             feature = "baker-choreofs-demo",
             feature = "baker-choreofs-bad-path-demo",
             feature = "baker-choreofs-bad-payload-demo",
-            feature = "baker-choreofs-wrong-object-demo"
+            feature = "baker-choreofs-wrong-object-demo",
+            feature = "baker-abort-safe-demo"
         )
     ),
     all(
@@ -32,7 +34,8 @@
             feature = "baker-choreofs-demo",
             feature = "baker-choreofs-bad-path-demo",
             feature = "baker-choreofs-bad-payload-demo",
-            feature = "baker-choreofs-wrong-object-demo"
+            feature = "baker-choreofs-wrong-object-demo",
+            feature = "baker-abort-safe-demo"
         )
     ),
     all(
@@ -42,7 +45,8 @@
             feature = "baker-choreofs-demo",
             feature = "baker-choreofs-bad-path-demo",
             feature = "baker-choreofs-bad-payload-demo",
-            feature = "baker-choreofs-wrong-object-demo"
+            feature = "baker-choreofs-wrong-object-demo",
+            feature = "baker-abort-safe-demo"
         )
     ),
     all(
@@ -51,7 +55,8 @@
             feature = "baker-choreofs-demo",
             feature = "baker-choreofs-bad-path-demo",
             feature = "baker-choreofs-bad-payload-demo",
-            feature = "baker-choreofs-wrong-object-demo"
+            feature = "baker-choreofs-wrong-object-demo",
+            feature = "baker-abort-safe-demo"
         )
     ),
     all(
@@ -59,25 +64,31 @@
         any(
             feature = "baker-choreofs-bad-path-demo",
             feature = "baker-choreofs-bad-payload-demo",
-            feature = "baker-choreofs-wrong-object-demo"
+            feature = "baker-choreofs-wrong-object-demo",
+            feature = "baker-abort-safe-demo"
         )
     ),
     all(
         feature = "baker-choreofs-bad-path-demo",
         any(
             feature = "baker-choreofs-bad-payload-demo",
-            feature = "baker-choreofs-wrong-object-demo"
+            feature = "baker-choreofs-wrong-object-demo",
+            feature = "baker-abort-safe-demo"
         )
     ),
     all(
         feature = "baker-choreofs-bad-payload-demo",
-        feature = "baker-choreofs-wrong-object-demo"
+        any(
+            feature = "baker-choreofs-wrong-object-demo",
+            feature = "baker-abort-safe-demo"
+        )
+    ),
+    all(
+        feature = "baker-choreofs-wrong-object-demo",
+        feature = "baker-abort-safe-demo"
     )
 ))]
 compile_error!("select at most one Baker WASI guest pattern");
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-use hibana_pico::kernel::features::Wasip1HandlerSet;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 #[cfg(not(any(
@@ -89,7 +100,8 @@ use hibana_pico::kernel::features::Wasip1HandlerSet;
     feature = "baker-choreofs-bad-payload-demo",
     feature = "baker-choreofs-wrong-object-demo",
     feature = "baker-invalid-fd-demo",
-    feature = "baker-bad-payload-demo"
+    feature = "baker-bad-payload-demo",
+    feature = "baker-abort-safe-demo"
 )))]
 pub static WASIP1_LED_GUEST: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -149,19 +161,19 @@ pub static WASIP1_LED_GUEST: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/target/wasip1-apps/wasm32-wasip1/release/wasip1-led-choreofs-wrong-object.wasm"
 ));
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+#[cfg(feature = "baker-abort-safe-demo")]
+pub static WASIP1_LED_GUEST: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/wasip1-apps/wasm32-wasip1/release/wasip1-led-blink.wasm"
+));
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-pub const fn baker_wasip1_handler_set() -> Wasip1HandlerSet {
-    if cfg!(any(
-        feature = "baker-choreofs-demo",
-        feature = "baker-choreofs-bad-path-demo",
-        feature = "baker-choreofs-bad-payload-demo",
-        feature = "baker-choreofs-wrong-object-demo"
-    )) {
-        Wasip1HandlerSet::PICO_STD_CHOREOFS
-    } else if cfg!(feature = "baker-ordinary-std-demo") {
-        Wasip1HandlerSet::PICO_STD_START
-    } else {
-        Wasip1HandlerSet::PICO_MIN
-    }
+pub fn write_selected_guest_in_place<'slot>(
+    slot: &'slot mut core::mem::MaybeUninit<crate::kernel::engine::wasm::Guest<'static>>,
+) -> Result<
+    &'slot mut crate::kernel::engine::wasm::Guest<'static>,
+    crate::kernel::engine::wasm::Error,
+> {
+    crate::kernel::engine::wasm::Guest::place_in_static_slot(slot, WASIP1_LED_GUEST)
 }

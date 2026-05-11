@@ -26,7 +26,7 @@ use crate::{
         WASIP1_STATIC_ENV_BYTES_CAPACITY, WASIP1_STATIC_ENV_CAPACITY, Wasip1StaticArgEnv,
     },
     machine::rp2350::cyw43439::{QEMU_CYW43439_MAX_ROLES, QemuCyw43439Transport},
-    substrate::host_queue::{FrameOwned, PAYLOAD_CAPACITY, QUEUE_CAPACITY, ROLE_CAPACITY},
+    port::host_queue::{FrameOwned, PAYLOAD_CAPACITY, QUEUE_CAPACITY, ROLE_CAPACITY},
 };
 
 pub const DEFAULT_TABLE_SLOTS: usize = 8;
@@ -41,7 +41,7 @@ pub const PICO2W_SWARM_PING_PONG_NODES: usize = 2;
 pub const PICO2W_SWARM_PING_PONG_MESSAGES: usize = 2;
 pub const PICO2W_SWARM_REMOTE_FD_READ_MESSAGES: usize = 2;
 pub const PICO2W_SWARM_REMOTE_ACTUATE_MESSAGES: usize = 2;
-pub const PICO2W_SWARM_PACKET_LOSS_RETRY_FRAMES: usize = 1;
+pub const PICO2W_SWARM_PACKET_LOSS_REDELIVERY_FRAMES: usize = 1;
 pub const PICO2W_SWARM_JOIN_MESSAGES: usize = 4;
 pub const PICO2W_SWARM_LEAVE_REVOKE_MESSAGES: usize = 4;
 
@@ -147,7 +147,7 @@ pub struct SwarmMetrics {
     pub wifi_ping_pong_messages: usize,
     pub remote_fd_read_messages: usize,
     pub remote_actuator_command_messages: usize,
-    pub packet_loss_retry_frames: usize,
+    pub packet_loss_redelivery_frames: usize,
     pub provisioning_join_messages: usize,
     pub leave_revoke_messages: usize,
     pub qemu_swarm_default_nodes: usize,
@@ -185,7 +185,7 @@ impl SwarmMetrics {
             wifi_ping_pong_messages: PICO2W_SWARM_PING_PONG_MESSAGES,
             remote_fd_read_messages: PICO2W_SWARM_REMOTE_FD_READ_MESSAGES,
             remote_actuator_command_messages: PICO2W_SWARM_REMOTE_ACTUATE_MESSAGES,
-            packet_loss_retry_frames: PICO2W_SWARM_PACKET_LOSS_RETRY_FRAMES,
+            packet_loss_redelivery_frames: PICO2W_SWARM_PACKET_LOSS_REDELIVERY_FRAMES,
             provisioning_join_messages: PICO2W_SWARM_JOIN_MESSAGES,
             leave_revoke_messages: PICO2W_SWARM_LEAVE_REVOKE_MESSAGES,
             qemu_swarm_default_nodes: PICO2W_SWARM_DEFAULT_NODES as usize,

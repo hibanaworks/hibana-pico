@@ -149,8 +149,8 @@ wasip1-sys-path-minimal = []
 wasip1-sys-path-full = ["wasip1-sys-path-minimal"]
 wasip1-sys-sock = []
 
-# Common WASI P1 safety substrate. Profiles that claim to run WASI P1 apps
-# select this in addition to syscall handlers.
+# Common WASI P1 control capacity. Profiles that claim to run WASI P1 apps
+# select these checks in addition to syscall handlers.
 wasip1-ctrl-common = [
     "wasip1-ctrl-fd-view",
     "wasip1-ctrl-memory-lease",
@@ -216,54 +216,46 @@ baker-chaser-demo = []
 baker-ordinary-std-demo = [
     "wasm-engine-wasip1-std-profile",
     "wasip1-sys-args-env",
+    "wasip1-sys-fd-write",
+    "wasip1-sys-poll-oneoff",
+    "wasip1-sys-proc-exit",
     "wasip1-ledger-embedded-std",
 ]
 baker-choreofs-demo = [
-    "wasm-engine-wasip1-std-profile",
-    "wasip1-sys-args-env",
+    "wasip1-sys-fd-write",
+    "wasip1-sys-poll-oneoff",
+    "wasip1-sys-proc-exit",
     "wasip1-sys-path-minimal",
     "wasip1-ledger-embedded-std",
 ]
 baker-choreofs-bad-path-demo = [
-    "wasm-engine-wasip1-std-profile",
-    "wasip1-sys-args-env",
+    "wasip1-sys-fd-write",
+    "wasip1-sys-poll-oneoff",
+    "wasip1-sys-proc-exit",
     "wasip1-sys-path-minimal",
     "wasip1-ledger-embedded-std",
 ]
 baker-choreofs-bad-payload-demo = [
-    "wasm-engine-wasip1-std-profile",
-    "wasip1-sys-args-env",
+    "wasip1-sys-fd-write",
+    "wasip1-sys-poll-oneoff",
+    "wasip1-sys-proc-exit",
     "wasip1-sys-path-minimal",
     "wasip1-ledger-embedded-std",
 ]
 baker-choreofs-wrong-object-demo = [
-    "wasm-engine-wasip1-std-profile",
-    "wasip1-sys-args-env",
+    "wasip1-sys-fd-write",
+    "wasip1-sys-poll-oneoff",
+    "wasip1-sys-proc-exit",
     "wasip1-sys-path-minimal",
     "wasip1-ledger-embedded-std",
 ]
 baker-invalid-fd-demo = []
 baker-bad-payload-demo = []
+baker-abort-safe-demo = []
 
 [[bin]]
-name = "hibana-pico-demo"
-path = "src/projects/rp2040_ping/main.rs"
-
-[[bin]]
-name = "hibana-pico-engine-demo"
-path = "src/projects/rp2040_engine/main.rs"
-
-[[bin]]
-name = "hibana-pico-wasm-demo"
-path = "src/projects/rp2040_wasm/main.rs"
-
-[[bin]]
-name = "hibana-pico-wasm-route-demo"
-path = "src/projects/rp2040_wasm_route/main.rs"
-
-[[bin]]
-name = "hibana-pico-wasm-route-bad-demo"
-path = "src/projects/rp2040_wasm_route_bad/main.rs"
+name = "hibana-pico-rp2040-sio-smoke"
+path = "src/projects/rp2040_sio_smoke/main.rs"
 
 [[bin]]
 name = "hibana-pico-baker-led-demo"

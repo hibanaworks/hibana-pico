@@ -1,6 +1,7 @@
 use crate::{
     choreography::protocol::{
-        FdRead, FdWrite, MemBorrow, MemGrant, MemRelease, MemRights, PollOneoff, TimerSleepDone,
+        FdRead, FdWrite, MemBorrow, MemFence, MemFenceReason, MemGrant, MemRelease, MemRights,
+        PollOneoff, TimerSleepDone,
     },
     kernel::wasi::{
         ChoreoResourceKind, MemoryLeaseError, MemoryLeaseTable, PicoFdError, PicoFdRights,
@@ -685,6 +686,13 @@ impl<const FDS: usize, const LEASES: usize, const PENDING: usize>
             .into())
     }
 
+    pub fn apply_abort_fence(&mut self, new_memory_epoch: u32) {
+        self.leases
+            .fence(MemFence::new(MemFenceReason::Trap, new_memory_epoch));
+        self.pending.fence();
+        self.fds.fence_all();
+    }
+
     pub fn apply_fd_cap_mint(
         &mut self,
         fd: u8,
@@ -1139,7 +1147,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_syscall_generation_and_completion_are_fail_closed() {
+    fn pending_syscall_generation_and_completion_are_reject() {
         let mut ledger: GuestLedger<1, 1, 1> = GuestLedger::pico_min(1024, 1);
         let token = ledger
             .begin_poll_oneoff(PollOneoff::new(10))

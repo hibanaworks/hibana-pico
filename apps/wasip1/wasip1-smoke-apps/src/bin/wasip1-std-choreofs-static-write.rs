@@ -4,7 +4,7 @@ fn main() {
     let mut file = OpenOptions::new()
         .write(true)
         .open("readonly.txt")
-        .expect("readonly static write must fail closed");
+        .expect("bad app expects read-only object open success");
     file.write_all(b"bad")
-        .expect("readonly static write must not succeed");
+        .expect("readonly static write must reject before bad app observes success");
 }

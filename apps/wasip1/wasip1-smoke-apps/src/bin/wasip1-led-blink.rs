@@ -22,6 +22,9 @@ unsafe extern "C" {
 const GREEN_FD: u32 = 3;
 const ORANGE_FD: u32 = 4;
 const RED_FD: u32 = 5;
+const EVENTTYPE_CLOCK: u8 = 0;
+const SUBSCRIPTION_EVENTTYPE_OFFSET: usize = 8;
+const SUBSCRIPTION_CLOCK_TIMEOUT_OFFSET: usize = 24;
 
 static ON: [u8; 1] = *b"1";
 static OFF: [u8; 1] = *b"0";
@@ -35,67 +38,43 @@ static OFF_IOV: Ciovec = Ciovec {
     len: OFF.len(),
 };
 
-static GREEN_ON_WAIT: [u8; 8] = 250u64.to_le_bytes();
-static ORANGE_WAIT: [u8; 8] = 50u64.to_le_bytes();
-static RED_ON_WAIT: [u8; 8] = 250u64.to_le_bytes();
-
 static mut WRITTEN: usize = 0;
-static mut EVENTS: [u8; 8] = [0; 8];
 static mut NEVENTS: usize = 0;
+
+fn sleep_ms(ms: u64) {
+    let mut subscription = [0u8; 48];
+    let mut event = [0u8; 32];
+    subscription[SUBSCRIPTION_EVENTTYPE_OFFSET] = EVENTTYPE_CLOCK;
+    subscription[SUBSCRIPTION_CLOCK_TIMEOUT_OFFSET..SUBSCRIPTION_CLOCK_TIMEOUT_OFFSET + 8]
+        .copy_from_slice(&(ms * 1_000_000).to_le_bytes());
+    unsafe {
+        let _ = poll_oneoff(
+            subscription.as_ptr(),
+            event.as_mut_ptr(),
+            1,
+            &raw mut NEVENTS,
+        );
+    }
+}
 
 #[unsafe(export_name = "__main_void")]
 pub extern "C" fn main_void() {
     unsafe {
         fd_write(GREEN_FD, &ON_IOV, 1, &raw mut WRITTEN);
-        poll_oneoff(
-            GREEN_ON_WAIT.as_ptr(),
-            (&raw mut EVENTS).cast(),
-            1,
-            &raw mut NEVENTS,
-        );
+        sleep_ms(250);
 
         fd_write(ORANGE_FD, &ON_IOV, 1, &raw mut WRITTEN);
-        poll_oneoff(
-            ORANGE_WAIT.as_ptr(),
-            (&raw mut EVENTS).cast(),
-            1,
-            &raw mut NEVENTS,
-        );
+        sleep_ms(50);
         fd_write(ORANGE_FD, &OFF_IOV, 1, &raw mut WRITTEN);
-        poll_oneoff(
-            ORANGE_WAIT.as_ptr(),
-            (&raw mut EVENTS).cast(),
-            1,
-            &raw mut NEVENTS,
-        );
+        sleep_ms(50);
         fd_write(ORANGE_FD, &ON_IOV, 1, &raw mut WRITTEN);
-        poll_oneoff(
-            ORANGE_WAIT.as_ptr(),
-            (&raw mut EVENTS).cast(),
-            1,
-            &raw mut NEVENTS,
-        );
+        sleep_ms(50);
         fd_write(ORANGE_FD, &OFF_IOV, 1, &raw mut WRITTEN);
-        poll_oneoff(
-            ORANGE_WAIT.as_ptr(),
-            (&raw mut EVENTS).cast(),
-            1,
-            &raw mut NEVENTS,
-        );
+        sleep_ms(50);
         fd_write(ORANGE_FD, &ON_IOV, 1, &raw mut WRITTEN);
-        poll_oneoff(
-            ORANGE_WAIT.as_ptr(),
-            (&raw mut EVENTS).cast(),
-            1,
-            &raw mut NEVENTS,
-        );
+        sleep_ms(50);
 
         fd_write(RED_FD, &ON_IOV, 1, &raw mut WRITTEN);
-        poll_oneoff(
-            RED_ON_WAIT.as_ptr(),
-            (&raw mut EVENTS).cast(),
-            1,
-            &raw mut NEVENTS,
-        );
+        sleep_ms(250);
     }
 }

@@ -16,8 +16,8 @@ use hibana_pico::{
         PublishAlertControl, PublishNormalControl,
     },
     kernel::app::{AppId, AppScopeError, AppStreamTable},
-    substrate::host_queue::HostQueueBackend,
-    substrate::transport::SioTransport,
+    port::host_queue::HostQueueBackend,
+    port::transport::SioTransport,
 };
 
 type TestTransport<'a> = SioTransport<&'a HostQueueBackend>;
@@ -43,7 +43,7 @@ fn project_policy_roles() -> (RoleProgram<0>, RoleProgram<1>) {
 
 #[test]
 fn host_policy_route_selects_one_app_scope_explicitly() {
-    hibana_pico::substrate::exec::run_current_task(async {
+    hibana_pico::port::exec::run_current_task(async {
         let backend = HostQueueBackend::new();
 
         let clock0 = CounterClock::new();

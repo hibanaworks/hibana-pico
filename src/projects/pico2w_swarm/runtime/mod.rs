@@ -1,17 +1,16 @@
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-use core::{
-    arch::naked_asm,
-    cell::UnsafeCell,
-    mem::MaybeUninit,
-    ptr::{read_volatile, write_volatile},
-};
+use core::{arch::naked_asm, cell::UnsafeCell, mem::MaybeUninit, ptr::read_volatile};
+
+mod roles;
+pub use roles::SwarmKernelRole;
+use roles::{configured_node_role, fixed_node_count, fixed_sensor_hibana_role};
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 use hibana::{
     Endpoint,
     g::Msg,
     substrate::{
-        AttachError, CpError, SessionKit,
+        SessionKit,
         binding::NoBinding,
         ids::SessionId,
         runtime::{Config, CounterClock},
@@ -54,93 +53,20 @@ use hibana_pico::{
     },
     kernel::swarm::{NodeId, SwarmCredential, SwarmSecurity},
     kernel::wasi::{MemoryLeaseTable, Wasip1StdoutModule},
-    machine::rp2350::cyw43439::{self, QEMU_CYW43439_MAX_ROLES, QemuCyw43439Transport},
-    substrate::exec::{park, run_current_task, signal, wait_until},
+    machine::rp2350::{
+        bringup,
+        cyw43439::{self, QEMU_CYW43439_MAX_ROLES, QemuCyw43439Transport},
+        sio::core_id,
+        uart,
+    },
+    port::exec::{park, run_current_task, signal, wait_until},
 };
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-#[allow(dead_code)]
-#[derive(Copy, Clone, Eq, PartialEq)]
-pub enum SwarmKernelRole {
-    Dynamic,
-    Coordinator,
-    Sensor,
-    Coordinator6,
-    Sensor2Of6,
-    Sensor3Of6,
-    Sensor4Of6,
-    Sensor5Of6,
-    Sensor6Of6,
-}
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-fn configured_node_role(qemu_role: u8) -> u8 {
-    match crate::SWARM_KERNEL_ROLE {
-        SwarmKernelRole::Dynamic => qemu_role,
-        SwarmKernelRole::Coordinator | SwarmKernelRole::Coordinator6 => {
-            cyw43439::NODE_ROLE_COORDINATOR
-        }
-        SwarmKernelRole::Sensor
-        | SwarmKernelRole::Sensor2Of6
-        | SwarmKernelRole::Sensor3Of6
-        | SwarmKernelRole::Sensor4Of6
-        | SwarmKernelRole::Sensor5Of6
-        | SwarmKernelRole::Sensor6Of6 => cyw43439::NODE_ROLE_SENSOR,
-    }
-}
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-fn fixed_node_count() -> Option<u8> {
-    match crate::SWARM_KERNEL_ROLE {
-        SwarmKernelRole::Coordinator6
-        | SwarmKernelRole::Sensor2Of6
-        | SwarmKernelRole::Sensor3Of6
-        | SwarmKernelRole::Sensor4Of6
-        | SwarmKernelRole::Sensor5Of6
-        | SwarmKernelRole::Sensor6Of6 => Some(6),
-        _ => None,
-    }
-}
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-fn fixed_sensor_hibana_role() -> Option<u8> {
-    match crate::SWARM_KERNEL_ROLE {
-        SwarmKernelRole::Sensor2Of6 => Some(1),
-        SwarmKernelRole::Sensor3Of6 => Some(2),
-        SwarmKernelRole::Sensor4Of6 => Some(3),
-        SwarmKernelRole::Sensor5Of6 => Some(4),
-        SwarmKernelRole::Sensor6Of6 => Some(5),
-        _ => None,
-    }
-}
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 unsafe extern "C" {
     static __stack_top: u32;
     static __core1_stack_top: u32;
 }
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-const SIO_BASE: usize = 0xD000_0000;
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-const SIO_CPUID: *const u32 = SIO_BASE as *const u32;
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-const UART0_BASE: usize = 0x4007_0000;
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-const UARTDR: *mut u32 = UART0_BASE as *mut u32;
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-const UARTFR: *const u32 = (UART0_BASE + 0x18) as *const u32;
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-const UARTIBRD: *mut u32 = (UART0_BASE + 0x24) as *mut u32;
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-const UARTFBRD: *mut u32 = (UART0_BASE + 0x28) as *mut u32;
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-const UARTLCR_H: *mut u32 = (UART0_BASE + 0x2c) as *mut u32;
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-const UARTCR: *mut u32 = (UART0_BASE + 0x30) as *mut u32;
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-const UART_TXFF: u32 = 1 << 5;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const COORDINATOR: NodeId = NodeId::new(1);
@@ -152,10 +78,6 @@ const SESSION_GENERATION: u16 = 1;
 const SWARM_CREDENTIAL: SwarmCredential = SwarmCredential::new(0x4849_4241);
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const SECURITY: SwarmSecurity = SwarmSecurity::Secure(SWARM_CREDENTIAL);
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-const RESULT_SUCCESS: u32 = 0x4849_4f4b;
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-const RESULT_FAILURE: u32 = 0x4849_4641;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const SLAB_BYTES: usize = 262 * 1024;
 #[cfg(all(
@@ -234,13 +156,7 @@ static mut NODE_ID: u32 = 0;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 static mut NODE_COUNT: u32 = 2;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-static mut UART_READY: u32 = 0;
-#[cfg(all(target_arch = "arm", target_os = "none"))]
 static mut RUNTIME_READY: u32 = 0;
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-static mut UART_LOCK_WANT: [u32; 2] = [0; 2];
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-static mut UART_LOCK_TURN: u32 = 0;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 #[repr(C)]
@@ -330,34 +246,6 @@ unsafe extern "C" fn reset_entry() -> ! {
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-fn core_id() -> u32 {
-    unsafe { read_volatile(SIO_CPUID) }
-}
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-fn uart_lock() {
-    let me = core_id() as usize;
-    let other = 1usize.saturating_sub(me);
-    unsafe {
-        write_volatile(core::ptr::addr_of_mut!(UART_LOCK_WANT[me]), 1);
-        write_volatile(core::ptr::addr_of_mut!(UART_LOCK_TURN), other as u32);
-    }
-    while unsafe { read_volatile(core::ptr::addr_of!(UART_LOCK_WANT[other])) } != 0
-        && unsafe { read_volatile(core::ptr::addr_of!(UART_LOCK_TURN)) } == other as u32
-    {
-        core::hint::spin_loop();
-    }
-}
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-fn uart_unlock() {
-    let me = core_id() as usize;
-    unsafe {
-        write_volatile(core::ptr::addr_of_mut!(UART_LOCK_WANT[me]), 0);
-    }
-}
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
 fn shared_runtime_ptr() -> *mut SharedRuntime {
     SHARED_RUNTIME.0.get()
 }
@@ -403,104 +291,32 @@ fn expected_swarm_sum(node_count: u8) -> u32 {
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-fn uart_init() {
-    unsafe {
-        write_volatile(UARTCR, 0);
-        write_volatile(UARTIBRD, 81);
-        write_volatile(UARTFBRD, 24);
-        write_volatile(UARTLCR_H, 0x60);
-        write_volatile(UARTCR, 0x101);
-        UART_READY = 1;
-    }
-    signal();
+fn result_ptr() -> *mut u32 {
+    core::ptr::addr_of_mut!(HIBANA_DEMO_RESULT)
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-fn uart_putc(byte: u8) {
-    while unsafe { read_volatile(UARTFR) } & UART_TXFF != 0 {}
-    unsafe { write_volatile(UARTDR, byte as u32) };
+fn hard_stop(stage: &str) -> ! {
+    bringup::hard_stop(result_ptr(), stage)
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-fn uart_puts(text: &str) {
-    for byte in text.bytes() {
-        if byte == b'\n' {
-            uart_putc(b'\r');
-        }
-        uart_putc(byte);
-    }
-}
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-fn uart_bytes(bytes: &[u8]) {
-    for byte in bytes {
-        if *byte == b'\n' {
-            uart_putc(b'\r');
-        }
-        uart_putc(*byte);
-    }
-}
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-fn uart_hex(value: u32) {
-    for shift in (0..8).rev() {
-        let nibble = ((value >> (shift * 4)) & 0xf) as u8;
-        let ch = match nibble {
-            0..=9 => b'0' + nibble,
-            _ => b'a' + (nibble - 10),
-        };
-        uart_putc(ch);
-    }
-}
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-fn uart_line(text: &str) {
-    uart_lock();
-    uart_puts(text);
-    uart_puts("\n");
-    uart_unlock();
-}
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-fn uart_hex_line(prefix: &str, value: u32) {
-    uart_lock();
-    uart_puts(prefix);
-    uart_hex(value);
-    uart_puts("\n");
-    uart_unlock();
-}
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-fn fail_closed(stage: &str) -> ! {
-    unsafe {
-        HIBANA_DEMO_RESULT = RESULT_FAILURE;
-    }
-    uart_lock();
-    uart_puts(stage);
-    uart_puts(" fail\n");
-    uart_unlock();
-    park();
-}
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-fn must_attach<T>(result: Result<T, AttachError>, stage: &str) -> T {
+fn must_attach<T>(result: Result<T, hibana::substrate::AttachError>, stage: &str) -> T {
     match result {
         Ok(value) => value,
-        Err(AttachError::Control(CpError::ResourceExhausted)) => {
-            uart_line("[attach] control resource exhausted");
-            fail_closed(stage)
+        Err(_) => {
+            uart::line("[attach] endpoint attach rejected");
+            hard_stop(stage)
         }
-        Err(AttachError::Control(_)) => fail_closed(stage),
-        Err(AttachError::Rendezvous(_)) => fail_closed(stage),
     }
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 fn init_radio_once() -> (u8, NodeId, u8) {
     if cyw43439::init().is_err() {
-        fail_closed("[core0] cyw43439 init");
+        hard_stop("[core0] cyw43439 init");
     }
-    uart_line("[core0] cyw43439 firmware ready");
+    uart::line("[core0] cyw43439 firmware ready");
     let role = configured_node_role(cyw43439::node_role());
     let raw_node = cyw43439::node_id();
     let local_node = if raw_node == 0 {
@@ -521,18 +337,18 @@ fn init_radio_once() -> (u8, NodeId, u8) {
     }
     if let Some(expected) = fixed_node_count() {
         if node_count != expected {
-            fail_closed("[core0] fixed swarm node count");
+            hard_stop("[core0] fixed swarm node count");
         }
     }
 
     match role {
-        cyw43439::NODE_ROLE_COORDINATOR => uart_line("[core0] node role coordinator"),
-        cyw43439::NODE_ROLE_SENSOR => uart_line("[core0] node role sensor"),
-        cyw43439::NODE_ROLE_DUAL_CORE => uart_line("[core0] node role dual"),
-        _ => fail_closed("[core0] node role"),
+        cyw43439::NODE_ROLE_COORDINATOR => uart::line("[core0] node role coordinator"),
+        cyw43439::NODE_ROLE_SENSOR => uart::line("[core0] node role sensor"),
+        cyw43439::NODE_ROLE_DUAL_CORE => uart::line("[core0] node role dual"),
+        _ => hard_stop("[core0] node role"),
     }
-    uart_hex_line("[core0] local node 0x", local_node.raw() as u32);
-    uart_hex_line("[core0] swarm nodes 0x", node_count as u32);
+    uart::hex_line("[core0] local node 0x", local_node.raw() as u32);
+    uart::hex_line("[core0] swarm nodes 0x", node_count as u32);
 
     unsafe {
         NODE_ROLE = role as u32;
@@ -558,7 +374,7 @@ fn role_nodes() -> [NodeId; QEMU_CYW43439_MAX_ROLES] {
 fn local_hibana_role(local_node: NodeId, node_count: u8) -> u8 {
     let raw = local_node.raw();
     if raw < PICO2W_SWARM_MIN_NODES as u16 || raw > node_count as u16 {
-        fail_closed("[runtime] local sensor role");
+        hard_stop("[runtime] local sensor role");
     }
     (raw as u8).saturating_sub(1)
 }
@@ -572,16 +388,16 @@ fn expect_qemu_rx_meta(
     stage: &str,
 ) {
     let Some(meta) = cyw43439::qemu_take_last_rx_meta(local_role) else {
-        fail_closed(stage);
+        hard_stop(stage);
     };
     if !meta.matches(source_node, local_node, lane) {
-        uart_hex_line("[rx] actual src 0x", meta.src_node().raw() as u32);
-        uart_hex_line("[rx] expected src 0x", source_node.raw() as u32);
-        uart_hex_line("[rx] actual dst 0x", meta.dst_node().raw() as u32);
-        uart_hex_line("[rx] expected dst 0x", local_node.raw() as u32);
-        uart_hex_line("[rx] actual lane 0x", meta.lane() as u32);
-        uart_hex_line("[rx] expected lane 0x", lane as u32);
-        fail_closed(stage);
+        uart::hex_line("[rx] actual src 0x", meta.src_node().raw() as u32);
+        uart::hex_line("[rx] expected src 0x", source_node.raw() as u32);
+        uart::hex_line("[rx] actual dst 0x", meta.dst_node().raw() as u32);
+        uart::hex_line("[rx] expected dst 0x", local_node.raw() as u32);
+        uart::hex_line("[rx] actual lane 0x", meta.lane() as u32);
+        uart::hex_line("[rx] expected lane 0x", lane as u32);
+        hard_stop(stage);
     }
 }
 
@@ -611,129 +427,105 @@ fn install_runtime_session(role: u8, local_node: NodeId, node_count: u8) {
             ),
         ) {
             Ok(rv) => rv,
-            Err(_) => fail_closed("[runtime] add rendezvous"),
+            Err(_) => hard_stop("[runtime] add rendezvous"),
         };
 
         let sid = SessionId::new(2350);
-        match crate::SWARM_KERNEL_ROLE {
-            SwarmKernelRole::Coordinator6 => {
-                if role != cyw43439::NODE_ROLE_COORDINATOR || local_node != COORDINATOR {
-                    fail_closed("[runtime] coordinator6 role");
-                }
+        let fixed_sensor = fixed_sensor_hibana_role();
+        if node_count == 6 && role == cyw43439::NODE_ROLE_COORDINATOR {
+            if local_node != COORDINATOR {
+                hard_stop("[runtime] coordinator6 role");
+            }
+            (*runtime).core0_endpoint.as_mut_ptr().write(must_attach(
+                kit.enter(rv, sid, coordinator_program_6(), NoBinding),
+                "[core0] attach endpoint",
+            ));
+        } else if node_count == 6 && fixed_sensor.is_some() {
+            match fixed_sensor.unwrap_or(0) {
+                1 => (*runtime).core1_endpoint.as_mut_ptr().write(must_attach(
+                    kit.enter(rv, sid, role1_program_6(), NoBinding),
+                    "[core1] attach endpoint",
+                )),
+                2 => (*runtime).core2_endpoint.as_mut_ptr().write(must_attach(
+                    kit.enter(rv, sid, role2_program_6(), NoBinding),
+                    "[core2] attach endpoint",
+                )),
+                3 => (*runtime).core3_endpoint.as_mut_ptr().write(must_attach(
+                    kit.enter(rv, sid, role3_program_6(), NoBinding),
+                    "[core3] attach endpoint",
+                )),
+                4 => (*runtime).core4_endpoint.as_mut_ptr().write(must_attach(
+                    kit.enter(rv, sid, role4_program_6(), NoBinding),
+                    "[core4] attach endpoint",
+                )),
+                5 => (*runtime).core5_endpoint.as_mut_ptr().write(must_attach(
+                    kit.enter(rv, sid, role5_program_6(), NoBinding),
+                    "[core5] attach endpoint",
+                )),
+                _ => hard_stop("[runtime] fixed sensor endpoint"),
+            }
+        } else {
+            if role == cyw43439::NODE_ROLE_COORDINATOR || role == cyw43439::NODE_ROLE_DUAL_CORE {
+                let program = coordinator_program_for(node_count)
+                    .unwrap_or_else(|| hard_stop("[runtime] coordinator program"));
                 (*runtime).core0_endpoint.as_mut_ptr().write(must_attach(
-                    kit.enter(rv, sid, coordinator_program_6(), NoBinding),
+                    kit.enter(rv, sid, program, NoBinding),
                     "[core0] attach endpoint",
                 ));
             }
-            SwarmKernelRole::Sensor2Of6 => {
-                if local_hibana_role(local_node, node_count) != 1 {
-                    fail_closed("[runtime] sensor2 role");
-                }
-                (*runtime).core1_endpoint.as_mut_ptr().write(must_attach(
-                    kit.enter(rv, sid, role1_program_6(), NoBinding),
-                    "[core1] attach endpoint",
-                ));
-            }
-            SwarmKernelRole::Sensor3Of6 => {
-                if local_hibana_role(local_node, node_count) != 2 {
-                    fail_closed("[runtime] sensor3 role");
-                }
-                (*runtime).core2_endpoint.as_mut_ptr().write(must_attach(
-                    kit.enter(rv, sid, role2_program_6(), NoBinding),
-                    "[core2] attach endpoint",
-                ));
-            }
-            SwarmKernelRole::Sensor4Of6 => {
-                if local_hibana_role(local_node, node_count) != 3 {
-                    fail_closed("[runtime] sensor4 role");
-                }
-                (*runtime).core3_endpoint.as_mut_ptr().write(must_attach(
-                    kit.enter(rv, sid, role3_program_6(), NoBinding),
-                    "[core3] attach endpoint",
-                ));
-            }
-            SwarmKernelRole::Sensor5Of6 => {
-                if local_hibana_role(local_node, node_count) != 4 {
-                    fail_closed("[runtime] sensor5 role");
-                }
-                (*runtime).core4_endpoint.as_mut_ptr().write(must_attach(
-                    kit.enter(rv, sid, role4_program_6(), NoBinding),
-                    "[core4] attach endpoint",
-                ));
-            }
-            SwarmKernelRole::Sensor6Of6 => {
-                if local_hibana_role(local_node, node_count) != 5 {
-                    fail_closed("[runtime] sensor6 role");
-                }
-                (*runtime).core5_endpoint.as_mut_ptr().write(must_attach(
-                    kit.enter(rv, sid, role5_program_6(), NoBinding),
-                    "[core5] attach endpoint",
-                ));
-            }
-            _ => {
-                if role == cyw43439::NODE_ROLE_COORDINATOR || role == cyw43439::NODE_ROLE_DUAL_CORE
-                {
-                    let program = coordinator_program_for(node_count)
-                        .unwrap_or_else(|| fail_closed("[runtime] coordinator program"));
-                    (*runtime).core0_endpoint.as_mut_ptr().write(must_attach(
-                        kit.enter(rv, sid, program, NoBinding),
-                        "[core0] attach endpoint",
-                    ));
-                }
-                if role == cyw43439::NODE_ROLE_SENSOR || role == cyw43439::NODE_ROLE_DUAL_CORE {
-                    match local_hibana_role(local_node, node_count) {
-                        1 => (*runtime).core1_endpoint.as_mut_ptr().write(must_attach(
-                            kit.enter(
-                                rv,
-                                sid,
-                                role1_program_for(node_count)
-                                    .unwrap_or_else(|| fail_closed("[runtime] role1 program")),
-                                NoBinding,
-                            ),
-                            "[core1] attach endpoint",
-                        )),
-                        2 => (*runtime).core2_endpoint.as_mut_ptr().write(must_attach(
-                            kit.enter(
-                                rv,
-                                sid,
-                                role2_program_for(node_count)
-                                    .unwrap_or_else(|| fail_closed("[runtime] role2 program")),
-                                NoBinding,
-                            ),
-                            "[core2] attach endpoint",
-                        )),
-                        3 => (*runtime).core3_endpoint.as_mut_ptr().write(must_attach(
-                            kit.enter(
-                                rv,
-                                sid,
-                                role3_program_for(node_count)
-                                    .unwrap_or_else(|| fail_closed("[runtime] role3 program")),
-                                NoBinding,
-                            ),
-                            "[core3] attach endpoint",
-                        )),
-                        4 => (*runtime).core4_endpoint.as_mut_ptr().write(must_attach(
-                            kit.enter(
-                                rv,
-                                sid,
-                                role4_program_for(node_count)
-                                    .unwrap_or_else(|| fail_closed("[runtime] role4 program")),
-                                NoBinding,
-                            ),
-                            "[core4] attach endpoint",
-                        )),
-                        5 => (*runtime).core5_endpoint.as_mut_ptr().write(must_attach(
-                            kit.enter(
-                                rv,
-                                sid,
-                                role5_program_for(node_count)
-                                    .unwrap_or_else(|| fail_closed("[runtime] role5 program")),
-                                NoBinding,
-                            ),
-                            "[core5] attach endpoint",
-                        )),
-                        _ => fail_closed("[runtime] sensor endpoint"),
-                    }
+            if role == cyw43439::NODE_ROLE_SENSOR || role == cyw43439::NODE_ROLE_DUAL_CORE {
+                match local_hibana_role(local_node, node_count) {
+                    1 => (*runtime).core1_endpoint.as_mut_ptr().write(must_attach(
+                        kit.enter(
+                            rv,
+                            sid,
+                            role1_program_for(node_count)
+                                .unwrap_or_else(|| hard_stop("[runtime] role1 program")),
+                            NoBinding,
+                        ),
+                        "[core1] attach endpoint",
+                    )),
+                    2 => (*runtime).core2_endpoint.as_mut_ptr().write(must_attach(
+                        kit.enter(
+                            rv,
+                            sid,
+                            role2_program_for(node_count)
+                                .unwrap_or_else(|| hard_stop("[runtime] role2 program")),
+                            NoBinding,
+                        ),
+                        "[core2] attach endpoint",
+                    )),
+                    3 => (*runtime).core3_endpoint.as_mut_ptr().write(must_attach(
+                        kit.enter(
+                            rv,
+                            sid,
+                            role3_program_for(node_count)
+                                .unwrap_or_else(|| hard_stop("[runtime] role3 program")),
+                            NoBinding,
+                        ),
+                        "[core3] attach endpoint",
+                    )),
+                    4 => (*runtime).core4_endpoint.as_mut_ptr().write(must_attach(
+                        kit.enter(
+                            rv,
+                            sid,
+                            role4_program_for(node_count)
+                                .unwrap_or_else(|| hard_stop("[runtime] role4 program")),
+                            NoBinding,
+                        ),
+                        "[core4] attach endpoint",
+                    )),
+                    5 => (*runtime).core5_endpoint.as_mut_ptr().write(must_attach(
+                        kit.enter(
+                            rv,
+                            sid,
+                            role5_program_for(node_count)
+                                .unwrap_or_else(|| hard_stop("[runtime] role5 program")),
+                            NoBinding,
+                        ),
+                        "[core5] attach endpoint",
+                    )),
+                    _ => hard_stop("[runtime] sensor endpoint"),
                 }
             }
         }
@@ -755,7 +547,7 @@ async fn core0_session(endpoint: &mut DemoCore0Endpoint, node_count: u8) {
     while node <= node_count {
         let sensor_node = NodeId::new(node as u16);
         let request = RemoteSampleRequest::new(1, 1, sensor_node.raw() as u8);
-        uart_hex_line(
+        uart::hex_line(
             "[core0] remote sample req node 0x",
             sensor_node.raw() as u32,
         );
@@ -766,31 +558,29 @@ async fn core0_session(endpoint: &mut DemoCore0Endpoint, node_count: u8) {
             .await
         {
             Ok(_) => {}
-            Err(_) => fail_closed("[core0] send remote sample"),
+            Err(_) => hard_stop("[core0] send remote sample"),
         }
 
         let sample = match endpoint.recv::<RemoteSampleRetMsg>().await {
             Ok(sample) => sample,
-            Err(_) => fail_closed("[core0] recv remote sample"),
+            Err(_) => hard_stop("[core0] recv remote sample"),
         };
-        uart_hex_line("[core0] sample value 0x", sample.value());
+        uart::hex_line("[core0] sample value 0x", sample.value());
         let expected = sample_value_for(sensor_node);
 
         if sample.sensor_id() != sensor_node.raw() as u8 || sample.value() != expected {
-            unsafe {
-                HIBANA_DEMO_RESULT = RESULT_FAILURE;
-            }
-            uart_line("[core0] hibana pico2w cyw43439 swarm fail");
-            fail_closed("[core0] sample mismatch");
+            bringup::mark_result(result_ptr(), bringup::RESULT_FAILURE);
+            uart::line("[core0] hibana pico2w cyw43439 swarm fail");
+            hard_stop("[core0] sample mismatch");
         }
         aggregate = aggregate.wrapping_add(sample.value());
         node = node.saturating_add(1);
     }
 
     if aggregate != expected_swarm_sum(node_count) {
-        fail_closed("[core0] aggregate mismatch");
+        hard_stop("[core0] aggregate mismatch");
     }
-    uart_hex_line("[core0] swarm aggregate 0x", aggregate);
+    uart::hex_line("[core0] swarm aggregate 0x", aggregate);
 
     let mut node = PICO2W_SWARM_MIN_NODES;
     while node <= node_count {
@@ -811,17 +601,17 @@ async fn core0_session(endpoint: &mut DemoCore0Endpoint, node_count: u8) {
             .await
         {
             Ok(_) => {}
-            Err(_) => fail_closed("[core0] send aggregate command"),
+            Err(_) => hard_stop("[core0] send aggregate command"),
         }
 
         let ack = match endpoint.recv::<RemoteActuateRetMsg>().await {
             Ok(ack) => ack,
-            Err(_) => fail_closed("[core0] recv aggregate ack"),
+            Err(_) => hard_stop("[core0] recv aggregate ack"),
         };
         if ack.channel() != sensor_node.raw() as u8 || ack.result() != 0 {
-            fail_closed("[core0] aggregate ack mismatch");
+            hard_stop("[core0] aggregate ack mismatch");
         }
-        uart_hex_line("[core0] aggregate ack node 0x", sensor_node.raw() as u32);
+        uart::hex_line("[core0] aggregate ack node 0x", sensor_node.raw() as u32);
         node = node.saturating_add(1);
     }
 
@@ -852,16 +642,16 @@ async fn core0_remote_actuator(
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core0] send remote actuator command"),
+        Err(_) => hard_stop("[core0] send remote actuator command"),
     }
     let ack = match endpoint.recv::<RemoteActuateRetMsg>().await {
         Ok(ack) => ack,
-        Err(_) => fail_closed("[core0] recv remote actuator ack"),
+        Err(_) => hard_stop("[core0] recv remote actuator ack"),
     };
     if ack.channel() != actuator_node.raw() as u8 || ack.result() != 0 {
-        fail_closed("[core0] remote actuator ack mismatch");
+        hard_stop("[core0] remote actuator ack mismatch");
     }
-    uart_hex_line(
+    uart::hex_line(
         "[core0] remote actuator route ack node 0x",
         actuator_node.raw() as u32,
     );
@@ -871,15 +661,15 @@ async fn core0_remote_actuator(
 async fn core0_expect_gateway_telemetry(endpoint: &mut DemoCore0Endpoint, source_node: NodeId) {
     let telemetry = match endpoint.recv::<SwarmTelemetryMsg>().await {
         Ok(telemetry) => telemetry,
-        Err(_) => fail_closed("[core0] recv gateway telemetry acceptance"),
+        Err(_) => hard_stop("[core0] recv gateway telemetry acceptance"),
     };
     if telemetry.node_id() != source_node
         || !telemetry.role_mask().contains(NodeRole::Actuator)
         || telemetry.session_generation() != SESSION_GENERATION
     {
-        fail_closed("[core0] gateway telemetry acceptance mismatch");
+        hard_stop("[core0] gateway telemetry acceptance mismatch");
     }
-    uart_hex_line(
+    uart::hex_line(
         "[core0] gateway telemetry accepted node 0x",
         telemetry.node_id().raw() as u32,
     );
@@ -902,7 +692,7 @@ async fn core0_network_object(
             LABEL_NET_DATAGRAM_SEND,
             NetworkRights::Send,
         )
-        .unwrap_or_else(|_| fail_closed("[core0] grant datagram network object"));
+        .unwrap_or_else(|_| hard_stop("[core0] grant datagram network object"));
     let stream_fd = network_objects
         .apply_cap_grant_stream(
             COORDINATOR,
@@ -913,7 +703,7 @@ async fn core0_network_object(
             LABEL_NET_STREAM_WRITE,
             NetworkRights::Send,
         )
-        .unwrap_or_else(|_| fail_closed("[core0] grant stream network object"));
+        .unwrap_or_else(|_| hard_stop("[core0] grant stream network object"));
 
     let datagram_fd = match network_objects.route_fd_write_routed(
         datagram_fd.fd(),
@@ -921,8 +711,8 @@ async fn core0_network_object(
         datagram_fd.route_key(),
     ) {
         NetworkObjectWriteRoute::Datagram(fd) => fd,
-        NetworkObjectWriteRoute::Stream(_) => fail_closed("[core0] datagram selected stream route"),
-        NetworkObjectWriteRoute::Rejected(_) => fail_closed("[core0] datagram route rejected"),
+        NetworkObjectWriteRoute::Stream(_) => hard_stop("[core0] datagram selected stream route"),
+        NetworkObjectWriteRoute::Rejected(_) => hard_stop("[core0] datagram route rejected"),
     };
     match endpoint
         .flow::<NetworkDatagramSendRouteControl>()
@@ -931,7 +721,7 @@ async fn core0_network_object(
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core0] select datagram route"),
+        Err(_) => hard_stop("[core0] select datagram route"),
     }
     let datagram_payload = b"qemu datagram fd";
     let datagram = DatagramSend::new(
@@ -941,7 +731,7 @@ async fn core0_network_object(
         network_objects.allocate_operation_id(),
         datagram_payload,
     )
-    .unwrap_or_else(|_| fail_closed("[core0] make datagram fd send"));
+    .unwrap_or_else(|_| hard_stop("[core0] make datagram fd send"));
     match endpoint
         .flow::<DatagramSendMsg>()
         .expect("core0 flow<datagram send>")
@@ -949,11 +739,11 @@ async fn core0_network_object(
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core0] send datagram fd"),
+        Err(_) => hard_stop("[core0] send datagram fd"),
     }
     let datagram_ack = match endpoint.recv::<DatagramAckMsg>().await {
         Ok(ack) => ack,
-        Err(_) => fail_closed("[core0] recv datagram ack"),
+        Err(_) => hard_stop("[core0] recv datagram ack"),
     };
     expect_qemu_rx_meta(
         0,
@@ -967,9 +757,9 @@ async fn core0_network_object(
         datagram_ack,
         datagram.operation_id(),
     ) {
-        fail_closed("[core0] datagram ack mismatch");
+        hard_stop("[core0] datagram ack mismatch");
     }
-    uart_hex_line(
+    uart::hex_line(
         "[core0] network datagram fd ack node 0x",
         gateway_node.raw() as u32,
     );
@@ -980,10 +770,8 @@ async fn core0_network_object(
         stream_fd.route_key(),
     ) {
         NetworkObjectWriteRoute::Stream(fd) => fd,
-        NetworkObjectWriteRoute::Datagram(_) => {
-            fail_closed("[core0] stream selected datagram route")
-        }
-        NetworkObjectWriteRoute::Rejected(_) => fail_closed("[core0] stream route rejected"),
+        NetworkObjectWriteRoute::Datagram(_) => hard_stop("[core0] stream selected datagram route"),
+        NetworkObjectWriteRoute::Rejected(_) => hard_stop("[core0] stream route rejected"),
     };
     match endpoint
         .flow::<NetworkStreamWriteRouteControl>()
@@ -992,7 +780,7 @@ async fn core0_network_object(
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core0] select stream route"),
+        Err(_) => hard_stop("[core0] select stream route"),
     }
     let sequence = (aggregate as u16).wrapping_add(gateway_node.raw());
     let stream = StreamWrite::new(
@@ -1004,7 +792,7 @@ async fn core0_network_object(
         NET_STREAM_FLAG_FIN,
         b"qemu stream fd",
     )
-    .unwrap_or_else(|_| fail_closed("[core0] make stream fd write"));
+    .unwrap_or_else(|_| hard_stop("[core0] make stream fd write"));
     match endpoint
         .flow::<StreamWriteMsg>()
         .expect("core0 flow<stream write>")
@@ -1012,11 +800,11 @@ async fn core0_network_object(
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core0] send stream fd"),
+        Err(_) => hard_stop("[core0] send stream fd"),
     }
     let stream_ack = match endpoint.recv::<StreamAckMsg>().await {
         Ok(ack) => ack,
-        Err(_) => fail_closed("[core0] recv stream ack"),
+        Err(_) => hard_stop("[core0] recv stream ack"),
     };
     expect_qemu_rx_meta(
         0,
@@ -1031,9 +819,9 @@ async fn core0_network_object(
         stream.operation_id(),
         sequence,
     ) {
-        fail_closed("[core0] stream ack mismatch");
+        hard_stop("[core0] stream ack mismatch");
     }
-    uart_hex_line(
+    uart::hex_line(
         "[core0] network stream fd ack node 0x",
         gateway_node.raw() as u32,
     );
@@ -1053,12 +841,12 @@ async fn core0_remote_management(endpoint: &mut DemoCore0Endpoint, managed_node:
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core0] send mgmt image begin"),
+        Err(_) => hard_stop("[core0] send mgmt image begin"),
     }
     core0_expect_mgmt_status(endpoint, MgmtStatusCode::Ok, "[core0] mgmt begin status").await;
 
     let chunk = MgmtImageChunk::new(QEMU_MGMT_IMAGE_SLOT, 0, QEMU_MGMT_IMAGE)
-        .unwrap_or_else(|_| fail_closed("[core0] make mgmt image chunk"));
+        .unwrap_or_else(|_| hard_stop("[core0] make mgmt image chunk"));
     match endpoint
         .flow::<Msg<LABEL_MGMT_IMAGE_CHUNK, MgmtImageChunk>>()
         .expect("core0 flow<mgmt chunk>")
@@ -1066,7 +854,7 @@ async fn core0_remote_management(endpoint: &mut DemoCore0Endpoint, managed_node:
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core0] send mgmt image chunk"),
+        Err(_) => hard_stop("[core0] send mgmt image chunk"),
     }
     core0_expect_mgmt_status(endpoint, MgmtStatusCode::Ok, "[core0] mgmt chunk status").await;
 
@@ -1078,7 +866,7 @@ async fn core0_remote_management(endpoint: &mut DemoCore0Endpoint, managed_node:
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core0] send mgmt image end"),
+        Err(_) => hard_stop("[core0] send mgmt image end"),
     }
     core0_expect_mgmt_status(endpoint, MgmtStatusCode::Ok, "[core0] mgmt end status").await;
 
@@ -1090,7 +878,7 @@ async fn core0_remote_management(endpoint: &mut DemoCore0Endpoint, managed_node:
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core0] send mgmt activate need fence"),
+        Err(_) => hard_stop("[core0] send mgmt activate need fence"),
     }
     core0_expect_mgmt_status(
         endpoint,
@@ -1106,22 +894,22 @@ async fn core0_remote_management(endpoint: &mut DemoCore0Endpoint, managed_node:
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core0] send mgmt activate"),
+        Err(_) => hard_stop("[core0] send mgmt activate"),
     }
     core0_expect_mgmt_status(endpoint, MgmtStatusCode::Ok, "[core0] mgmt activate status").await;
 
     let update = match endpoint.recv::<NodeImageUpdatedMsg>().await {
         Ok(update) => update,
-        Err(_) => fail_closed("[core0] recv node image update"),
+        Err(_) => hard_stop("[core0] recv node image update"),
     };
     if update.node_id() != managed_node
         || update.slot() != QEMU_MGMT_IMAGE_SLOT
         || update.image_generation() != QEMU_MGMT_IMAGE_GENERATION
         || !update.accepted()
     {
-        fail_closed("[core0] node image update mismatch");
+        hard_stop("[core0] node image update mismatch");
     }
-    uart_hex_line(
+    uart::hex_line(
         "[core0] remote management image updated node 0x",
         managed_node.raw() as u32,
     );
@@ -1138,10 +926,10 @@ async fn core0_expect_mgmt_status(
         .await
     {
         Ok(status) => status,
-        Err(_) => fail_closed(context),
+        Err(_) => hard_stop(context),
     };
     if status.slot() != QEMU_MGMT_IMAGE_SLOT || status.code() != expected {
-        fail_closed(context);
+        hard_stop(context);
     }
 }
 
@@ -1155,14 +943,14 @@ async fn core0_start_wasip1(endpoint: &mut DemoCore0Endpoint, sensor_node: NodeI
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core0] send wasip1 start"),
+        Err(_) => hard_stop("[core0] send wasip1 start"),
     }
     let ack = match endpoint.recv::<RemoteActuateRetMsg>().await {
         Ok(ack) => ack,
-        Err(_) => fail_closed("[core0] recv wasip1 start ack"),
+        Err(_) => hard_stop("[core0] recv wasip1 start ack"),
     };
     if ack.channel() != sensor_node.raw() as u8 || ack.result() != 0 {
-        fail_closed("[core0] wasip1 start ack mismatch");
+        hard_stop("[core0] wasip1 start ack mismatch");
     }
 }
 
@@ -1170,7 +958,7 @@ async fn core0_start_wasip1(endpoint: &mut DemoCore0Endpoint, sensor_node: NodeI
 async fn core0_wasip1_fd_write(endpoint: &mut DemoCore0Endpoint, sensor_node: NodeId) {
     let mut leases: MemoryLeaseTable<2> = MemoryLeaseTable::new(WASI_MEMORY_LEN, WASI_MEMORY_EPOCH);
 
-    uart_hex_line(
+    uart::hex_line(
         "[core0] wait wasip1 fd_write guest node 0x",
         sensor_node.raw() as u32,
     );
@@ -1179,19 +967,19 @@ async fn core0_wasip1_fd_write(endpoint: &mut DemoCore0Endpoint, sensor_node: No
         .await
     {
         Ok(borrow) => borrow,
-        Err(_) => fail_closed("[core0] recv wasip1 mem borrow"),
+        Err(_) => hard_stop("[core0] recv wasip1 mem borrow"),
     };
     if borrow.ptr() != WASI_STDOUT_PTR
         || borrow.len() as usize != WASIP1_SENSOR_STDOUT_MARKER.len()
         || borrow.epoch() != WASI_MEMORY_EPOCH
     {
-        fail_closed("[core0] wasip1 mem borrow mismatch");
+        hard_stop("[core0] wasip1 mem borrow mismatch");
     }
     let grant = leases
         .grant_read(borrow)
-        .unwrap_or_else(|_| fail_closed("[core0] grant wasip1 read lease"));
+        .unwrap_or_else(|_| hard_stop("[core0] grant wasip1 read lease"));
     if grant.rights() != MemRights::Read {
-        fail_closed("[core0] wasip1 grant rights mismatch");
+        hard_stop("[core0] wasip1 grant rights mismatch");
     }
     match endpoint
         .flow::<MemReadGrantControl>()
@@ -1200,40 +988,40 @@ async fn core0_wasip1_fd_write(endpoint: &mut DemoCore0Endpoint, sensor_node: No
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core0] send wasip1 read grant"),
+        Err(_) => hard_stop("[core0] send wasip1 read grant"),
     }
 
     let request = match endpoint.recv::<Msg<LABEL_WASI_FD_WRITE, EngineReq>>().await {
         Ok(request) => request,
-        Err(_) => fail_closed("[core0] recv wasip1 fd_write"),
+        Err(_) => hard_stop("[core0] recv wasip1 fd_write"),
     };
     let write = match request {
         EngineReq::FdWrite(write) => write,
-        EngineReq::LogU32(_) => fail_closed("[core0] expected fd_write"),
-        EngineReq::Yield => fail_closed("[core0] expected fd_write"),
-        EngineReq::Wasip1Stdout(_) => fail_closed("[core0] expected fd_write"),
-        EngineReq::Wasip1Stderr(_) => fail_closed("[core0] expected fd_write"),
-        EngineReq::Wasip1Stdin(_) => fail_closed("[core0] expected fd_write"),
-        EngineReq::Wasip1ClockNow => fail_closed("[core0] expected fd_write"),
-        EngineReq::Wasip1RandomSeed => fail_closed("[core0] expected fd_write"),
-        EngineReq::Wasip1Exit(_) => fail_closed("[core0] expected fd_write"),
-        EngineReq::TimerSleepUntil(_) => fail_closed("[core0] expected fd_write"),
-        EngineReq::GpioSet(_) => fail_closed("[core0] expected fd_write"),
-        _ => fail_closed("unexpected wasi p1 request"),
+        EngineReq::LogU32(_) => hard_stop("[core0] expected fd_write"),
+        EngineReq::Yield => hard_stop("[core0] expected fd_write"),
+        EngineReq::Wasip1Stdout(_) => hard_stop("[core0] expected fd_write"),
+        EngineReq::Wasip1Stderr(_) => hard_stop("[core0] expected fd_write"),
+        EngineReq::Wasip1Stdin(_) => hard_stop("[core0] expected fd_write"),
+        EngineReq::Wasip1ClockNow => hard_stop("[core0] expected fd_write"),
+        EngineReq::Wasip1RandomSeed => hard_stop("[core0] expected fd_write"),
+        EngineReq::Wasip1Exit(_) => hard_stop("[core0] expected fd_write"),
+        EngineReq::TimerSleepUntil(_) => hard_stop("[core0] expected fd_write"),
+        EngineReq::GpioSet(_) => hard_stop("[core0] expected fd_write"),
+        _ => hard_stop("unexpected wasi p1 request"),
     };
     if write.fd() != WASI_STDOUT_FD
         || write.lease_id() != grant.lease_id()
         || write.len() as u8 > grant.len()
         || write.as_bytes() != WASIP1_SENSOR_STDOUT_MARKER
     {
-        fail_closed("[core0] wasip1 fd_write mismatch");
+        hard_stop("[core0] wasip1 fd_write mismatch");
     }
-    uart_lock();
-    uart_puts("[core0] wasip1 fd_write node 0x");
-    uart_hex(sensor_node.raw() as u32);
-    uart_puts(": ");
-    uart_bytes(write.as_bytes());
-    uart_unlock();
+    uart::hex_prefixed_bytes(
+        "[core0] wasip1 fd_write node 0x",
+        sensor_node.raw() as u32,
+        ": ",
+        write.as_bytes(),
+    );
 
     let reply = EngineRet::FdWriteDone(FdWriteDone::new(write.fd(), write.len() as u8));
     match endpoint
@@ -1243,20 +1031,20 @@ async fn core0_wasip1_fd_write(endpoint: &mut DemoCore0Endpoint, sensor_node: No
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core0] send wasip1 fd_write ret"),
+        Err(_) => hard_stop("[core0] send wasip1 fd_write ret"),
     }
 
     let release = match endpoint.recv::<Msg<LABEL_MEM_RELEASE, MemRelease>>().await {
         Ok(release) => release,
-        Err(_) => fail_closed("[core0] recv wasip1 mem release"),
+        Err(_) => hard_stop("[core0] recv wasip1 mem release"),
     };
     if release.lease_id() != write.lease_id() {
-        fail_closed("[core0] wasip1 release lease mismatch");
+        hard_stop("[core0] wasip1 release lease mismatch");
     }
     leases
         .release(release)
-        .unwrap_or_else(|_| fail_closed("[core0] release wasip1 read lease"));
-    uart_hex_line(
+        .unwrap_or_else(|_| hard_stop("[core0] release wasip1 read lease"));
+    uart::hex_line(
         "[core0] wasip1 guest exchange done node 0x",
         sensor_node.raw() as u32,
     );
@@ -1268,14 +1056,14 @@ async fn core1_session<const ROLE: u8>(
     local_node: NodeId,
     node_count: u8,
 ) {
-    uart_line("[core1] cyw43439 wait remote sample");
+    uart::line("[core1] cyw43439 wait remote sample");
     let request = match endpoint.recv::<RemoteSampleReqMsg>().await {
         Ok(request) => request,
-        Err(_) => fail_closed("[core1] recv remote sample"),
+        Err(_) => hard_stop("[core1] recv remote sample"),
     };
-    uart_hex_line("[core1] sensor id 0x", request.sensor_id() as u32);
+    uart::hex_line("[core1] sensor id 0x", request.sensor_id() as u32);
     if request.sensor_id() != local_node.raw() as u8 {
-        fail_closed("[core1] sample request sensor mismatch");
+        hard_stop("[core1] sample request sensor mismatch");
     }
 
     let value = sample_value_for(local_node);
@@ -1287,20 +1075,20 @@ async fn core1_session<const ROLE: u8>(
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core1] send remote sample ret"),
+        Err(_) => hard_stop("[core1] send remote sample ret"),
     }
-    uart_hex_line("[core1] sent sample 0x", value);
+    uart::hex_line("[core1] sent sample 0x", value);
 
     let start = match endpoint.recv::<RemoteActuateReqMsg>().await {
         Ok(start) => start,
-        Err(_) => fail_closed("[core1] recv wasip1 start"),
+        Err(_) => hard_stop("[core1] recv wasip1 start"),
     };
     if start.fd() != 0
         || start.generation() != 1
         || start.channel() != local_node.raw() as u8
         || start.value() != WASI_START_VALUE
     {
-        fail_closed("[core1] wasip1 start mismatch");
+        hard_stop("[core1] wasip1 start mismatch");
     }
     let ack = RemoteActuateAck::new(local_node.raw() as u8, 0);
     match endpoint
@@ -1310,23 +1098,23 @@ async fn core1_session<const ROLE: u8>(
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core1] send wasip1 start ack"),
+        Err(_) => hard_stop("[core1] send wasip1 start ack"),
     }
 
     core1_wasip1_fd_write(endpoint, local_node).await;
 
     let aggregate = match endpoint.recv::<RemoteActuateReqMsg>().await {
         Ok(aggregate) => aggregate,
-        Err(_) => fail_closed("[core1] recv aggregate command"),
+        Err(_) => hard_stop("[core1] recv aggregate command"),
     };
     if aggregate.fd() != 2
         || aggregate.generation() != 1
         || aggregate.channel() != local_node.raw() as u8
         || aggregate.value() != expected_swarm_sum(node_count)
     {
-        fail_closed("[core1] aggregate command mismatch");
+        hard_stop("[core1] aggregate command mismatch");
     }
-    uart_hex_line("[core1] aggregate accepted 0x", aggregate.value());
+    uart::hex_line("[core1] aggregate accepted 0x", aggregate.value());
     let ack = RemoteActuateAck::new(local_node.raw() as u8, 0);
     match endpoint
         .flow::<RemoteActuateRetMsg>()
@@ -1335,7 +1123,7 @@ async fn core1_session<const ROLE: u8>(
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core1] send aggregate ack"),
+        Err(_) => hard_stop("[core1] send aggregate ack"),
     }
 
     if node_count == QEMU_CYW43439_MAX_ROLES as u8 {
@@ -1363,15 +1151,15 @@ async fn core1_remote_actuator<const ROLE: u8>(
 ) {
     let command = match endpoint.recv::<RemoteActuateReqMsg>().await {
         Ok(command) => command,
-        Err(_) => fail_closed("[core1] recv remote actuator"),
+        Err(_) => hard_stop("[core1] recv remote actuator"),
     };
     if command.fd() != REMOTE_ACTUATOR_FD
         || command.generation() != SESSION_GENERATION
         || command.channel() != local_node.raw() as u8
     {
-        fail_closed("[core1] remote actuator command mismatch");
+        hard_stop("[core1] remote actuator command mismatch");
     }
-    uart_hex_line("[core1] actuator set value 0x", command.value());
+    uart::hex_line("[core1] actuator set value 0x", command.value());
     let ack = RemoteActuateAck::new(local_node.raw() as u8, 0);
     match endpoint
         .flow::<RemoteActuateRetMsg>()
@@ -1380,7 +1168,7 @@ async fn core1_remote_actuator<const ROLE: u8>(
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core1] send remote actuator ack"),
+        Err(_) => hard_stop("[core1] send remote actuator ack"),
     }
 }
 
@@ -1405,9 +1193,9 @@ async fn core1_send_gateway_telemetry<const ROLE: u8>(
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core1] send gateway telemetry"),
+        Err(_) => hard_stop("[core1] send gateway telemetry"),
     }
-    uart_hex_line(
+    uart::hex_line(
         "[core1] gateway telemetry sent node 0x",
         local_node.raw() as u32,
     );
@@ -1417,15 +1205,15 @@ async fn core1_send_gateway_telemetry<const ROLE: u8>(
 async fn core1_recv_gateway_telemetry<const ROLE: u8>(endpoint: &mut Endpoint<'static, ROLE>) {
     let telemetry = match endpoint.recv::<SwarmTelemetryMsg>().await {
         Ok(telemetry) => telemetry,
-        Err(_) => fail_closed("[core1] recv gateway telemetry"),
+        Err(_) => hard_stop("[core1] recv gateway telemetry"),
     };
     if telemetry.node_id() != NodeId::new(3)
         || !telemetry.role_mask().contains(NodeRole::Actuator)
         || telemetry.session_generation() != SESSION_GENERATION
     {
-        fail_closed("[core1] gateway telemetry mismatch");
+        hard_stop("[core1] gateway telemetry mismatch");
     }
-    uart_hex_line(
+    uart::hex_line(
         "[core1] gateway telemetry accepted node 0x",
         telemetry.node_id().raw() as u32,
     );
@@ -1436,7 +1224,7 @@ async fn core1_recv_gateway_telemetry<const ROLE: u8>(endpoint: &mut Endpoint<'s
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core1] send gateway telemetry acceptance"),
+        Err(_) => hard_stop("[core1] send gateway telemetry acceptance"),
     }
 }
 
@@ -1456,7 +1244,7 @@ async fn core1_network_object<const ROLE: u8>(
             LABEL_NET_DATAGRAM_SEND,
             NetworkRights::Receive,
         )
-        .unwrap_or_else(|_| fail_closed("[core1] grant datagram network object"));
+        .unwrap_or_else(|_| hard_stop("[core1] grant datagram network object"));
     network_objects
         .apply_cap_grant_stream(
             local_node,
@@ -1467,15 +1255,15 @@ async fn core1_network_object<const ROLE: u8>(
             LABEL_NET_STREAM_WRITE,
             NetworkRights::Receive,
         )
-        .unwrap_or_else(|_| fail_closed("[core1] grant stream network object"));
+        .unwrap_or_else(|_| hard_stop("[core1] grant stream network object"));
 
     let datagram_branch = match endpoint.offer().await {
         Ok(branch) => branch,
-        Err(_) => fail_closed("[core1] offer datagram route"),
+        Err(_) => hard_stop("[core1] offer datagram route"),
     };
     let datagram = match datagram_branch.decode::<DatagramSendMsg>().await {
         Ok(datagram) => datagram,
-        Err(_) => fail_closed("[core1] recv datagram fd"),
+        Err(_) => hard_stop("[core1] recv datagram fd"),
     };
     let datagram_route = match network_objects.route_receive_routed(NetworkRoute::new(
         COORDINATOR,
@@ -1484,8 +1272,8 @@ async fn core1_network_object<const ROLE: u8>(
         SESSION_GENERATION,
     )) {
         NetworkObjectReadRoute::Datagram(fd) => fd,
-        NetworkObjectReadRoute::Stream(_) => fail_closed("[core1] datagram selected stream route"),
-        NetworkObjectReadRoute::Rejected(_) => fail_closed("[core1] datagram route rejected"),
+        NetworkObjectReadRoute::Stream(_) => hard_stop("[core1] datagram selected stream route"),
+        NetworkObjectReadRoute::Rejected(_) => hard_stop("[core1] datagram route rejected"),
     };
     expect_qemu_rx_meta(
         ROLE,
@@ -1498,7 +1286,7 @@ async fn core1_network_object<const ROLE: u8>(
         || datagram.route() != datagram_route.route()
         || datagram.payload() != b"qemu datagram fd"
     {
-        fail_closed("[core1] datagram fd mismatch");
+        hard_stop("[core1] datagram fd mismatch");
     }
     let ack = DatagramAck::new(
         datagram.fd(),
@@ -1513,13 +1301,13 @@ async fn core1_network_object<const ROLE: u8>(
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core1] send datagram ack"),
+        Err(_) => hard_stop("[core1] send datagram ack"),
     }
-    uart_line("[core1] network datagram fd accepted");
+    uart::line("[core1] network datagram fd accepted");
 
     let stream = match endpoint.recv::<StreamWriteMsg>().await {
         Ok(stream) => stream,
-        Err(_) => fail_closed("[core1] recv stream fd"),
+        Err(_) => hard_stop("[core1] recv stream fd"),
     };
     let stream_route = match network_objects.route_receive_routed(NetworkRoute::new(
         COORDINATOR,
@@ -1528,10 +1316,8 @@ async fn core1_network_object<const ROLE: u8>(
         SESSION_GENERATION,
     )) {
         NetworkObjectReadRoute::Stream(fd) => fd,
-        NetworkObjectReadRoute::Datagram(_) => {
-            fail_closed("[core1] stream selected datagram route")
-        }
-        NetworkObjectReadRoute::Rejected(_) => fail_closed("[core1] stream route rejected"),
+        NetworkObjectReadRoute::Datagram(_) => hard_stop("[core1] stream selected datagram route"),
+        NetworkObjectReadRoute::Rejected(_) => hard_stop("[core1] stream route rejected"),
     };
     expect_qemu_rx_meta(
         ROLE,
@@ -1545,7 +1331,7 @@ async fn core1_network_object<const ROLE: u8>(
         || !stream.is_fin()
         || stream.payload() != b"qemu stream fd"
     {
-        fail_closed("[core1] stream fd mismatch");
+        hard_stop("[core1] stream fd mismatch");
     }
     let ack = StreamAck::new(
         stream.fd(),
@@ -1561,9 +1347,9 @@ async fn core1_network_object<const ROLE: u8>(
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core1] send stream ack"),
+        Err(_) => hard_stop("[core1] send stream ack"),
     }
-    uart_line("[core1] network stream fd accepted");
+    uart::line("[core1] network stream fd accepted");
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -1585,7 +1371,7 @@ async fn core1_remote_management<const ROLE: u8>(
         .await
     {
         Ok(begin) => begin,
-        Err(_) => fail_closed("[core1] recv mgmt image begin"),
+        Err(_) => hard_stop("[core1] recv mgmt image begin"),
     };
     let status = images
         .begin_with_control(
@@ -1603,7 +1389,7 @@ async fn core1_remote_management<const ROLE: u8>(
         .await
     {
         Ok(chunk) => chunk,
-        Err(_) => fail_closed("[core1] recv mgmt image chunk"),
+        Err(_) => hard_stop("[core1] recv mgmt image chunk"),
     };
     let status = images
         .chunk_with_control(
@@ -1621,7 +1407,7 @@ async fn core1_remote_management<const ROLE: u8>(
         .await
     {
         Ok(end) => end,
-        Err(_) => fail_closed("[core1] recv mgmt image end"),
+        Err(_) => hard_stop("[core1] recv mgmt image end"),
     };
     let status = images
         .end_with_control(grant, local_node, SWARM_CREDENTIAL, SESSION_GENERATION, end)
@@ -1633,7 +1419,7 @@ async fn core1_remote_management<const ROLE: u8>(
         .await
     {
         Ok(activate) => activate,
-        Err(_) => fail_closed("[core1] recv mgmt activate need fence"),
+        Err(_) => hard_stop("[core1] recv mgmt activate need fence"),
     };
     let status = images
         .activate_with_control(
@@ -1646,7 +1432,7 @@ async fn core1_remote_management<const ROLE: u8>(
         )
         .unwrap_or_else(|error| error.status(activate.slot()));
     if status.code() != MgmtStatusCode::NeedFence {
-        fail_closed("[core1] mgmt need-fence mismatch");
+        hard_stop("[core1] mgmt need-fence mismatch");
     }
     core1_send_mgmt_status(endpoint, status, "[core1] send mgmt need-fence status").await;
 
@@ -1655,7 +1441,7 @@ async fn core1_remote_management<const ROLE: u8>(
         .await
     {
         Ok(activate) => activate,
-        Err(_) => fail_closed("[core1] recv mgmt activate"),
+        Err(_) => hard_stop("[core1] recv mgmt activate"),
     };
     let status = images
         .activate_with_control(
@@ -1668,7 +1454,7 @@ async fn core1_remote_management<const ROLE: u8>(
         )
         .unwrap_or_else(|error| error.status(activate.slot()));
     if status.code() != MgmtStatusCode::Ok || images.active_slot() != Some(QEMU_MGMT_IMAGE_SLOT) {
-        fail_closed("[core1] mgmt activate mismatch");
+        hard_stop("[core1] mgmt activate mismatch");
     }
     core1_send_mgmt_status(endpoint, status, "[core1] send mgmt activate status").await;
 
@@ -1685,9 +1471,9 @@ async fn core1_remote_management<const ROLE: u8>(
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core1] send node image update"),
+        Err(_) => hard_stop("[core1] send node image update"),
     }
-    uart_line("[core1] remote management image activated");
+    uart::line("[core1] remote management image activated");
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -1703,7 +1489,7 @@ async fn core1_send_mgmt_status<const ROLE: u8>(
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed(context),
+        Err(_) => hard_stop(context),
     }
 }
 
@@ -1713,15 +1499,15 @@ async fn core1_wasip1_fd_write<const ROLE: u8>(
     local_node: NodeId,
 ) {
     let module = Wasip1StdoutModule::parse(WASIP1_SENSOR_GUEST)
-        .unwrap_or_else(|_| fail_closed("[core1] parse wasip1 stdout guest"));
+        .unwrap_or_else(|_| hard_stop("[core1] parse wasip1 stdout guest"));
     let chunk = module
         .stdout_chunk_for(WASIP1_SENSOR_STDOUT_MARKER)
-        .unwrap_or_else(|_| fail_closed("[core1] make wasip1 stdout chunk"));
+        .unwrap_or_else(|_| hard_stop("[core1] make wasip1 stdout chunk"));
     if chunk.as_bytes() != WASIP1_SENSOR_STDOUT_MARKER {
-        fail_closed("[core1] wasip1 stdout marker mismatch");
+        hard_stop("[core1] wasip1 stdout marker mismatch");
     }
 
-    uart_hex_line(
+    uart::hex_line(
         "[core1] wasip1 guest fd_write node 0x",
         local_node.raw() as u32,
     );
@@ -1733,22 +1519,22 @@ async fn core1_wasip1_fd_write<const ROLE: u8>(
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core1] send wasip1 mem borrow"),
+        Err(_) => hard_stop("[core1] send wasip1 mem borrow"),
     }
 
     let grant = match endpoint.recv::<MemReadGrantControl>().await {
         Ok(grant) => grant,
-        Err(_) => fail_closed("[core1] recv wasip1 read grant"),
+        Err(_) => hard_stop("[core1] recv wasip1 read grant"),
     };
     let (rights, lease_id) = grant
         .decode_handle()
-        .unwrap_or_else(|_| fail_closed("[core1] decode wasip1 read grant"));
+        .unwrap_or_else(|_| hard_stop("[core1] decode wasip1 read grant"));
     if rights != MemRights::Read.tag() || lease_id > u8::MAX as u64 {
-        fail_closed("[core1] wasip1 read grant mismatch");
+        hard_stop("[core1] wasip1 read grant mismatch");
     }
     let lease_id = lease_id as u8;
     let write = FdWrite::new_with_lease(WASI_STDOUT_FD, lease_id, chunk.as_bytes())
-        .unwrap_or_else(|_| fail_closed("[core1] make wasip1 fd_write"));
+        .unwrap_or_else(|_| hard_stop("[core1] make wasip1 fd_write"));
     let request = EngineReq::FdWrite(write);
     match endpoint
         .flow::<Msg<LABEL_WASI_FD_WRITE, EngineReq>>()
@@ -1757,7 +1543,7 @@ async fn core1_wasip1_fd_write<const ROLE: u8>(
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core1] send wasip1 fd_write"),
+        Err(_) => hard_stop("[core1] send wasip1 fd_write"),
     }
 
     let reply = match endpoint
@@ -1765,24 +1551,24 @@ async fn core1_wasip1_fd_write<const ROLE: u8>(
         .await
     {
         Ok(reply) => reply,
-        Err(_) => fail_closed("[core1] recv wasip1 fd_write ret"),
+        Err(_) => hard_stop("[core1] recv wasip1 fd_write ret"),
     };
     match reply {
         EngineRet::FdWriteDone(done) => {
             if done.fd() != WASI_STDOUT_FD || done.written() != chunk.len() as u8 {
-                fail_closed("[core1] wasip1 fd_write ret mismatch");
+                hard_stop("[core1] wasip1 fd_write ret mismatch");
             }
         }
-        EngineRet::Logged(_) => fail_closed("[core1] expected fd_write ret"),
-        EngineRet::Yielded => fail_closed("[core1] expected fd_write ret"),
-        EngineRet::Wasip1StdoutWritten(_) => fail_closed("[core1] expected fd_write ret"),
-        EngineRet::Wasip1StderrWritten(_) => fail_closed("[core1] expected fd_write ret"),
-        EngineRet::Wasip1StdinRead(_) => fail_closed("[core1] expected fd_write ret"),
-        EngineRet::Wasip1ClockNow(_) => fail_closed("[core1] expected fd_write ret"),
-        EngineRet::Wasip1RandomSeed(_) => fail_closed("[core1] expected fd_write ret"),
-        EngineRet::TimerSleepDone(_) => fail_closed("[core1] expected fd_write ret"),
-        EngineRet::GpioSetDone(_) => fail_closed("[core1] expected fd_write ret"),
-        _ => fail_closed("unexpected wasi p1 reply"),
+        EngineRet::Logged(_) => hard_stop("[core1] expected fd_write ret"),
+        EngineRet::Yielded => hard_stop("[core1] expected fd_write ret"),
+        EngineRet::Wasip1StdoutWritten(_) => hard_stop("[core1] expected fd_write ret"),
+        EngineRet::Wasip1StderrWritten(_) => hard_stop("[core1] expected fd_write ret"),
+        EngineRet::Wasip1StdinRead(_) => hard_stop("[core1] expected fd_write ret"),
+        EngineRet::Wasip1ClockNow(_) => hard_stop("[core1] expected fd_write ret"),
+        EngineRet::Wasip1RandomSeed(_) => hard_stop("[core1] expected fd_write ret"),
+        EngineRet::TimerSleepDone(_) => hard_stop("[core1] expected fd_write ret"),
+        EngineRet::GpioSetDone(_) => hard_stop("[core1] expected fd_write ret"),
+        _ => hard_stop("unexpected wasi p1 reply"),
     }
 
     let release = MemRelease::new(lease_id);
@@ -1793,30 +1579,28 @@ async fn core1_wasip1_fd_write<const ROLE: u8>(
         .await
     {
         Ok(_) => {}
-        Err(_) => fail_closed("[core1] send wasip1 mem release"),
+        Err(_) => hard_stop("[core1] send wasip1 mem release"),
     }
-    uart_line("[core1] wasip1 guest fd_write done");
+    uart::line("[core1] wasip1 guest fd_write done");
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 fn core0_main() -> ! {
-    uart_init();
-    uart_line("[core0] hibana pico2w cyw43439 swarm");
-    uart_line("[core0] init rp2350 + cyw43439 runtime");
+    uart::init();
+    uart::line("[core0] hibana pico2w cyw43439 swarm");
+    uart::line("[core0] init rp2350 + cyw43439 runtime");
     let (role, local_node, node_count) = init_radio_once();
     if role == cyw43439::NODE_ROLE_COORDINATOR {
         install_runtime_session(role, local_node, node_count);
         publish_runtime_ready();
         let endpoint = unsafe { shared_core0_endpoint() };
         run_current_task(core0_session(endpoint, node_count));
-        uart_hex_line(
+        uart::hex_line(
             "[core0] completed sensors 0x",
             node_count.saturating_sub(1) as u32,
         );
-        unsafe {
-            HIBANA_DEMO_RESULT = RESULT_SUCCESS;
-        }
-        uart_line("[core0] hibana pico2w cyw43439 swarm ok");
+        bringup::mark_result(result_ptr(), bringup::RESULT_SUCCESS);
+        uart::line("[core0] hibana pico2w cyw43439 swarm ok");
     } else if role == cyw43439::NODE_ROLE_SENSOR {
         install_runtime_session(role, local_node, node_count);
         publish_runtime_ready();
@@ -1825,17 +1609,15 @@ fn core0_main() -> ! {
         publish_runtime_ready();
         let endpoint = unsafe { shared_core0_endpoint() };
         run_current_task(core0_session(endpoint, node_count));
-        unsafe {
-            HIBANA_DEMO_RESULT = RESULT_SUCCESS;
-        }
-        uart_line("[core0] hibana pico2w cyw43439 swarm ok");
+        bringup::mark_result(result_ptr(), bringup::RESULT_SUCCESS);
+        uart::line("[core0] hibana pico2w cyw43439 swarm ok");
     }
     park();
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 fn core1_main() -> ! {
-    wait_until(|| unsafe { read_volatile(core::ptr::addr_of!(UART_READY)) } != 0);
+    wait_until(uart::ready);
     wait_until(|| unsafe { read_volatile(core::ptr::addr_of!(RUNTIME_READY)) } != 0);
     let role = unsafe { read_volatile(core::ptr::addr_of!(NODE_ROLE)) as u8 };
     let local_node = unsafe { NodeId::new(read_volatile(core::ptr::addr_of!(NODE_ID)) as u16) };
@@ -1844,7 +1626,7 @@ fn core1_main() -> ! {
         let sensor_role =
             fixed_sensor_hibana_role().unwrap_or_else(|| local_hibana_role(local_node, node_count));
         if local_hibana_role(local_node, node_count) != sensor_role {
-            fail_closed("[core1] fixed sensor role");
+            hard_stop("[core1] fixed sensor role");
         }
         match sensor_role {
             1 => run_current_task(core1_session(
@@ -1872,7 +1654,7 @@ fn core1_main() -> ! {
                 local_node,
                 node_count,
             )),
-            _ => fail_closed("[core1] sensor role"),
+            _ => hard_stop("[core1] sensor role"),
         }
     } else if role == cyw43439::NODE_ROLE_DUAL_CORE {
         let endpoint = unsafe { shared_core1_endpoint() };
@@ -1884,5 +1666,5 @@ fn core1_main() -> ! {
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
-    fail_closed("[panic]")
+    hard_stop("[panic]")
 }

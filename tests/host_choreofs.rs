@@ -6,7 +6,8 @@ use hibana_pico::{
             WASIP1_RIGHT_FD_READDIR, WASIP1_RIGHT_FD_WRITE, pico_rights_from_wasip1_base,
         },
         guest_ledger::{
-            GuestFdKind, GuestLedger, GuestLedgerError, GuestQuotaLimits, WasiErrnoMap, WasiProfile,
+            GuestFd, GuestFdKind, GuestLedger, GuestLedgerError, GuestQuotaLimits, WasiErrnoMap,
+            WasiProfile,
         },
         wasi::PicoFdError,
         wasi::{ChoreoResourceKind, PicoFdRights, PicoFdViewSource},
@@ -26,6 +27,81 @@ fn ledger() -> TestLedger {
     )
 }
 
+const TEST_CHOREOFS_PREOPEN_LANE: u8 = 7;
+const TEST_CHOREOFS_PREOPEN_ROUTE_LABEL: u8 = 0;
+const TEST_CHOREOFS_OBJECT_LANE: u8 = 8;
+const TEST_CHOREOFS_OBJECT_ROUTE_LABEL: u8 = 1;
+const TEST_CHOREOFS_DIRECTORY_ROUTE_LABEL: u8 = 2;
+
+fn grant_preopen(ledger: &mut TestLedger, fd: u8) -> Result<GuestFd, ChoreoFsError> {
+    Ok(ledger.apply_fd_cap_grant(
+        fd,
+        PicoFdRights::Read,
+        ChoreoResourceKind::PreopenRoot,
+        TEST_CHOREOFS_PREOPEN_LANE,
+        TEST_CHOREOFS_PREOPEN_ROUTE_LABEL,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )?)
+}
+
+fn route_label_for(resource: ChoreoResourceKind) -> u8 {
+    match resource {
+        ChoreoResourceKind::DirectoryView => TEST_CHOREOFS_DIRECTORY_ROUTE_LABEL,
+        _ => TEST_CHOREOFS_OBJECT_ROUTE_LABEL,
+    }
+}
+
+fn open_path_with_ledger(
+    store: &TestStore,
+    ledger: &mut TestLedger,
+    preopen_fd: u8,
+    new_fd: u8,
+    path: &[u8],
+    rights: PicoFdRights,
+) -> Result<GuestFd, ChoreoFsError> {
+    ledger.resolve_fd(
+        preopen_fd,
+        PicoFdRights::Read,
+        ChoreoResourceKind::PreopenRoot,
+    )?;
+    let opened = store.open(path, rights)?;
+    Ok(ledger.apply_fd_cap_mint(
+        new_fd,
+        rights,
+        opened.resource(),
+        TEST_CHOREOFS_OBJECT_LANE,
+        route_label_for(opened.resource()),
+        opened.object_id(),
+        0,
+        opened.object_id(),
+        0,
+        opened.generation(),
+        0,
+    )?)
+}
+
+fn mint_fd_after_choreofs_open_route(
+    store: &TestStore,
+    ledger: &mut TestLedger,
+    preopen_fd: u8,
+    new_fd: u8,
+    path: &[u8],
+    rights_base: u64,
+) -> Result<GuestFd, ChoreoFsError> {
+    open_path_with_ledger(
+        store,
+        ledger,
+        preopen_fd,
+        new_fd,
+        path,
+        pico_rights_from_wasip1_base(rights_base),
+    )
+}
+
 #[test]
 fn choreofs_path_open_mints_object_fd_and_uses_lease_backed_read() {
     let mut store = TestStore::new();
@@ -37,16 +113,20 @@ fn choreofs_path_open_mints_object_fd_and_uses_lease_backed_read() {
         .expect("install config object");
 
     let mut ledger = ledger();
-    let preopen = store
-        .grant_preopen_root(&mut ledger, 3)
-        .expect("grant preopen root");
+    let preopen = grant_preopen(&mut ledger, 3).expect("grant preopen root");
     assert_eq!(preopen.fd(), 3);
     assert_eq!(preopen.kind(), GuestFdKind::PreopenRoot);
     assert_eq!(preopen.source(), PicoFdViewSource::Grant);
 
-    let object_fd = store
-        .open_wasip1_path_with_ledger(&mut ledger, 3, 4, b"app/config", WASIP1_RIGHT_FD_READ)
-        .expect("open config object through manifest");
+    let object_fd = mint_fd_after_choreofs_open_route(
+        &store,
+        &mut ledger,
+        3,
+        4,
+        b"app/config",
+        WASIP1_RIGHT_FD_READ,
+    )
+    .expect("open config object through manifest");
     assert_eq!(object_fd.kind(), GuestFdKind::ChoreoObject);
     assert_eq!(object_fd.source(), PicoFdViewSource::Mint);
     let stat = store.stat_fd(object_fd).expect("stat opened object");
@@ -87,27 +167,25 @@ fn choreofs_config_and_append_log_are_bounded_minted_objects() {
         .expect("install append log");
 
     let mut ledger = ledger();
-    store
-        .grant_preopen_root(&mut ledger, 3)
-        .expect("grant preopen root");
-    let state_fd = store
-        .open_wasip1_path_with_ledger(
-            &mut ledger,
-            3,
-            4,
-            b"app/state",
-            WASIP1_RIGHT_FD_READ | WASIP1_RIGHT_FD_WRITE,
-        )
-        .expect("open config cell");
-    let log_fd = store
-        .open_wasip1_path_with_ledger(
-            &mut ledger,
-            3,
-            5,
-            b"app/events",
-            WASIP1_RIGHT_FD_READ | WASIP1_RIGHT_FD_WRITE,
-        )
-        .expect("open append log");
+    grant_preopen(&mut ledger, 3).expect("grant preopen root");
+    let state_fd = mint_fd_after_choreofs_open_route(
+        &store,
+        &mut ledger,
+        3,
+        4,
+        b"app/state",
+        WASIP1_RIGHT_FD_READ | WASIP1_RIGHT_FD_WRITE,
+    )
+    .expect("open config cell");
+    let log_fd = mint_fd_after_choreofs_open_route(
+        &store,
+        &mut ledger,
+        3,
+        5,
+        b"app/events",
+        WASIP1_RIGHT_FD_READ | WASIP1_RIGHT_FD_WRITE,
+    )
+    .expect("open append log");
 
     let grant = ledger
         .grant_read_lease(MemBorrow::new(64, 2, 1))
@@ -147,18 +225,16 @@ fn choreofs_gpio_device_object_mints_gpio_fd_without_data_path() {
         .expect("install GPIO device object");
 
     let mut ledger = ledger();
-    store
-        .grant_preopen_root(&mut ledger, 3)
-        .expect("grant preopen root");
-    let fd = store
-        .open_wasip1_path_with_ledger(
-            &mut ledger,
-            3,
-            4,
-            b"device/led/green",
-            WASIP1_RIGHT_FD_WRITE,
-        )
-        .expect("open GPIO device object");
+    grant_preopen(&mut ledger, 3).expect("grant preopen root");
+    let fd = mint_fd_after_choreofs_open_route(
+        &store,
+        &mut ledger,
+        3,
+        4,
+        b"device/led/green",
+        WASIP1_RIGHT_FD_WRITE,
+    )
+    .expect("open GPIO device object");
 
     assert_eq!(fd.kind(), GuestFdKind::Gpio);
     assert_eq!(fd.source(), PicoFdViewSource::Mint);
@@ -202,72 +278,94 @@ fn choreofs_plan_object_vocabulary_mints_resource_fds_without_data_authority() {
         .expect("install telemetry object");
 
     let mut ledger = ledger();
-    store
-        .grant_preopen_root(&mut ledger, 3)
-        .expect("grant preopen root");
+    grant_preopen(&mut ledger, 3).expect("grant preopen root");
 
-    let timer = store
-        .open_wasip1_path_with_ledger(&mut ledger, 3, 4, b"device/timer0", WASIP1_RIGHT_FD_READ)
-        .expect("open timer");
+    let timer = mint_fd_after_choreofs_open_route(
+        &store,
+        &mut ledger,
+        3,
+        4,
+        b"device/timer0",
+        WASIP1_RIGHT_FD_READ,
+    )
+    .expect("open timer");
     assert_eq!(timer.kind(), GuestFdKind::Timer);
 
-    let uart = store
-        .open_wasip1_path_with_ledger(&mut ledger, 3, 5, b"device/uart0", WASIP1_RIGHT_FD_WRITE)
-        .expect("open uart");
+    let uart = mint_fd_after_choreofs_open_route(
+        &store,
+        &mut ledger,
+        3,
+        5,
+        b"device/uart0",
+        WASIP1_RIGHT_FD_WRITE,
+    )
+    .expect("open uart");
     assert_eq!(uart.kind(), GuestFdKind::Uart);
 
-    let datagram = store
-        .open_wasip1_path_with_ledger(
-            &mut ledger,
-            3,
-            6,
-            b"net/datagram0",
-            WASIP1_RIGHT_FD_READ | WASIP1_RIGHT_FD_WRITE,
-        )
-        .expect("open datagram");
+    let datagram = mint_fd_after_choreofs_open_route(
+        &store,
+        &mut ledger,
+        3,
+        6,
+        b"net/datagram0",
+        WASIP1_RIGHT_FD_READ | WASIP1_RIGHT_FD_WRITE,
+    )
+    .expect("open datagram");
     assert_eq!(datagram.kind(), GuestFdKind::Datagram);
 
-    let stream = store
-        .open_wasip1_path_with_ledger(
-            &mut ledger,
-            3,
-            7,
-            b"net/stream0",
-            WASIP1_RIGHT_FD_READ | WASIP1_RIGHT_FD_WRITE,
-        )
-        .expect("open stream");
+    let stream = mint_fd_after_choreofs_open_route(
+        &store,
+        &mut ledger,
+        3,
+        7,
+        b"net/stream0",
+        WASIP1_RIGHT_FD_READ | WASIP1_RIGHT_FD_WRITE,
+    )
+    .expect("open stream");
     assert_eq!(stream.kind(), GuestFdKind::Stream);
 
-    let listener = store
-        .open_wasip1_path_with_ledger(&mut ledger, 3, 8, b"net/listener0", WASIP1_RIGHT_FD_READ)
-        .expect("open listener");
+    let listener = mint_fd_after_choreofs_open_route(
+        &store,
+        &mut ledger,
+        3,
+        8,
+        b"net/listener0",
+        WASIP1_RIGHT_FD_READ,
+    )
+    .expect("open listener");
     assert_eq!(listener.kind(), GuestFdKind::NetworkListener);
 
-    let remote = store
-        .open_wasip1_path_with_ledger(
-            &mut ledger,
-            3,
-            9,
-            b"remote/sensor0",
-            WASIP1_RIGHT_FD_READ | WASIP1_RIGHT_FD_WRITE,
-        )
-        .expect("open remote object");
+    let remote = mint_fd_after_choreofs_open_route(
+        &store,
+        &mut ledger,
+        3,
+        9,
+        b"remote/sensor0",
+        WASIP1_RIGHT_FD_READ | WASIP1_RIGHT_FD_WRITE,
+    )
+    .expect("open remote object");
     assert_eq!(remote.kind(), GuestFdKind::RemoteObject);
 
-    let management = store
-        .open_wasip1_path_with_ledger(
-            &mut ledger,
-            3,
-            10,
-            b"mgmt/update",
-            WASIP1_RIGHT_FD_READ | WASIP1_RIGHT_FD_WRITE,
-        )
-        .expect("open management object");
+    let management = mint_fd_after_choreofs_open_route(
+        &store,
+        &mut ledger,
+        3,
+        10,
+        b"mgmt/update",
+        WASIP1_RIGHT_FD_READ | WASIP1_RIGHT_FD_WRITE,
+    )
+    .expect("open management object");
     assert_eq!(management.kind(), GuestFdKind::Management);
 
-    let telemetry = store
-        .open_wasip1_path_with_ledger(&mut ledger, 3, 11, b"telemetry/log", WASIP1_RIGHT_FD_WRITE)
-        .expect("open telemetry object");
+    let telemetry = mint_fd_after_choreofs_open_route(
+        &store,
+        &mut ledger,
+        3,
+        11,
+        b"telemetry/log",
+        WASIP1_RIGHT_FD_WRITE,
+    )
+    .expect("open telemetry object");
     assert_eq!(telemetry.kind(), GuestFdKind::Telemetry);
 
     let mut out = [0u8; 4];
@@ -290,27 +388,25 @@ fn choreofs_image_slot_and_state_snapshot_are_bounded_storage_objects() {
         .expect("install state snapshot");
 
     let mut ledger = ledger();
-    store
-        .grant_preopen_root(&mut ledger, 3)
-        .expect("grant preopen root");
-    let image = store
-        .open_wasip1_path_with_ledger(
-            &mut ledger,
-            3,
-            4,
-            b"image/app0",
-            WASIP1_RIGHT_FD_READ | WASIP1_RIGHT_FD_WRITE,
-        )
-        .expect("open image slot");
-    let state = store
-        .open_wasip1_path_with_ledger(
-            &mut ledger,
-            3,
-            5,
-            b"state/last",
-            WASIP1_RIGHT_FD_READ | WASIP1_RIGHT_FD_WRITE,
-        )
-        .expect("open state snapshot");
+    grant_preopen(&mut ledger, 3).expect("grant preopen root");
+    let image = mint_fd_after_choreofs_open_route(
+        &store,
+        &mut ledger,
+        3,
+        4,
+        b"image/app0",
+        WASIP1_RIGHT_FD_READ | WASIP1_RIGHT_FD_WRITE,
+    )
+    .expect("open image slot");
+    let state = mint_fd_after_choreofs_open_route(
+        &store,
+        &mut ledger,
+        3,
+        5,
+        b"state/last",
+        WASIP1_RIGHT_FD_READ | WASIP1_RIGHT_FD_WRITE,
+    )
+    .expect("open state snapshot");
 
     assert_eq!(store.write(image, 0, b"ab"), Ok(2));
     assert_eq!(store.write(image, 2, b"cd"), Ok(2));
@@ -325,7 +421,7 @@ fn choreofs_image_slot_and_state_snapshot_are_bounded_storage_objects() {
 }
 
 #[test]
-fn choreofs_directory_view_and_path_normalization_fail_closed() {
+fn choreofs_directory_view_and_path_normalization_reject() {
     let mut store = TestStore::new();
     store.install_directory(b"app").expect("install app dir");
     store
@@ -339,12 +435,16 @@ fn choreofs_directory_view_and_path_normalization_fail_closed() {
         .expect("install non-child object");
 
     let mut ledger = ledger();
-    store
-        .grant_preopen_root(&mut ledger, 3)
-        .expect("grant preopen root");
-    let dir_fd = store
-        .open_wasip1_path_with_ledger(&mut ledger, 3, 4, b"app", WASIP1_RIGHT_FD_READDIR)
-        .expect("open directory view");
+    grant_preopen(&mut ledger, 3).expect("grant preopen root");
+    let dir_fd = mint_fd_after_choreofs_open_route(
+        &store,
+        &mut ledger,
+        3,
+        4,
+        b"app",
+        WASIP1_RIGHT_FD_READDIR,
+    )
+    .expect("open directory view");
     assert_eq!(dir_fd.kind(), GuestFdKind::DirectoryView);
     assert_eq!(
         store.stat_path(b"app/config").expect("stat path").size(),
@@ -368,12 +468,12 @@ fn choreofs_directory_view_and_path_normalization_fail_closed() {
     );
     assert_eq!(pico_rights_from_wasip1_base(0), PicoFdRights::None);
     assert_eq!(
-        store.open_wasip1_path_with_ledger(&mut ledger, 3, 6, b"app/config", 0),
+        mint_fd_after_choreofs_open_route(&store, &mut ledger, 3, 6, b"app/config", 0),
         Err(ChoreoFsError::PermissionDenied),
         "empty WASI rights must not silently become read authority"
     );
     assert_eq!(
-        store.open_with_ledger(&mut ledger, 3, 6, b"missing", PicoFdRights::Read),
+        open_path_with_ledger(&store, &mut ledger, 3, 6, b"missing", PicoFdRights::Read),
         Err(ChoreoFsError::NotFound)
     );
     assert_eq!(
