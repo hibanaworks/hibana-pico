@@ -247,7 +247,6 @@ mod rp2040_sio {
                     | ((outgoing.peer() as u32) << 16)
                     | (((bytes.len() as u32) & 0xff) << 8)
                     | outgoing.frame_label().raw() as u32;
-                super::record_choreofs_engine_error_code(code);
                 super::record_choreofs_sio_trace(code);
             }
             fifo::push_blocking(SIO_FRAME_MAGIC);
@@ -330,7 +329,6 @@ mod rp2040_sio {
                     | ((sender_role as u32) << 16)
                     | (((len as u32) & 0xff) << 8)
                     | frame_label.raw() as u32;
-                super::record_choreofs_engine_error_code(code);
                 super::record_choreofs_sio_trace(code);
             }
             let mut offset = 0usize;
@@ -564,26 +562,8 @@ pub const STAGE_WASI_ENGINE_ERROR: u32 = 0x4849_0f10;
 pub const STAGE_CHOREOFS_DRIVER_ERROR: u32 = 0x4849_0f11;
 pub const STAGE_CONTROL_FLOW_ERROR: u32 = 0x4849_0f12;
 
-#[cfg(feature = "wasm-engine-core")]
-pub const CHOREOFS_ENGINE_STARTED: u32 = 0x5741_0001;
 pub const CHOREOFS_DRIVER_STARTED: u32 = 0x5741_0010;
 pub const CHOREOFS_GPIO_READY: u32 = 0x5741_0020;
-#[cfg(feature = "wasm-engine-core")]
-pub const CHOREOFS_ENGINE_DRIVE_BEGIN: u32 = 0x5741_0201;
-#[cfg(feature = "wasm-engine-core")]
-pub const CHOREOFS_ENGINE_PATH_OPEN_DONE: u32 = 0x5741_0202;
-#[cfg(feature = "wasm-engine-core")]
-pub const CHOREOFS_ENGINE_LOOP_CONTINUE_BEGIN: u32 = 0x5741_0203;
-#[cfg(feature = "wasm-engine-core")]
-pub const CHOREOFS_ENGINE_LOOP_CONTINUE_DONE: u32 = 0x5741_0204;
-#[cfg(feature = "wasm-engine-core")]
-pub const CHOREOFS_ENGINE_CYCLE_DRIVE_BEGIN: u32 = 0x5741_0205;
-#[cfg(feature = "wasm-engine-core")]
-pub const CHOREOFS_ENGINE_CYCLE_DRIVE_DONE: u32 = 0x5741_0206;
-#[cfg(feature = "wasm-engine-core")]
-pub const CHOREOFS_ENGINE_DRIVE_DONE: u32 = 0x5741_0207;
-#[cfg(feature = "wasm-engine-core")]
-pub const CHOREOFS_ENGINE_OK: u32 = 0x5741_4f4b;
 const CHOREOFS_ENGINE_ERROR: u32 = 0x5741_4641;
 #[unsafe(no_mangle)]
 static mut HIBANA_DEMO_RESULT: u32 = 0;
@@ -695,8 +675,6 @@ const GPIO_FUNC_SIO: u32 = 5;
 const GPIO_PAD_DEFAULT: u32 = 0x56;
 
 const BAKER_SAFE_STATE_LED_PINS: [u8; 3] = [22, 21, 20];
-#[cfg(feature = "wasm-engine-core")]
-pub const BAKER_LINK_WASM_FUEL_PER_ACTIVATION: u32 = 1_000_000;
 pub trait BakerCapsuleFacts: appkit::Capsule<Placement = BakerPlacement> {
     type DriverArtifact;
     type EngineArtifact;

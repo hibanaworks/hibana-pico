@@ -32,7 +32,8 @@ use crate::choreography::protocol::{
     LABEL_WASI_RANDOM_GET, LABEL_WASI_RANDOM_GET_RET, LABEL_WASIP1_CLOCK_NOW,
     LABEL_WASIP1_CLOCK_NOW_RET, LABEL_WASIP1_EXIT, LABEL_WASIP1_RANDOM_SEED,
     LABEL_WASIP1_RANDOM_SEED_RET, LABEL_WASIP1_STDERR, LABEL_WASIP1_STDERR_RET, LABEL_WASIP1_STDIN,
-    LABEL_WASIP1_STDIN_RET, LABEL_WASIP1_STDOUT, LABEL_WASIP1_STDOUT_RET,
+    LABEL_WASIP1_STDIN_RET, LABEL_WASIP1_STDOUT, LABEL_WASIP1_STDOUT_RET, WasiImportLoopBreak,
+    WasiImportLoopContinue,
 };
 
 pub use crate::choreography::protocol::BuiltInLabelUniverse as BuiltInUniverse;
@@ -65,6 +66,8 @@ const APPKIT_EMBEDDED_ROLE1_FUTURE_BYTES: usize = 8 * 1024;
 const APPKIT_WASI_GUEST_ARENA_ALIGN: usize = 16;
 #[cfg(feature = "wasm-engine-core")]
 const APPKIT_WASI_GUEST_BYTES: usize = size_of::<crate::kernel::engine::wasm::Guest<'static>>();
+#[cfg(feature = "wasm-engine-core")]
+const APPKIT_DEFAULT_WASI_FUEL_PER_ACTIVATION: u32 = 1_000_000;
 /// Current typed hibana role domain: `Role<0>` through `Role<15>`.
 ///
 /// Raising this is a hibana representation change, not an appkit knob. The
@@ -778,6 +781,11 @@ pub trait LogicalImage<C: Capsule>: Sized {
     fn attach_storage() -> EmbeddedAttachStorageRef<'static>;
     #[cfg(feature = "wasm-engine-core")]
     fn wasi_guest_storage<'guest, const ROLE: u8>() -> WasiGuestStorage<'guest>;
+    #[cfg(feature = "wasm-engine-core")]
+    fn wasi_budget<const ROLE: u8>() -> BudgetRun {
+        core::hint::black_box(ROLE);
+        BudgetRun::new(1, 0, APPKIT_DEFAULT_WASI_FUEL_PER_ACTIVATION, 0)
+    }
     fn driver_facts() -> DriverFacts<'static> {
         DriverFacts::EMPTY
     }
@@ -944,7 +952,6 @@ pub enum WasiGuestStatus {
     Done,
     Exit(ProcExitStatus),
     BudgetExpired(BudgetExpired),
-    ImportLimitReached(u16),
 }
 
 #[cfg(feature = "wasm-engine-core")]
@@ -1899,7 +1906,7 @@ impl<'kit, 'tasks, 'cfg, 'guest, C, ImageTy, TransportTy, UniverseTy, ClockTy, c
 where
     C: Capsule + 'kit,
     C::Local: 'kit,
-    ImageTy: LogicalImage<C>,
+    ImageTy: LogicalImage<C> + 'kit,
     TransportTy: hibana::substrate::Transport + 'cfg,
     UniverseTy: hibana::substrate::runtime::LabelUniverse + 'cfg,
     ClockTy: hibana::substrate::runtime::Clock + 'cfg,
@@ -1938,14 +1945,43 @@ where
                 );
                 #[cfg(not(feature = "wasm-engine-core"))]
                 let ctx = EngineCtx::new(endpoint_ctx, self.endpoint_carrier, self.guest_artifact);
-                #[cfg(any(test, not(target_os = "none")))]
-                self.tasks
-                    .push(<C::Local as Localside<C>>::engine::<ROLE>(ctx));
-                #[cfg(all(not(test), target_os = "none"))]
-                poll_embedded_role_future::<ROLE, _>(
-                    ImageTy::REQUESTED_ROLES,
-                    <C::Local as Localside<C>>::engine::<ROLE>(ctx),
-                );
+                #[cfg(feature = "wasm-engine-core")]
+                {
+                    if self.guest_artifact.is_wasi() {
+                        #[cfg(any(test, not(target_os = "none")))]
+                        self.tasks
+                            .push(drive_canonical_wasi_engine::<C, ImageTy, ROLE>(ctx));
+                        #[cfg(all(not(test), target_os = "none"))]
+                        poll_embedded_role_future::<ROLE, _>(
+                            ImageTy::REQUESTED_ROLES,
+                            drive_canonical_wasi_engine::<C, ImageTy, ROLE>(ctx),
+                        );
+                    } else {
+                        #[cfg(any(test, not(target_os = "none")))]
+                        self.tasks
+                            .push(<C::Local as Localside<C>>::engine::<ROLE>(ctx));
+                        #[cfg(all(not(test), target_os = "none"))]
+                        poll_embedded_role_future::<ROLE, _>(
+                            ImageTy::REQUESTED_ROLES,
+                            <C::Local as Localside<C>>::engine::<ROLE>(ctx),
+                        );
+                    }
+                }
+                #[cfg(not(feature = "wasm-engine-core"))]
+                {
+                    assert!(
+                        !self.guest_artifact.is_wasi(),
+                        "WASI P1 logical image requires wasm-engine-core"
+                    );
+                    #[cfg(any(test, not(target_os = "none")))]
+                    self.tasks
+                        .push(<C::Local as Localside<C>>::engine::<ROLE>(ctx));
+                    #[cfg(all(not(test), target_os = "none"))]
+                    poll_embedded_role_future::<ROLE, _>(
+                        ImageTy::REQUESTED_ROLES,
+                        <C::Local as Localside<C>>::engine::<ROLE>(ctx),
+                    );
+                }
             }
             RoleKind::Driver => {
                 let ctx = DriverCtx::new(endpoint_ctx, self.endpoint_carrier, self.driver_facts);
@@ -2859,6 +2895,26 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
     }
 
     #[cfg(feature = "wasm-engine-core")]
+    async fn admit_wasi_import_loop_continue(&mut self) -> Result<(), WasiGuestError> {
+        let Ok(flow) = self.endpoint().flow::<WasiImportLoopContinue>() else {
+            return Ok(());
+        };
+        flow.send(())
+            .await
+            .map_err(|error| WasiGuestError::endpoint(0x5745_6100, error))
+    }
+
+    #[cfg(feature = "wasm-engine-core")]
+    async fn admit_wasi_import_loop_break(&mut self) -> Result<(), WasiGuestError> {
+        let Ok(flow) = self.endpoint().flow::<WasiImportLoopBreak>() else {
+            return Ok(());
+        };
+        flow.send(())
+            .await
+            .map_err(|error| WasiGuestError::endpoint(0x5745_6200, error))
+    }
+
+    #[cfg(feature = "wasm-engine-core")]
     fn protocol_fdstat_to_vm(
         stat: crate::choreography::protocol::FdStat,
     ) -> crate::kernel::engine::wasm::FdStat {
@@ -2875,31 +2931,9 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
     /// this role's typed endpoint, and completed only after the corresponding
     /// `EngineRet` is received through the endpoint/carrier path.
     #[cfg(feature = "wasm-engine-core")]
-    pub async fn drive_wasi_guest(
+    async fn drive_wasi_guest(
         &mut self,
         budget: BudgetRun,
-    ) -> Result<WasiGuestStatus, WasiGuestError> {
-        self.drive_wasi_guest_inner(budget, None).await
-    }
-
-    #[cfg(feature = "wasm-engine-core")]
-    pub async fn drive_wasi_guest_imports(
-        &mut self,
-        budget: BudgetRun,
-        import_limit: u16,
-    ) -> Result<WasiGuestStatus, WasiGuestError> {
-        if import_limit == 0 {
-            return Ok(WasiGuestStatus::ImportLimitReached(0));
-        }
-        self.drive_wasi_guest_inner(budget, Some(import_limit))
-            .await
-    }
-
-    #[cfg(feature = "wasm-engine-core")]
-    async fn drive_wasi_guest_inner(
-        &mut self,
-        budget: BudgetRun,
-        import_limit: Option<u16>,
     ) -> Result<WasiGuestStatus, WasiGuestError> {
         let Some(bytes) = self.guest_artifact.bytes() else {
             return Err(WasiGuestError::NoWasiArtifact);
@@ -2913,7 +2947,6 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 WasiGuestSlot::init(guest_storage, bytes).map_err(WasiGuestError::guest)?
             }
         };
-        let mut completed_imports = 0u16;
         let result = loop {
             let guest = guest_slot.guest();
             match guest.resume(budget) {
@@ -2927,6 +2960,9 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                     let Some(status) = exit.as_protocol_status() else {
                         break Err(WasiGuestError::ProtocolRejected);
                     };
+                    if let Err(error) = self.admit_wasi_import_loop_break().await {
+                        break Err(error);
+                    }
                     if let Err(error) = self
                         .endpoint_send::<LABEL_WASI_PROC_EXIT>(EngineReq::ProcExit(status))
                         .await
@@ -2936,21 +2972,18 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                     break Ok(WasiGuestStatus::Exit(status));
                 }
                 Ok(crate::kernel::engine::wasm::Event::Call(call)) => {
-                    if let Err(error) = self.drive_wasi_call(call).await {
+                    if let Err(error) = self.admit_wasi_import_loop_continue().await {
                         break Err(error);
                     }
-                    completed_imports = completed_imports.saturating_add(1);
-                    if let Some(limit) = import_limit
-                        && completed_imports >= limit
-                    {
-                        break Ok(WasiGuestStatus::ImportLimitReached(completed_imports));
+                    if let Err(error) = self.drive_wasi_call(call).await {
+                        break Err(error);
                     }
                 }
                 Err(error) => break Err(WasiGuestError::guest(error)),
             }
         };
         match result {
-            Ok(WasiGuestStatus::BudgetExpired(_)) | Ok(WasiGuestStatus::ImportLimitReached(_)) => {
+            Ok(WasiGuestStatus::BudgetExpired(_)) => {
                 self.guest_slot = Some(guest_slot);
             }
             Ok(WasiGuestStatus::Done) | Ok(WasiGuestStatus::Exit(_)) | Err(_) => {
@@ -3205,6 +3238,30 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
 
     pub async fn pending(self) -> core::convert::Infallible {
         core::future::pending::<core::convert::Infallible>().await
+    }
+}
+
+#[cfg(feature = "wasm-engine-core")]
+async fn drive_canonical_wasi_engine<'endpoint, 'guest, C, I, const ROLE: u8>(
+    mut ctx: EngineCtx<'endpoint, 'guest, C, ROLE>,
+) -> core::convert::Infallible
+where
+    C: Capsule,
+    I: LogicalImage<C>,
+{
+    loop {
+        match ctx.drive_wasi_guest(I::wasi_budget::<ROLE>()).await {
+            Ok(WasiGuestStatus::BudgetExpired(_)) => {}
+            Ok(WasiGuestStatus::Done) | Ok(WasiGuestStatus::Exit(_)) => {
+                return ctx.pending().await;
+            }
+            Err(error) => {
+                panic!(
+                    "canonical WASI P1 engine failed: 0x{:08x}",
+                    error.diagnostic_code()
+                );
+            }
+        }
     }
 }
 
@@ -4475,6 +4532,10 @@ mod tests {
         assert_eq!(report.attached_endpoint_count(), 2);
         assert_eq!(report.wasi_completion_pair_count(), 1);
         assert_eq!(RUN_BRIDGE_DRIVER_DONE.load(Ordering::SeqCst), 1);
-        assert_eq!(RUN_BRIDGE_ENGINE_DONE.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            RUN_BRIDGE_ENGINE_DONE.load(Ordering::SeqCst),
+            0,
+            "WASI P1 engine roles are driven by appkit, not user Localside::engine"
+        );
     }
 }

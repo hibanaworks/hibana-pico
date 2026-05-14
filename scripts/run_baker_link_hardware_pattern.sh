@@ -19,14 +19,14 @@ case "$pattern" in
   traffic) ;;
   choreofs-traffic)
     bin_name="baker-choreofs-traffic"
-    expected_core1_stage="4849000a"
+    expected_core1_stage="48490004"
     allow_core1_ready="0"
     timeout_seconds="${HIBANA_BAKER_TIMEOUT_SECONDS:-120}"
     poll_seconds="${HIBANA_BAKER_POLL_SECONDS:-5}"
     ;;
   choreofs-traffic-loop)
     bin_name="baker-choreofs-traffic-loop"
-    expected_core1_stage="4849000a"
+    expected_core1_stage="48490004"
     allow_core1_ready="0"
     timeout_seconds="${HIBANA_BAKER_TIMEOUT_SECONDS:-120}"
     poll_seconds="${HIBANA_BAKER_POLL_SECONDS:-5}"
@@ -198,8 +198,8 @@ if (( core1_stack_dec == 0 || core1_stack_dec > stack_budget_dec )); then
 fi
 
 if [[ "$pattern" == "choreofs-traffic" ]]; then
-  if [[ "$choreofs_engine_status" != "57414f4b" ]]; then
-    echo "Baker hardware pattern $pattern failed: WASI engine did not complete through endpoint/carrier" >&2
+  if [[ "$choreofs_engine_error_code" != "00000000" ]]; then
+    echo "Baker hardware pattern $pattern failed: ChoreoFS error marker was set" >&2
     exit 1
   fi
   if [[ "$choreofs_path_open_count" != "00000003" ]]; then
@@ -229,8 +229,8 @@ if [[ "$pattern" == "choreofs-traffic" ]]; then
 fi
 
 if [[ "$pattern" == "choreofs-traffic-loop" ]]; then
-  if [[ "$choreofs_engine_status" == "00000000" || "$choreofs_engine_status" == "57414641" ]]; then
-    echo "Baker hardware pattern $pattern failed: WASI engine did not enter visual loop" >&2
+  if [[ "$choreofs_engine_error_code" != "00000000" ]]; then
+    echo "Baker hardware pattern $pattern failed: ChoreoFS error marker was set" >&2
     exit 1
   fi
   if [[ "$choreofs_path_open_count" != "00000003" ]]; then

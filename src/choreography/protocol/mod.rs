@@ -4,8 +4,8 @@ use hibana::{
         cap::{
             CapShot, ControlResourceKind, GenericCapToken, ResourceKind,
             advanced::{
-                CAP_HANDLE_LEN, CapError, ControlOp, ControlPath, ControlScopeKind,
-                RouteDecisionKind, ScopeId,
+                CAP_HANDLE_LEN, CapError, ControlOp, ControlPath, ControlScopeKind, LoopBreakKind,
+                LoopContinueKind, RouteDecisionKind, ScopeId,
             },
         },
         ids::{Lane, SessionId},
@@ -23,6 +23,14 @@ mod management;
 pub use management::*;
 mod wasi;
 pub use wasi::*;
+
+pub type WasiImportLoopContinue = Msg<
+    { LABEL_WASI_IMPORT_LOOP_CONTINUE_CONTROL },
+    GenericCapToken<LoopContinueKind>,
+    LoopContinueKind,
+>;
+pub type WasiImportLoopBreak =
+    Msg<{ LABEL_WASI_IMPORT_LOOP_BREAK_CONTROL }, GenericCapToken<LoopBreakKind>, LoopBreakKind>;
 #[cfg(test)]
 mod tests {
     use super::{

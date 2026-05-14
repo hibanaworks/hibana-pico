@@ -50,16 +50,271 @@ const WASM_FD_WRITE_AND_READ: &[u8] = b"\0asm\x01\0\0\0\
     \x01\x04\x01\x60\x00\x00\
     \x02\x44\x02\x16wasi_snapshot_preview1\x08fd_write\x00\x00\
     \x16wasi_snapshot_preview1\x07fd_read\x00\x00";
-const WASM_FD_WRITE_AND_PATH_OPEN: &[u8] = b"\0asm\x01\0\0\0\
-    \x01\x04\x01\x60\x00\x00\
-    \x02\x46\x02\x16wasi_snapshot_preview1\x08fd_write\x00\x00\
-    \x16wasi_snapshot_preview1\x09path_open\x00\x00";
 const TEST_LOCAL_QUEUE_CARRIER: appkit::CarrierKind = appkit::CarrierKind::new(1001);
 const TEST_TCP: appkit::CarrierKind = appkit::CarrierKind::new(1002);
 const TEST_UART: appkit::CarrierKind = appkit::CarrierKind::new(1004);
 const TEST_CARRIER_ROLES: usize = appkit::HIBANA_TYPED_ROLE_DOMAIN_SIZE as usize;
 const TEST_CARRIER_QUEUE_DEPTH: usize = 16;
 const TEST_CARRIER_FRAME_BYTES: usize = 256;
+
+const SECTION_TYPE: u8 = 1;
+const SECTION_IMPORT: u8 = 2;
+const SECTION_FUNCTION: u8 = 3;
+const SECTION_MEMORY: u8 = 5;
+const SECTION_EXPORT: u8 = 7;
+const SECTION_CODE: u8 = 10;
+const SECTION_DATA: u8 = 11;
+const EXTERNAL_KIND_FUNC: u8 = 0;
+const VALTYPE_I32: u8 = 0x7f;
+const VALTYPE_I64: u8 = 0x7e;
+const OPCODE_I32_CONST: u8 = 0x41;
+const OPCODE_I64_CONST: u8 = 0x42;
+const OPCODE_CALL: u8 = 0x10;
+const OPCODE_DROP: u8 = 0x1a;
+const OPCODE_END: u8 = 0x0b;
+
+fn push_leb_u32(out: &mut Vec<u8>, mut value: u32) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
+}
+
+fn push_leb_i64(out: &mut Vec<u8>, value: i64) {
+    let mut value = value as u64;
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        let done = (value == 0 && byte & 0x40 == 0) || (value == !0 && byte & 0x40 != 0);
+        if !done {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if done {
+            break;
+        }
+    }
+}
+
+fn push_leb_i32(out: &mut Vec<u8>, value: i32) {
+    let mut value = value;
+    loop {
+        let byte = (value as u8) & 0x7f;
+        value >>= 7;
+        let done = (value == 0 && byte & 0x40 == 0) || (value == -1 && byte & 0x40 != 0);
+        out.push(if done { byte } else { byte | 0x80 });
+        if done {
+            break;
+        }
+    }
+}
+
+fn push_i32_const(out: &mut Vec<u8>, value: i32) {
+    out.push(OPCODE_I32_CONST);
+    push_leb_i32(out, value);
+}
+
+fn push_i64_const(out: &mut Vec<u8>, value: i64) {
+    out.push(OPCODE_I64_CONST);
+    push_leb_i64(out, value);
+}
+
+fn push_name(out: &mut Vec<u8>, name: &[u8]) {
+    push_leb_u32(out, name.len() as u32);
+    out.extend_from_slice(name);
+}
+
+fn push_section(module: &mut Vec<u8>, section: u8, bytes: &[u8]) {
+    module.push(section);
+    push_leb_u32(module, bytes.len() as u32);
+    module.extend_from_slice(bytes);
+}
+
+fn fd_write_guest_module() -> Vec<u8> {
+    let mut module = Vec::new();
+    module.extend_from_slice(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+
+    let mut types = Vec::new();
+    push_leb_u32(&mut types, 2);
+    types.push(0x60);
+    push_leb_u32(&mut types, 4);
+    types.extend_from_slice(&[VALTYPE_I32, VALTYPE_I32, VALTYPE_I32, VALTYPE_I32]);
+    push_leb_u32(&mut types, 1);
+    types.push(VALTYPE_I32);
+    types.push(0x60);
+    push_leb_u32(&mut types, 0);
+    push_leb_u32(&mut types, 0);
+    push_section(&mut module, SECTION_TYPE, &types);
+
+    let mut imports = Vec::new();
+    push_leb_u32(&mut imports, 1);
+    push_name(&mut imports, b"wasi_snapshot_preview1");
+    push_name(&mut imports, b"fd_write");
+    imports.push(EXTERNAL_KIND_FUNC);
+    push_leb_u32(&mut imports, 0);
+    push_section(&mut module, SECTION_IMPORT, &imports);
+
+    let mut functions = Vec::new();
+    push_leb_u32(&mut functions, 1);
+    push_leb_u32(&mut functions, 1);
+    push_section(&mut module, SECTION_FUNCTION, &functions);
+
+    push_section(&mut module, SECTION_MEMORY, &[0x01, 0x00, 0x01]);
+
+    let mut exports = Vec::new();
+    push_leb_u32(&mut exports, 1);
+    push_name(&mut exports, b"_start");
+    exports.push(EXTERNAL_KIND_FUNC);
+    push_leb_u32(&mut exports, 1);
+    push_section(&mut module, SECTION_EXPORT, &exports);
+
+    let mut body = Vec::new();
+    push_leb_u32(&mut body, 0);
+    push_i32_const(&mut body, 1);
+    push_i32_const(&mut body, 0);
+    push_i32_const(&mut body, 1);
+    push_i32_const(&mut body, 8);
+    body.push(OPCODE_CALL);
+    push_leb_u32(&mut body, 0);
+    body.push(OPCODE_DROP);
+    body.push(OPCODE_END);
+    let mut code = Vec::new();
+    push_leb_u32(&mut code, 1);
+    push_leb_u32(&mut code, body.len() as u32);
+    code.extend_from_slice(&body);
+    push_section(&mut module, SECTION_CODE, &code);
+
+    let mut segment = [0u8; 21];
+    segment[0..4].copy_from_slice(&16u32.to_le_bytes());
+    segment[4..8].copy_from_slice(&5u32.to_le_bytes());
+    segment[16..21].copy_from_slice(b"hello");
+    let mut data = Vec::new();
+    push_leb_u32(&mut data, 1);
+    push_leb_u32(&mut data, 0);
+    data.push(OPCODE_I32_CONST);
+    data.push(0);
+    data.push(OPCODE_END);
+    push_leb_u32(&mut data, segment.len() as u32);
+    data.extend_from_slice(&segment);
+    push_section(&mut module, SECTION_DATA, &data);
+
+    module
+}
+
+fn path_open_fd_write_guest_module() -> Vec<u8> {
+    let mut module = Vec::new();
+    module.extend_from_slice(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+
+    let mut types = Vec::new();
+    push_leb_u32(&mut types, 3);
+    types.push(0x60);
+    push_leb_u32(&mut types, 9);
+    types.extend_from_slice(&[
+        VALTYPE_I32,
+        VALTYPE_I32,
+        VALTYPE_I32,
+        VALTYPE_I32,
+        VALTYPE_I32,
+        VALTYPE_I64,
+        VALTYPE_I64,
+        VALTYPE_I32,
+        VALTYPE_I32,
+    ]);
+    push_leb_u32(&mut types, 1);
+    types.push(VALTYPE_I32);
+    types.push(0x60);
+    push_leb_u32(&mut types, 4);
+    types.extend_from_slice(&[VALTYPE_I32, VALTYPE_I32, VALTYPE_I32, VALTYPE_I32]);
+    push_leb_u32(&mut types, 1);
+    types.push(VALTYPE_I32);
+    types.push(0x60);
+    push_leb_u32(&mut types, 0);
+    push_leb_u32(&mut types, 0);
+    push_section(&mut module, SECTION_TYPE, &types);
+
+    let mut imports = Vec::new();
+    push_leb_u32(&mut imports, 2);
+    push_name(&mut imports, b"wasi_snapshot_preview1");
+    push_name(&mut imports, b"path_open");
+    imports.push(EXTERNAL_KIND_FUNC);
+    push_leb_u32(&mut imports, 0);
+    push_name(&mut imports, b"wasi_snapshot_preview1");
+    push_name(&mut imports, b"fd_write");
+    imports.push(EXTERNAL_KIND_FUNC);
+    push_leb_u32(&mut imports, 1);
+    push_section(&mut module, SECTION_IMPORT, &imports);
+
+    let mut functions = Vec::new();
+    push_leb_u32(&mut functions, 1);
+    push_leb_u32(&mut functions, 2);
+    push_section(&mut module, SECTION_FUNCTION, &functions);
+
+    push_section(&mut module, SECTION_MEMORY, &[0x01, 0x00, 0x01]);
+
+    let mut exports = Vec::new();
+    push_leb_u32(&mut exports, 1);
+    push_name(&mut exports, b"_start");
+    exports.push(EXTERNAL_KIND_FUNC);
+    push_leb_u32(&mut exports, 2);
+    push_section(&mut module, SECTION_EXPORT, &exports);
+
+    let mut body = Vec::new();
+    push_leb_u32(&mut body, 0);
+    push_i32_const(&mut body, 3);
+    push_i32_const(&mut body, 0);
+    push_i32_const(&mut body, 32);
+    push_i32_const(&mut body, 16);
+    push_i32_const(&mut body, 0);
+    push_i64_const(&mut body, 0x2);
+    push_i64_const(&mut body, 0);
+    push_i32_const(&mut body, 0);
+    push_i32_const(&mut body, 64);
+    body.push(OPCODE_CALL);
+    push_leb_u32(&mut body, 0);
+    body.push(OPCODE_DROP);
+    push_i32_const(&mut body, 4);
+    push_i32_const(&mut body, 0);
+    push_i32_const(&mut body, 1);
+    push_i32_const(&mut body, 80);
+    body.push(OPCODE_CALL);
+    push_leb_u32(&mut body, 1);
+    body.push(OPCODE_DROP);
+    body.push(OPCODE_END);
+    let mut code = Vec::new();
+    push_leb_u32(&mut code, 1);
+    push_leb_u32(&mut code, body.len() as u32);
+    code.extend_from_slice(&body);
+    push_section(&mut module, SECTION_CODE, &code);
+
+    let mut segment = [0u8; 48];
+    segment[0..4].copy_from_slice(&16u32.to_le_bytes());
+    segment[4..8].copy_from_slice(&8u32.to_le_bytes());
+    segment[16..24].copy_from_slice(b"green=on");
+    segment[32..48].copy_from_slice(b"device/led/green");
+    let mut data = Vec::new();
+    push_leb_u32(&mut data, 1);
+    push_leb_u32(&mut data, 0);
+    data.push(OPCODE_I32_CONST);
+    data.push(0);
+    data.push(OPCODE_END);
+    push_leb_u32(&mut data, segment.len() as u32);
+    data.extend_from_slice(&segment);
+    push_section(&mut module, SECTION_DATA, &data);
+
+    module
+}
+
+fn leak_wasm(mut module: Vec<u8>) -> &'static [u8] {
+    module.shrink_to_fit();
+    Box::leak(module.into_boxed_slice())
+}
 
 #[derive(Clone, Copy, Debug)]
 struct TestLocalFrame {
@@ -447,14 +702,33 @@ impl appkit::Localside<RichCapsule> for RichLocal {
     fn engine<'endpoint, 'guest, const ROLE: u8>(
         ctx: appkit::EngineCtx<'endpoint, 'guest, RichCapsule, ROLE>,
     ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        assert_eq!(ctx.guest_artifact().bytes(), Some(WASM_FD_WRITE));
         ctx.pending()
     }
 
     fn driver<'a, const ROLE: u8>(
         ctx: appkit::DriverCtx<'a, RichCapsule, ROLE>,
     ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        ctx.pending()
+        async move {
+            if ROLE == 1 {
+                let mut ctx = ctx;
+                let request = ctx
+                    .endpoint()
+                    .recv::<g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>()
+                    .await
+                    .expect("rich driver receives fd_write through endpoint");
+                let EngineReq::FdWrite(write) = request else {
+                    panic!("rich driver expected fd_write request");
+                };
+                let reply = EngineRet::FdWriteDone(FdWriteDone::new(write.fd(), write.len() as u8));
+                ctx.endpoint()
+                    .flow::<g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>>()
+                    .expect("rich driver opens fd_write reply flow")
+                    .send(&reply)
+                    .await
+                    .expect("rich driver replies to fd_write");
+            }
+            core::future::pending::<core::convert::Infallible>().await
+        }
     }
 
     fn boundary<'a, const ROLE: u8>(
@@ -678,44 +952,7 @@ impl appkit::Localside<ChoreoFsRuntimeCapsule> for ChoreoFsRuntimeLocal {
     fn engine<'endpoint, 'guest, const ROLE: u8>(
         ctx: appkit::EngineCtx<'endpoint, 'guest, ChoreoFsRuntimeCapsule, ROLE>,
     ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        async move {
-            assert_eq!(ROLE, 0);
-            assert_eq!(
-                ctx.guest_artifact().bytes(),
-                Some(WASM_FD_WRITE_AND_PATH_OPEN)
-            );
-            let mut ctx = ctx;
-            let open = EngineReq::PathOpen(
-                PathOpen::new(3, 0, 0x2, b"device/led/green").expect("path_open request"),
-            );
-            ctx.endpoint()
-                .flow::<g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>>()
-                .expect("engine path_open flow")
-                .send(&open)
-                .await
-                .expect("send path_open through endpoint");
-            let opened = ctx
-                .endpoint()
-                .recv::<g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>>()
-                .await
-                .expect("receive path_open reply through endpoint");
-            assert_eq!(opened, EngineRet::PathOpened(PathOpened::new(4, 0)));
-
-            let write = EngineReq::FdWrite(FdWrite::new(4, b"green=on").expect("fd_write"));
-            ctx.endpoint()
-                .flow::<g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>()
-                .expect("engine fd_write flow")
-                .send(&write)
-                .await
-                .expect("send fd_write through endpoint");
-            let written = ctx
-                .endpoint()
-                .recv::<g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>>()
-                .await
-                .expect("receive fd_write reply through endpoint");
-            assert_eq!(written, EngineRet::FdWriteDone(FdWriteDone::new(4, 8)));
-            ctx.pending().await
-        }
+        ctx.pending()
     }
 
     fn driver<'a, const ROLE: u8>(
@@ -1744,11 +1981,12 @@ fn run_polls_localside_for_attached_role_kinds() {
 #[test]
 fn choreofs_facts_are_consumed_by_driver_ctx_during_endpoint_progress() {
     let before = CHOREOFS_RUNTIME_COMPLETIONS.load(Ordering::SeqCst);
+    let wasm = leak_wasm(path_open_fd_write_guest_module());
     let report = appkit::run::<site::Local<image::ChoreoFsRuntime>, ChoreoFsRuntimeCapsule>(
-        appkit::WasiImage::from_static(WASM_FD_WRITE_AND_PATH_OPEN),
+        appkit::WasiImage::from_static(wasm),
     );
 
-    assert_eq!(report.artifact_len(), WASM_FD_WRITE_AND_PATH_OPEN.len());
+    assert_eq!(report.artifact_len(), wasm.len());
     assert_eq!(report.attached_endpoint_count(), 2);
     assert_eq!(
         report.endpoint_carrier().wasi_imports(),
@@ -1763,8 +2001,9 @@ fn choreofs_facts_are_consumed_by_driver_ctx_during_endpoint_progress() {
 
 #[test]
 fn run_takes_artifact_as_dynamic_input() {
+    let wasm = leak_wasm(fd_write_guest_module());
     let artifacts = RichArtifacts {
-        image: appkit::WasiImage::from_static(WASM_FD_WRITE),
+        image: appkit::WasiImage::from_static(wasm),
     };
     let image_artifact = <RichArtifacts<'static> as appkit::ArtifactBundle<RichCapsule>>::for_image::<
         site::Local<image::Composite>,
@@ -1790,7 +2029,7 @@ fn run_takes_artifact_as_dynamic_input() {
             supervisor: 0,
         }
     );
-    assert_eq!(report.artifact_len(), WASM_FD_WRITE.len());
+    assert_eq!(report.artifact_len(), wasm.len());
     let manifest = report.manifest();
     assert_eq!(manifest.logical_image_id, appkit::ImageId(44));
     assert_eq!(manifest.peer_image_count, 0);
@@ -1826,8 +2065,9 @@ fn run_takes_artifact_as_dynamic_input() {
 
 #[test]
 fn image_manifest_peer_attach_requires_mutual_identity_and_matching_shape() {
+    let wasm = leak_wasm(fd_write_guest_module());
     let artifacts = RichArtifacts {
-        image: appkit::WasiImage::from_static(WASM_FD_WRITE),
+        image: appkit::WasiImage::from_static(wasm),
     };
     let report = appkit::run::<site::Local<image::Composite>, RichCapsule>(
         <RichArtifacts<'static> as appkit::ArtifactBundle<RichCapsule>>::for_image::<
@@ -1854,8 +2094,9 @@ fn image_manifest_peer_attach_requires_mutual_identity_and_matching_shape() {
 
 #[test]
 fn run_returns_logical_image_exit_type() {
+    let wasm = leak_wasm(fd_write_guest_module());
     let artifacts = RichArtifacts {
-        image: appkit::WasiImage::from_static(WASM_FD_WRITE),
+        image: appkit::WasiImage::from_static(wasm),
     };
     let image_artifact = <RichArtifacts<'static> as appkit::ArtifactBundle<RichCapsule>>::for_image::<
         site::Local<image::WrappedExit>,
@@ -1865,7 +2106,7 @@ fn run_returns_logical_image_exit_type() {
 
     assert_eq!(wrapped.report.image_id(), appkit::ImageId(47));
     assert_eq!(wrapped.report.attached_endpoint_count(), 4);
-    assert_eq!(wrapped.report.artifact_len(), WASM_FD_WRITE.len());
+    assert_eq!(wrapped.report.artifact_len(), wasm.len());
 }
 
 #[test]
@@ -1953,11 +2194,12 @@ fn driver_facts_are_separate_from_progress_authority() {
     static FACTS: appkit::ObjectSpecSet<1> = appkit::ObjectSpecSet::new([LED_DEVICE]);
 
     let facts = FACTS.driver_facts();
+    let wasm = leak_wasm(fd_write_guest_module());
     let report = appkit::run::<site::Local<image::Composite>, RichCapsule>(
-        appkit::WasiImage::from_static(WASM_FD_WRITE),
+        appkit::WasiImage::from_static(wasm),
     );
 
-    assert_eq!(report.artifact_len(), WASM_FD_WRITE.len());
+    assert_eq!(report.artifact_len(), wasm.len());
     assert_eq!(report.endpoint_carrier().wasi_completion_pair_count(), 1);
     assert_eq!(
         report.endpoint_carrier().carrier(),

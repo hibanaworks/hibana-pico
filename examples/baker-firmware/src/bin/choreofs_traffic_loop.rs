@@ -4,20 +4,14 @@
 use core::convert::Infallible;
 
 use baker_firmware::{BakerArtifacts, BakerCapsuleFacts, BakerPlacement, DriverImage, EngineImage};
-use hibana::{
-    g,
-    substrate::cap::{
-        GenericCapToken,
-        advanced::{LoopBreakKind, LoopContinueKind},
-    },
-};
+use hibana::g;
 use hibana_pico::{
     appkit,
     choreography::protocol::{
-        BudgetRun, EngineReq, EngineRet, FdWrite, FdWriteDone, LABEL_WASI_FD_WRITE,
-        LABEL_WASI_FD_WRITE_RET, LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET,
-        LABEL_WASI_POLL_ONEOFF, LABEL_WASI_POLL_ONEOFF_RET, LABEL_WASI_PROC_EXIT, PathOpen,
-        PathOpened, PollReady,
+        EngineReq, EngineRet, FdWrite, FdWriteDone, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET,
+        LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF,
+        LABEL_WASI_POLL_ONEOFF_RET, LABEL_WASI_PROC_EXIT, PathOpen, PathOpened, PollReady,
+        WasiImportLoopBreak, WasiImportLoopContinue,
     },
 };
 
@@ -30,13 +24,6 @@ const RED_LED_MASK: u32 = 1 << 2;
 const LED_PREOPEN_FD: u8 = 9;
 const FD_WRITE_RIGHT: u64 = 1 << 6;
 const VISUAL_READY_CYCLES: u32 = 1;
-const LABEL_CHOREOFS_ROUTE_CONTINUE: u8 = 120;
-const LABEL_CHOREOFS_ROUTE_BREAK: u8 = 121;
-
-type ChoreoFsRouteContinue =
-    g::Msg<{ LABEL_CHOREOFS_ROUTE_CONTINUE }, GenericCapToken<LoopContinueKind>, LoopContinueKind>;
-type ChoreoFsRouteBreak =
-    g::Msg<{ LABEL_CHOREOFS_ROUTE_BREAK }, GenericCapToken<LoopBreakKind>, LoopBreakKind>;
 
 #[derive(Clone, Copy)]
 struct LedObject {
@@ -169,11 +156,11 @@ impl appkit::Capsule for ChoreoFsTrafficLoop {
         let admitted_cycle = || {
             g::route(
                 g::seq(
-                    g::send::<g::Role<1>, g::Role<1>, ChoreoFsRouteContinue, 1>(),
+                    g::send::<g::Role<1>, g::Role<1>, WasiImportLoopContinue, 1>(),
                     write_wait(),
                 ),
                 g::seq(
-                    g::send::<g::Role<1>, g::Role<1>, ChoreoFsRouteBreak, 1>(),
+                    g::send::<g::Role<1>, g::Role<1>, WasiImportLoopBreak, 1>(),
                     g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 1>(),
                 ),
             )
@@ -196,123 +183,9 @@ impl BakerCapsuleFacts for ChoreoFsTrafficLoop {
 
 impl appkit::Localside<ChoreoFsTrafficLoop> for ChoreoFsTrafficLoopLocal {
     fn engine<'endpoint, 'guest, const ROLE: u8>(
-        mut ctx: appkit::EngineCtx<'endpoint, 'guest, ChoreoFsTrafficLoop, ROLE>,
+        ctx: appkit::EngineCtx<'endpoint, 'guest, ChoreoFsTrafficLoop, ROLE>,
     ) -> impl core::future::Future<Output = Infallible> {
-        async move {
-            #[cfg(feature = "wasm-engine-core")]
-            {
-                if ROLE == 1 && ctx.artifact_len() != 0 {
-                    baker_firmware::record_choreofs_engine_status(
-                        baker_firmware::CHOREOFS_ENGINE_STARTED,
-                    );
-                    baker_firmware::record_choreofs_engine_status(
-                        baker_firmware::CHOREOFS_ENGINE_DRIVE_BEGIN,
-                    );
-                    let status = ctx
-                        .drive_wasi_guest_imports(
-                            BudgetRun::new(
-                                1,
-                                0,
-                                baker_firmware::BAKER_LINK_WASM_FUEL_PER_ACTIVATION,
-                                0,
-                            ),
-                            PATH_OPEN_STEPS.len() as u16,
-                        )
-                        .await;
-                    match status {
-                        Ok(appkit::WasiGuestStatus::ImportLimitReached(count))
-                            if count == PATH_OPEN_STEPS.len() as u16 => {}
-                        Ok(other) => {
-                            core::hint::black_box(other);
-                            baker_firmware::runtime_fail(baker_firmware::STAGE_WASI_ENGINE_ERROR);
-                        }
-                        Err(error) => {
-                            baker_firmware::record_choreofs_engine_error_code(
-                                error.diagnostic_code(),
-                            );
-                            baker_firmware::runtime_fail(baker_firmware::STAGE_WASI_ENGINE_ERROR);
-                        }
-                    }
-                    baker_firmware::record_choreofs_engine_status(
-                        baker_firmware::CHOREOFS_ENGINE_PATH_OPEN_DONE,
-                    );
-
-                    let mut cycle = 0u32;
-                    loop {
-                        let mut write_index = 0usize;
-                        while write_index < FD_WRITE_CYCLE.len() {
-                            baker_firmware::record_choreofs_engine_status(
-                                baker_firmware::CHOREOFS_ENGINE_LOOP_CONTINUE_BEGIN,
-                            );
-                            let flow = match ctx.endpoint().flow::<ChoreoFsRouteContinue>() {
-                                Ok(flow) => flow,
-                                Err(error) => {
-                                    core::hint::black_box(error);
-                                    baker_firmware::record_choreofs_engine_error_code(0x5745_6000);
-                                    baker_firmware::runtime_fail(
-                                        baker_firmware::STAGE_WASI_ENGINE_ERROR,
-                                    );
-                                }
-                            };
-                            if let Err(error) = flow.send(()).await {
-                                core::hint::black_box(error);
-                                baker_firmware::record_choreofs_engine_error_code(0x5745_7000);
-                                baker_firmware::runtime_fail(
-                                    baker_firmware::STAGE_WASI_ENGINE_ERROR,
-                                );
-                            }
-                            baker_firmware::record_choreofs_engine_status(
-                                baker_firmware::CHOREOFS_ENGINE_LOOP_CONTINUE_DONE,
-                            );
-
-                            baker_firmware::record_choreofs_engine_status(
-                                baker_firmware::CHOREOFS_ENGINE_CYCLE_DRIVE_BEGIN,
-                            );
-                            let status = ctx
-                                .drive_wasi_guest_imports(
-                                    BudgetRun::new(
-                                        1,
-                                        0,
-                                        baker_firmware::BAKER_LINK_WASM_FUEL_PER_ACTIVATION,
-                                        0,
-                                    ),
-                                    2,
-                                )
-                                .await;
-                            match status {
-                                Ok(appkit::WasiGuestStatus::ImportLimitReached(2)) => {}
-                                Ok(other) => {
-                                    core::hint::black_box(other);
-                                    baker_firmware::runtime_fail(
-                                        baker_firmware::STAGE_WASI_ENGINE_ERROR,
-                                    );
-                                }
-                                Err(error) => {
-                                    baker_firmware::record_choreofs_engine_error_code(
-                                        error.diagnostic_code(),
-                                    );
-                                    baker_firmware::runtime_fail(
-                                        baker_firmware::STAGE_WASI_ENGINE_ERROR,
-                                    );
-                                }
-                            }
-                            baker_firmware::record_choreofs_engine_status(
-                                baker_firmware::CHOREOFS_ENGINE_CYCLE_DRIVE_DONE,
-                            );
-                            write_index += 1usize;
-                        }
-                        cycle += 1;
-                        if cycle == VISUAL_READY_CYCLES {
-                            baker_firmware::record_choreofs_engine_status(
-                                baker_firmware::CHOREOFS_ENGINE_OK,
-                            );
-                            baker_firmware::mark_runtime_ready();
-                        }
-                    }
-                }
-            }
-            ctx.pending().await
-        }
+        ctx.pending()
     }
 
     fn driver<'a, const ROLE: u8>(
