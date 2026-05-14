@@ -5,11 +5,19 @@ AppKit Capsule refactor.
 
 ## Current Shape
 
-The Baker firmware is one physical Cargo artifact that contains two logical
-images:
+The Baker example package has a common library plus one bin target per hardware
+validation pattern. Each selected bin is one physical Cargo artifact, and that
+artifact contains two logical images:
 
 ```text
 examples/baker-firmware
+  src/lib.rs: shared Baker capsules, SIO carrier, markers, and reset support
+  src/bin/traffic.rs
+  src/bin/choreofs_traffic.rs
+  src/bin/choreofs_traffic_loop.rs
+  src/bin/fail_safe.rs
+  src/bin/recovery.rs
+  src/bin/many_reentry.rs
   Core0 logical image: site::Local<image::Driver>
   Core1 logical image: site::Local<image::Engine>
 ```
@@ -32,8 +40,9 @@ The current source map is:
 | --- | --- |
 | AppKit capsule/logical-image substrate | `src/appkit.rs` |
 | Generic site marker | `src/site.rs` |
-| Baker-local RP2040 SIO carrier | `examples/baker-firmware/src/main.rs` |
-| Baker physical firmware and proof capsules | `examples/baker-firmware/src/main.rs` |
+| Baker-local RP2040 SIO carrier | `examples/baker-firmware/src/lib.rs` |
+| Baker shared capsules and logical images | `examples/baker-firmware/src/lib.rs` |
+| Baker validation entrypoints | `examples/baker-firmware/src/bin/*.rs` |
 | WASI P1 ChoreoFS traffic guest | `apps/wasip1/wasip1-smoke-apps/src/bin/wasip1-led-choreofs-traffic-cycle.rs` |
 | WASI P1 guest build gate | `scripts/check_wasip1_guest_builds.sh` |
 | Hardware proof runner | `scripts/run_baker_link_hardware_pattern.sh` |
@@ -234,6 +243,7 @@ Build the WASI P1 guests and firmware:
 bash scripts/check_wasip1_guest_builds.sh
 
 cargo build -p baker-firmware \
+  --bin baker-choreofs-traffic-loop \
   --target thumbv6m-none-eabi \
   --release \
   --features "wasm-engine-core wasip1-sys-args-env wasip1-sys-fd-write wasip1-sys-path-open wasip1-sys-poll-oneoff wasip1-sys-proc-exit embed-wasip1-artifacts"
@@ -263,10 +273,10 @@ probe-rs gdb \
   --chip RP2040 \
   --non-interactive \
   --gdb arm-none-eabi-gdb \
-  target/thumbv6m-none-eabi/release/baker-firmware \
+  target/thumbv6m-none-eabi/release/baker-choreofs-traffic-loop \
   -- \
   --batch \
-  -ex "symbol-file target/thumbv6m-none-eabi/release/baker-firmware" \
+  -ex "symbol-file target/thumbv6m-none-eabi/release/baker-choreofs-traffic-loop" \
   -ex "info registers pc sp xpsr" \
   -ex "bt" \
   -ex "detach" \

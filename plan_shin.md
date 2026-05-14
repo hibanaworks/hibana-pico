@@ -685,7 +685,10 @@ workspace/
   examples/swarm-smoke-example/      # swarm smoke example package
 ```
 
-physical artifact の main は logical image を選んで `appkit::run` を呼ぶだけです。
+physical artifact package は、必要なら検証や配置ごとに複数の bin target
+を持ってよいです。共通実装は package-local `lib.rs` に置き、各 bin は
+その検証で使う Capsule / logical image split を選んで `appkit::run` を
+呼ぶだけにします。
 
 ```rust
 fn main() -> ! {
@@ -699,6 +702,7 @@ fn main() -> ! {
 
 ```text
 cargo build -p baker-firmware \
+  --bin baker-traffic \
   --target thumbv6m-none-eabi \
   --release
 cargo build -p linux-main \
@@ -1931,11 +1935,12 @@ Build:
 
 ```text
 cargo build -p baker-firmware \
+  --bin baker-traffic \
   --target thumbv6m-none-eabi \
   --release
 ```
 
-One physical artifact.
+One selected bin target is one physical artifact.
 Two logical images.
 Same choreography.
 Endpoint/carrier boundary still enforced.

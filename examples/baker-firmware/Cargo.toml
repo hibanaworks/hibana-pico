@@ -18,3 +18,27 @@ wasip1-sys-path-open = ["hibana-pico/wasip1-sys-path-open"]
 wasip1-sys-poll-oneoff = ["hibana-pico/wasip1-sys-poll-oneoff"]
 wasip1-sys-proc-exit = ["hibana-pico/wasip1-sys-proc-exit"]
 embed-wasip1-artifacts = []
+
+[[bin]]
+name = "baker-traffic"
+path = "src/bin/traffic.rs"
+
+[[bin]]
+name = "baker-choreofs-traffic"
+path = "src/bin/choreofs_traffic.rs"
+
+[[bin]]
+name = "baker-choreofs-traffic-loop"
+path = "src/bin/choreofs_traffic_loop.rs"
+
+[[bin]]
+name = "baker-fail-safe"
+path = "src/bin/fail_safe.rs"
+
+[[bin]]
+name = "baker-recovery"
+path = "src/bin/recovery.rs"
+
+[[bin]]
+name = "baker-many-reentry"
+path = "src/bin/many_reentry.rs"

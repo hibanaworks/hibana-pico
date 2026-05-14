@@ -1,12 +1,11 @@
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_std)]
-#![cfg_attr(all(target_arch = "arm", target_os = "none"), no_main)]
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 use core::{
     arch::{asm, global_asm},
     ptr::{read_volatile, write_volatile},
 };
-use core::{assert, assert_eq, option_env};
+use core::{assert, assert_eq};
 use hibana::{
     g,
     substrate::{
@@ -31,16 +30,17 @@ use hibana_pico::{
     site,
 };
 
-struct BakerTraffic;
-struct BakerChoreoFsTraffic;
-struct BakerFailSafe;
-struct BakerRecovery;
-struct BakerManyReentry;
-struct BakerPlacement;
-struct BakerControlLocal;
-struct BakerManyReentryLocal;
-struct BakerChoreoFsLocal;
-struct BakerArtifacts;
+pub struct BakerTraffic;
+pub struct BakerChoreoFsTraffic;
+pub struct BakerChoreoFsTrafficLoop;
+pub struct BakerFailSafe;
+pub struct BakerRecovery;
+pub struct BakerManyReentry;
+pub struct BakerPlacement;
+pub struct BakerControlLocal;
+pub struct BakerManyReentryLocal;
+pub struct BakerChoreoFsLocal;
+pub struct BakerArtifacts;
 
 mod image {
     pub struct Driver;
@@ -485,6 +485,7 @@ hard_fault_trampoline:
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 unsafe extern "C" {
     fn hard_fault_trampoline() -> !;
+    fn baker_selected_run() -> !;
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -728,20 +729,46 @@ trait BakerImageFacts {
     fn driver_facts() -> appkit::DriverFacts<'static> {
         appkit::DriverFacts::EMPTY
     }
-}
 
-fn choreofs_visual_loop_pattern() -> bool {
-    option_env!("HIBANA_BAKER_PATTERN") == Some("choreofs-traffic-loop")
+    fn choreofs_visual_loop() -> bool {
+        false
+    }
+
+    fn success_result() -> u32 {
+        RESULT_SUCCESS
+    }
 }
 
 impl BakerImageFacts for BakerTraffic {}
-impl BakerImageFacts for BakerFailSafe {}
-impl BakerImageFacts for BakerRecovery {}
-impl BakerImageFacts for BakerManyReentry {}
+impl BakerImageFacts for BakerFailSafe {
+    fn success_result() -> u32 {
+        RESULT_FAIL_SAFE_OK
+    }
+}
+impl BakerImageFacts for BakerRecovery {
+    fn success_result() -> u32 {
+        RESULT_RECOVERY_OK
+    }
+}
+impl BakerImageFacts for BakerManyReentry {
+    fn success_result() -> u32 {
+        RESULT_MANY_REENTRY_OK
+    }
+}
 
 impl BakerImageFacts for BakerChoreoFsTraffic {
     fn driver_facts() -> appkit::DriverFacts<'static> {
         BAKER_OBJECT_FACTS.driver_facts()
+    }
+}
+
+impl BakerImageFacts for BakerChoreoFsTrafficLoop {
+    fn driver_facts() -> appkit::DriverFacts<'static> {
+        BAKER_OBJECT_FACTS.driver_facts()
+    }
+
+    fn choreofs_visual_loop() -> bool {
+        true
     }
 }
 
@@ -809,6 +836,17 @@ impl appkit::Capsule for BakerChoreoFsTraffic {
             )
         };
         g::seq(path_open, admitted_cycle())
+    }
+}
+
+impl appkit::Capsule for BakerChoreoFsTrafficLoop {
+    type Universe = appkit::BuiltInUniverse;
+    type Placement = BakerPlacement;
+    type Local = BakerChoreoFsLocal;
+    type Report = core::convert::Infallible;
+
+    fn choreography() -> impl Projectable<Self::Universe> {
+        <BakerChoreoFsTraffic as appkit::Capsule>::choreography()
     }
 }
 
@@ -905,7 +943,7 @@ where
 
 impl<C> appkit::Localside<C> for BakerControlLocal
 where
-    C: appkit::Capsule<Local = BakerControlLocal>,
+    C: appkit::Capsule<Local = BakerControlLocal> + BakerImageFacts,
 {
     fn engine<'endpoint, 'guest, const ROLE: u8>(
         ctx: appkit::EngineCtx<'endpoint, 'guest, C, ROLE>,
@@ -950,7 +988,7 @@ where
 
 impl<C> appkit::Localside<C> for BakerManyReentryLocal
 where
-    C: appkit::Capsule<Local = BakerManyReentryLocal>,
+    C: appkit::Capsule<Local = BakerManyReentryLocal> + BakerImageFacts,
 {
     fn engine<'endpoint, 'guest, const ROLE: u8>(
         ctx: appkit::EngineCtx<'endpoint, 'guest, C, ROLE>,
@@ -997,7 +1035,7 @@ async fn baker_control_engine_one_cycle<C, const ROLE: u8>(
     mut ctx: appkit::EngineCtx<'_, '_, C, ROLE>,
 ) -> core::convert::Infallible
 where
-    C: appkit::Capsule<Local = BakerControlLocal>,
+    C: appkit::Capsule<Local = BakerControlLocal> + BakerImageFacts,
 {
     baker_engine_send_abort_begin(&mut ctx).await;
     baker_engine_send_abort_reason(&mut ctx, 1).await;
@@ -1011,7 +1049,7 @@ async fn baker_control_driver_one_cycle<C, const ROLE: u8>(
     mut ctx: appkit::DriverCtx<'_, C, ROLE>,
 ) -> core::convert::Infallible
 where
-    C: appkit::Capsule<Local = BakerControlLocal>,
+    C: appkit::Capsule<Local = BakerControlLocal> + BakerImageFacts,
 {
     baker_driver_recv_abort_begin(&mut ctx).await;
     baker_driver_recv_abort_reason(&mut ctx).await;
@@ -1019,7 +1057,7 @@ where
     baker_driver_send_abort_fence(&mut ctx).await;
     baker_driver_recv_abort_ack(&mut ctx).await;
     mark_stage(STAGE_RUNTIME_READY);
-    mark_result(pattern_success_result());
+    mark_result(C::success_result());
     core::future::pending::<core::convert::Infallible>().await
 }
 
@@ -1027,7 +1065,7 @@ async fn baker_many_reentry_engine<C, const ROLE: u8>(
     mut ctx: appkit::EngineCtx<'_, '_, C, ROLE>,
 ) -> core::convert::Infallible
 where
-    C: appkit::Capsule<Local = BakerManyReentryLocal>,
+    C: appkit::Capsule<Local = BakerManyReentryLocal> + BakerImageFacts,
 {
     baker_engine_send_abort_begin(&mut ctx).await;
     baker_engine_send_abort_reason(&mut ctx, 1).await;
@@ -1045,7 +1083,7 @@ async fn baker_many_reentry_driver<C, const ROLE: u8>(
     mut ctx: appkit::DriverCtx<'_, C, ROLE>,
 ) -> core::convert::Infallible
 where
-    C: appkit::Capsule<Local = BakerManyReentryLocal>,
+    C: appkit::Capsule<Local = BakerManyReentryLocal> + BakerImageFacts,
 {
     baker_driver_recv_abort_begin(&mut ctx).await;
     baker_driver_recv_abort_reason(&mut ctx).await;
@@ -1058,7 +1096,7 @@ where
     baker_driver_send_mem_fence(&mut ctx).await;
     baker_driver_recv_abort_ack(&mut ctx).await;
     mark_stage(STAGE_RUNTIME_READY);
-    mark_result(pattern_success_result());
+    mark_result(C::success_result());
     core::future::pending::<core::convert::Infallible>().await
 }
 
@@ -1203,7 +1241,7 @@ where
 
 impl<C> appkit::Localside<C> for BakerChoreoFsLocal
 where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal>,
+    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
 {
     fn engine<'endpoint, 'guest, const ROLE: u8>(
         ctx: appkit::EngineCtx<'endpoint, 'guest, C, ROLE>,
@@ -1254,7 +1292,7 @@ async fn baker_drive_wasi_engine<C, const ROLE: u8>(
     mut ctx: appkit::EngineCtx<'_, '_, C, ROLE>,
 ) -> core::convert::Infallible
 where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal>,
+    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
 {
     record_choreofs_engine_status(CHOREOFS_ENGINE_STARTED);
     record_choreofs_engine_status(CHOREOFS_ENGINE_DRIVE_BEGIN);
@@ -1277,7 +1315,7 @@ where
     }
     record_choreofs_engine_status(CHOREOFS_ENGINE_PATH_OPEN_DONE);
 
-    let visual_loop = choreofs_visual_loop_pattern();
+    let visual_loop = C::choreofs_visual_loop();
     let mut cycle = 0u32;
     loop {
         let mut write_index = 0u32;
@@ -1324,7 +1362,7 @@ where
 async fn baker_engine_resolve_choreofs_loop<C, const ROLE: u8>(
     ctx: &mut appkit::EngineCtx<'_, '_, C, ROLE>,
 ) where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal>,
+    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
 {
     record_choreofs_engine_status(CHOREOFS_ENGINE_LOOP_CONTINUE_BEGIN);
     let flow = match ctx.endpoint().flow::<BakerChoreoFsRouteContinue>() {
@@ -1347,7 +1385,7 @@ async fn baker_choreofs_driver<C, const ROLE: u8>(
     mut ctx: appkit::DriverCtx<'_, C, ROLE>,
 ) -> core::convert::Infallible
 where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal>,
+    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
 {
     reset_choreofs_markers();
     record_choreofs_engine_status(CHOREOFS_DRIVER_STARTED);
@@ -1360,7 +1398,7 @@ where
         (3u8, b"2".as_slice()),
         (3u8, b"4".as_slice()),
     ];
-    let visual_loop = choreofs_visual_loop_pattern();
+    let visual_loop = C::choreofs_visual_loop();
     let mut cycle = 0u32;
     loop {
         let mut index = 0usize;
@@ -1374,7 +1412,7 @@ where
         if visual_loop && cycle == CHOREOFS_VISUAL_READY_CYCLES {
             record_stack_high_water();
             mark_stage(STAGE_RUNTIME_READY);
-            mark_result(pattern_success_result());
+            mark_result(C::success_result());
         }
         if !visual_loop && cycle >= CHOREOFS_REENTRY_CYCLES {
             break;
@@ -1384,7 +1422,7 @@ where
     baker_driver_assert_choreofs_counts();
     record_stack_high_water();
     mark_stage(STAGE_RUNTIME_READY);
-    mark_result(pattern_success_result());
+    mark_result(C::success_result());
     core::future::pending::<core::convert::Infallible>().await
 }
 
@@ -1392,7 +1430,7 @@ async fn baker_recv_engine_req<C, const ROLE: u8, const LABEL: u8>(
     ctx: &mut appkit::DriverCtx<'_, C, ROLE>,
 ) -> EngineReq
 where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal>,
+    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
 {
     match ctx.endpoint().recv::<g::Msg<LABEL, EngineReq>>().await {
         Ok(request) => request,
@@ -1409,7 +1447,7 @@ async fn baker_offer_engine_req<C, const ROLE: u8, const LABEL: u8>(
     ctx: &mut appkit::DriverCtx<'_, C, ROLE>,
 ) -> EngineReq
 where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal>,
+    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
 {
     record_choreofs_driver_trace(0x5745_c000 | LABEL as u32);
     let branch = match ctx.endpoint().offer().await {
@@ -1445,7 +1483,7 @@ async fn baker_send_engine_ret<C, const ROLE: u8, const LABEL: u8>(
     ctx: &mut appkit::DriverCtx<'_, C, ROLE>,
     reply: EngineRet,
 ) where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal>,
+    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
 {
     let flow = match ctx.endpoint().flow::<g::Msg<LABEL, EngineRet>>() {
         Ok(flow) => flow,
@@ -1464,7 +1502,7 @@ async fn baker_driver_path_open<C, const ROLE: u8>(
     ctx: &mut appkit::DriverCtx<'_, C, ROLE>,
 ) -> appkit::LedgerFdFact
 where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal>,
+    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
 {
     let request = match baker_recv_engine_req::<C, ROLE, LABEL_WASI_PATH_OPEN>(ctx).await {
         EngineReq::PathOpen(request) => request,
@@ -1509,7 +1547,7 @@ async fn baker_driver_fd_write<C, const ROLE: u8>(
     expected_fd: u8,
     expected_payload: &[u8],
 ) where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal>,
+    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
 {
     let request = match baker_offer_engine_req::<C, ROLE, LABEL_WASI_FD_WRITE>(ctx).await {
         EngineReq::FdWrite(request) => request,
@@ -1527,7 +1565,7 @@ async fn baker_handle_fd_write<C, const ROLE: u8>(
     expected_fd: u8,
     expected_payload: &[u8],
 ) where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal>,
+    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
 {
     if request.fd() != expected_fd || request.as_bytes() != expected_payload {
         core::hint::black_box((request, expected_fd));
@@ -1568,7 +1606,7 @@ async fn baker_handle_fd_write<C, const ROLE: u8>(
 
 async fn baker_driver_poll_oneoff<C, const ROLE: u8>(ctx: &mut appkit::DriverCtx<'_, C, ROLE>)
 where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal>,
+    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
 {
     let request = match baker_recv_engine_req::<C, ROLE, LABEL_WASI_POLL_ONEOFF>(ctx).await {
         EngineReq::PollOneoff(request) => request,
@@ -1646,6 +1684,18 @@ impl appkit::ArtifactForImage<BakerChoreoFsTraffic, DriverImage> for BakerArtifa
 }
 
 impl appkit::ArtifactForImage<BakerChoreoFsTraffic, EngineImage> for BakerArtifacts {
+    fn artifact_for_image(&self) -> appkit::WasiImage<'static> {
+        appkit::WasiImage::from_static(WASM_CHOREOFS_TRAFFIC)
+    }
+}
+
+impl appkit::ArtifactForImage<BakerChoreoFsTrafficLoop, DriverImage> for BakerArtifacts {
+    fn artifact_for_image(&self) -> appkit::NoWasi {
+        appkit::NoWasi
+    }
+}
+
+impl appkit::ArtifactForImage<BakerChoreoFsTrafficLoop, EngineImage> for BakerArtifacts {
     fn artifact_for_image(&self) -> appkit::WasiImage<'static> {
         appkit::WasiImage::from_static(WASM_CHOREOFS_TRAFFIC)
     }
@@ -2186,6 +2236,78 @@ impl appkit::LogicalImage<BakerChoreoFsTraffic> for EngineImage {
     }
 }
 
+impl appkit::LogicalImage<BakerChoreoFsTrafficLoop> for DriverImage {
+    type Artifact = appkit::NoWasi;
+    type Exit<R> = appkit::RunReport<R, Self>;
+    type Carrier<'a> = rp2040_sio::SioTransport;
+
+    const IMAGE_ID: appkit::ImageId = appkit::ImageId(12);
+    const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
+    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(0);
+    const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
+    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(appkit::ImageId(13));
+
+    fn init() -> Self {
+        Self::new()
+    }
+
+    fn safe_state(&mut self) {
+        mark_safe_state();
+    }
+
+    fn carrier<'a>() -> Self::Carrier<'a> {
+        rp2040_sio::SioTransport::new()
+    }
+
+    #[cfg(all(target_arch = "arm", target_os = "none"))]
+    fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
+        baker_driver_attach_storage()
+    }
+
+    #[cfg(feature = "wasm-engine-core")]
+    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
+        baker_wasi_guest_storage::<ROLE>()
+    }
+
+    fn driver_facts() -> appkit::DriverFacts<'static> {
+        <BakerChoreoFsTrafficLoop as BakerImageFacts>::driver_facts()
+    }
+}
+
+impl appkit::LogicalImage<BakerChoreoFsTrafficLoop> for EngineImage {
+    type Artifact = appkit::WasiImage<'static>;
+    type Exit<R> = appkit::RunReport<R, Self>;
+    type Carrier<'a> = rp2040_sio::SioTransport;
+
+    const IMAGE_ID: appkit::ImageId = appkit::ImageId(13);
+    const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
+    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(1);
+    const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
+    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(appkit::ImageId(12));
+
+    fn init() -> Self {
+        Self::new()
+    }
+
+    fn safe_state(&mut self) {
+        mark_safe_state();
+    }
+
+    fn carrier<'a>() -> Self::Carrier<'a> {
+        rp2040_sio::SioTransport::new()
+    }
+
+    #[cfg(all(target_arch = "arm", target_os = "none"))]
+    fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
+        baker_engine_attach_storage()
+    }
+
+    #[cfg(feature = "wasm-engine-core")]
+    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
+        baker_wasi_guest_storage::<ROLE>()
+    }
+}
+
 impl appkit::LogicalImage<BakerFailSafe> for DriverImage {
     type Artifact = appkit::NoWasi;
     type Exit<R> = appkit::RunReport<R, Self>;
@@ -2392,16 +2514,7 @@ impl appkit::LogicalImage<BakerManyReentry> for EngineImage {
 
 static ARTIFACTS: BakerArtifacts = BakerArtifacts;
 
-fn pattern_success_result() -> u32 {
-    match option_env!("HIBANA_BAKER_PATTERN").unwrap_or("traffic") {
-        "fail-safe" => RESULT_FAIL_SAFE_OK,
-        "recovery" => RESULT_RECOVERY_OK,
-        "many-reentry" => RESULT_MANY_REENTRY_OK,
-        _ => RESULT_SUCCESS,
-    }
-}
-
-fn run_traffic() -> ! {
+pub fn run_traffic() -> ! {
     mark_stage(STAGE_RUNTIME_BEGIN);
     if rp2040_sio::core_id() == 0 {
         let mut report =
@@ -2423,11 +2536,11 @@ fn run_traffic() -> ! {
         <EngineImage as appkit::LogicalImage<BakerTraffic>>::safe_state(report.image_mut());
     }
     mark_stage(STAGE_RUNTIME_READY);
-    mark_result(pattern_success_result());
+    mark_result(RESULT_SUCCESS);
     park()
 }
 
-fn run_choreofs_traffic() -> ! {
+pub fn run_choreofs_traffic() -> ! {
     mark_stage(STAGE_RUNTIME_BEGIN);
     if rp2040_sio::core_id() == 0 {
         let report = appkit::run::<DriverImage, BakerChoreoFsTraffic>(appkit::NoWasi);
@@ -2441,11 +2554,29 @@ fn run_choreofs_traffic() -> ! {
         check_report(&report, 1);
     }
     mark_stage(STAGE_RUNTIME_READY);
-    mark_result(pattern_success_result());
+    mark_result(RESULT_SUCCESS);
     park()
 }
 
-fn run_fail_safe() -> ! {
+pub fn run_choreofs_traffic_loop() -> ! {
+    mark_stage(STAGE_RUNTIME_BEGIN);
+    if rp2040_sio::core_id() == 0 {
+        let report = appkit::run::<DriverImage, BakerChoreoFsTrafficLoop>(appkit::NoWasi);
+        check_report(&report, 0);
+    } else {
+        let report = appkit::run::<EngineImage, BakerChoreoFsTrafficLoop>(
+            <BakerArtifacts as appkit::ArtifactBundle<BakerChoreoFsTrafficLoop>>::for_image::<
+                EngineImage,
+            >(&ARTIFACTS),
+        );
+        check_report(&report, 1);
+    }
+    mark_stage(STAGE_RUNTIME_READY);
+    mark_result(RESULT_SUCCESS);
+    park()
+}
+
+pub fn run_fail_safe() -> ! {
     mark_stage(STAGE_RUNTIME_BEGIN);
     if rp2040_sio::core_id() == 0 {
         let mut report =
@@ -2467,11 +2598,11 @@ fn run_fail_safe() -> ! {
         <EngineImage as appkit::LogicalImage<BakerFailSafe>>::safe_state(report.image_mut());
     }
     mark_stage(STAGE_RUNTIME_READY);
-    mark_result(pattern_success_result());
+    mark_result(RESULT_FAIL_SAFE_OK);
     park()
 }
 
-fn run_recovery() -> ! {
+pub fn run_recovery() -> ! {
     mark_stage(STAGE_RUNTIME_BEGIN);
     if rp2040_sio::core_id() == 0 {
         let mut report =
@@ -2493,11 +2624,11 @@ fn run_recovery() -> ! {
         <EngineImage as appkit::LogicalImage<BakerRecovery>>::safe_state(report.image_mut());
     }
     mark_stage(STAGE_RUNTIME_READY);
-    mark_result(pattern_success_result());
+    mark_result(RESULT_RECOVERY_OK);
     park()
 }
 
-fn run_many_reentry() -> ! {
+pub fn run_many_reentry() -> ! {
     mark_stage(STAGE_RUNTIME_BEGIN);
     if rp2040_sio::core_id() == 0 {
         let mut report = appkit::run::<DriverImage, BakerManyReentry>(
@@ -2517,13 +2648,12 @@ fn run_many_reentry() -> ! {
         <EngineImage as appkit::LogicalImage<BakerManyReentry>>::safe_state(report.image_mut());
     }
     mark_stage(STAGE_RUNTIME_READY);
-    mark_result(pattern_success_result());
+    mark_result(RESULT_MANY_REENTRY_OK);
     park()
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-#[panic_handler]
-fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
+pub fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     let stage = info
         .location()
         .map(|location| 0x4c00_0000 | (location.line() & 0x0000_ffff))
@@ -2531,18 +2661,6 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     record_failure_stage(stage);
     mark_result(RESULT_FAILURE);
     park()
-}
-
-fn run_selected_pattern() -> ! {
-    match option_env!("HIBANA_BAKER_PATTERN").unwrap_or("traffic") {
-        "traffic" => run_traffic(),
-        "choreofs-traffic" => run_choreofs_traffic(),
-        "choreofs-traffic-loop" => run_choreofs_traffic(),
-        "fail-safe" => run_fail_safe(),
-        "recovery" => run_recovery(),
-        "many-reentry" => run_many_reentry(),
-        _ => run_traffic(),
-    }
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -2704,7 +2822,7 @@ unsafe extern "C" fn core1_entry() -> ! {
     mark_core1_started();
     event();
     mark_stage(STAGE_ENGINE_RUNTIME_READY_SEEN);
-    run_selected_pattern()
+    unsafe { baker_selected_run() }
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -2714,16 +2832,5 @@ pub unsafe extern "C" fn Reset() -> ! {
     mark_stage(STAGE_CORE0_START);
     ensure_core1_launched();
     mark_stage(STAGE_PROGRAM_READY);
-    run_selected_pattern()
-}
-
-#[cfg(not(all(target_arch = "arm", target_os = "none")))]
-fn main() {
-    run_selected_pattern()
-}
-
-#[cfg(all(target_arch = "arm", target_os = "none"))]
-#[unsafe(no_mangle)]
-pub extern "C" fn main() -> ! {
-    run_selected_pattern()
+    unsafe { baker_selected_run() }
 }

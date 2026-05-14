@@ -260,10 +260,17 @@ fn site_exposes_substrate_facts_not_protocol_authority() {
 
 #[test]
 fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
-    let baker = include_str!("../examples/baker-firmware/src/main.rs");
+    let baker = include_str!("../examples/baker-firmware/src/lib.rs");
+    let traffic_bin = include_str!("../examples/baker-firmware/src/bin/traffic.rs");
+    let choreofs_bin = include_str!("../examples/baker-firmware/src/bin/choreofs_traffic.rs");
+    let choreofs_loop_bin =
+        include_str!("../examples/baker-firmware/src/bin/choreofs_traffic_loop.rs");
+    let fail_safe_bin = include_str!("../examples/baker-firmware/src/bin/fail_safe.rs");
+    let recovery_bin = include_str!("../examples/baker-firmware/src/bin/recovery.rs");
+    let many_reentry_bin = include_str!("../examples/baker-firmware/src/bin/many_reentry.rs");
 
     assert_present(
-        "examples/baker-firmware/src/main.rs",
+        "examples/baker-firmware/src/lib.rs",
         baker,
         &[
             "rp2040_sio::core_id()",
@@ -274,6 +281,8 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "appkit::run::<EngineImage, BakerTraffic>",
             "appkit::run::<DriverImage, BakerChoreoFsTraffic>",
             "appkit::run::<EngineImage, BakerChoreoFsTraffic>",
+            "appkit::run::<DriverImage, BakerChoreoFsTrafficLoop>",
+            "appkit::run::<EngineImage, BakerChoreoFsTrafficLoop>",
             "appkit::run::<DriverImage, BakerFailSafe>",
             "appkit::run::<DriverImage, BakerRecovery>",
             "appkit::run::<DriverImage, BakerManyReentry>",
@@ -283,7 +292,7 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         ],
     );
     assert_absent(
-        "examples/baker-firmware/src/main.rs",
+        "examples/baker-firmware/src/lib.rs",
         baker,
         &[
             "RunCtx",
@@ -293,7 +302,46 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "direct syscall completion",
             "site::rp2040",
             "core::ptr::write_volatile(core::ptr::addr_of_mut!(HIBANA_DEMO_RESULT), stage)",
+            "option_env!(\"HIBANA_BAKER_PATTERN\")",
+            "run_selected_pattern",
+            "fn main()",
         ],
+    );
+    assert_present(
+        "examples/baker-firmware/src/bin/traffic.rs",
+        traffic_bin,
+        &["baker_selected_run", "baker_firmware::run_traffic()"],
+    );
+    assert_present(
+        "examples/baker-firmware/src/bin/choreofs_traffic.rs",
+        choreofs_bin,
+        &[
+            "baker_selected_run",
+            "baker_firmware::run_choreofs_traffic()",
+        ],
+    );
+    assert_present(
+        "examples/baker-firmware/src/bin/choreofs_traffic_loop.rs",
+        choreofs_loop_bin,
+        &[
+            "baker_selected_run",
+            "baker_firmware::run_choreofs_traffic_loop()",
+        ],
+    );
+    assert_present(
+        "examples/baker-firmware/src/bin/fail_safe.rs",
+        fail_safe_bin,
+        &["baker_selected_run", "baker_firmware::run_fail_safe()"],
+    );
+    assert_present(
+        "examples/baker-firmware/src/bin/recovery.rs",
+        recovery_bin,
+        &["baker_selected_run", "baker_firmware::run_recovery()"],
+    );
+    assert_present(
+        "examples/baker-firmware/src/bin/many_reentry.rs",
+        many_reentry_bin,
+        &["baker_selected_run", "baker_firmware::run_many_reentry()"],
     );
 }
 

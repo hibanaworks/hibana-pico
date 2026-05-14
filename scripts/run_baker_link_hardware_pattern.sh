@@ -11,24 +11,30 @@ features="${HIBANA_PICO_FEATURES:-wasm-engine-core wasip1-sys-args-env wasip1-sy
 expected_result="48494f4b"
 expected_core1_stage="48490004"
 allow_core1_ready="1"
+bin_name="baker-traffic"
 
 case "$pattern" in
   traffic) ;;
   choreofs-traffic)
+    bin_name="baker-choreofs-traffic"
     expected_core1_stage="4849000a"
     allow_core1_ready="0"
     ;;
   choreofs-traffic-loop)
+    bin_name="baker-choreofs-traffic-loop"
     expected_core1_stage="4849000a"
     allow_core1_ready="0"
     ;;
   fail-safe)
+    bin_name="baker-fail-safe"
     expected_result="48494653"
     ;;
   recovery)
+    bin_name="baker-recovery"
     expected_result="48495243"
     ;;
   many-reentry)
+    bin_name="baker-many-reentry"
     expected_result="4849524d"
     ;;
   *)
@@ -39,14 +45,14 @@ case "$pattern" in
 esac
 
 bash ./scripts/check_wasip1_guest_builds.sh
-export HIBANA_BAKER_PATTERN="$pattern"
 cargo build \
   --target "$target" \
   --release \
   -p "$package_name" \
+  --bin "$bin_name" \
   --features "$features"
 
-elf="target/$target/release/$package_name"
+elf="target/$target/release/$bin_name"
 
 probe-rs download \
   --chip RP2040 \
@@ -118,6 +124,7 @@ while :; do
 done
 
 printf 'pattern=%s\n' "$pattern"
+printf 'bin=%s\n' "$bin_name"
 printf 'features=%s\n' "$features"
 printf 'result_addr=%s result=0x%s expected=0x%s\n' "$result_addr" "$result" "$expected_result"
 printf 'stage_addr=%s stage=0x%s\n' "$stage_addr" "$stage"
