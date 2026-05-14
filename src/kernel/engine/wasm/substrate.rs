@@ -3,13 +3,6 @@ use crate::{
     kernel::features::{WASIP1_PREVIEW1_MODULE, Wasip1HandlerSet, Wasip1ImportName, Wasip1Syscall},
 };
 
-#[cfg(test)]
-use crate::choreography::protocol::EngineReq;
-#[cfg(test)]
-use crate::choreography::protocol::EngineRet;
-#[cfg(all(test, any(feature = "wasip1-sys-sock", feature = "wasm-engine-core")))]
-use crate::choreography::protocol::{FdRead, FdRequest, FdWrite};
-
 const WASM_MAGIC: [u8; 4] = [0x00, 0x61, 0x73, 0x6d];
 const WASM_VERSION: [u8; 4] = [0x01, 0x00, 0x00, 0x00];
 
@@ -215,76 +208,8 @@ const OPCODE_REF_FUNC: u8 = 0xd2;
 const OPCODE_MISC: u8 = 0xfc;
 const OPCODE_END: u8 = 0x0b;
 
-#[cfg(test)]
-const MAX_FUNC_TYPES: usize = 4;
-#[cfg(test)]
-const STACK_CAPACITY: usize = 8;
-#[cfg(test)]
-const LOG_IMPORT_INDEX: u32 = 0;
-#[cfg(test)]
-const YIELD_IMPORT_INDEX: u32 = 1;
-#[cfg(test)]
-const MIN_IMPORT_COUNT: u32 = 2;
-#[cfg(test)]
-const MAX_IMPORT_COUNT: u32 = 2;
-
 const SECTION_MEMORY: u8 = 5;
 const SECTION_GLOBAL: u8 = 6;
-const WASIP1_IMPORT_MODULE: &[u8] = WASIP1_PREVIEW1_MODULE.as_bytes();
-const WASIP1_IMPORT_FD_WRITE: &[u8] = Wasip1ImportName::FdWrite.name().as_bytes();
-const WASIP1_IMPORT_FD_READ: &[u8] = Wasip1ImportName::FdRead.name().as_bytes();
-const WASIP1_IMPORT_FD_FDSTAT_GET: &[u8] = Wasip1ImportName::FdFdstatGet.name().as_bytes();
-const WASIP1_IMPORT_FD_CLOSE: &[u8] = Wasip1ImportName::FdClose.name().as_bytes();
-const WASIP1_IMPORT_FD_PRESTAT_GET: &[u8] = Wasip1ImportName::FdPrestatGet.name().as_bytes();
-const WASIP1_IMPORT_FD_PRESTAT_DIR_NAME: &[u8] =
-    Wasip1ImportName::FdPrestatDirName.name().as_bytes();
-const WASIP1_IMPORT_FD_FILESTAT_GET: &[u8] = Wasip1ImportName::FdFilestatGet.name().as_bytes();
-const WASIP1_IMPORT_FD_READDIR: &[u8] = Wasip1ImportName::FdReaddir.name().as_bytes();
-const WASIP1_IMPORT_FD_ADVISE: &[u8] = Wasip1ImportName::FdAdvise.name().as_bytes();
-const WASIP1_IMPORT_FD_ALLOCATE: &[u8] = Wasip1ImportName::FdAllocate.name().as_bytes();
-const WASIP1_IMPORT_FD_DATASYNC: &[u8] = Wasip1ImportName::FdDatasync.name().as_bytes();
-const WASIP1_IMPORT_FD_FDSTAT_SET_FLAGS: &[u8] =
-    Wasip1ImportName::FdFdstatSetFlags.name().as_bytes();
-const WASIP1_IMPORT_FD_FDSTAT_SET_RIGHTS: &[u8] =
-    Wasip1ImportName::FdFdstatSetRights.name().as_bytes();
-const WASIP1_IMPORT_FD_FILESTAT_SET_SIZE: &[u8] =
-    Wasip1ImportName::FdFilestatSetSize.name().as_bytes();
-const WASIP1_IMPORT_FD_FILESTAT_SET_TIMES: &[u8] =
-    Wasip1ImportName::FdFilestatSetTimes.name().as_bytes();
-const WASIP1_IMPORT_FD_PREAD: &[u8] = Wasip1ImportName::FdPread.name().as_bytes();
-const WASIP1_IMPORT_FD_PWRITE: &[u8] = Wasip1ImportName::FdPwrite.name().as_bytes();
-const WASIP1_IMPORT_FD_RENUMBER: &[u8] = Wasip1ImportName::FdRenumber.name().as_bytes();
-const WASIP1_IMPORT_FD_SEEK: &[u8] = Wasip1ImportName::FdSeek.name().as_bytes();
-const WASIP1_IMPORT_FD_SYNC: &[u8] = Wasip1ImportName::FdSync.name().as_bytes();
-const WASIP1_IMPORT_FD_TELL: &[u8] = Wasip1ImportName::FdTell.name().as_bytes();
-const WASIP1_IMPORT_CLOCK_RES_GET: &[u8] = Wasip1ImportName::ClockResGet.name().as_bytes();
-const WASIP1_IMPORT_CLOCK_TIME_GET: &[u8] = Wasip1ImportName::ClockTimeGet.name().as_bytes();
-const WASIP1_IMPORT_POLL_ONEOFF: &[u8] = Wasip1ImportName::PollOneoff.name().as_bytes();
-const WASIP1_IMPORT_SCHED_YIELD: &[u8] = Wasip1ImportName::SchedYield.name().as_bytes();
-const WASIP1_IMPORT_PATH_OPEN: &[u8] = Wasip1ImportName::PathOpen.name().as_bytes();
-const WASIP1_IMPORT_PATH_FILESTAT_GET: &[u8] = Wasip1ImportName::PathFilestatGet.name().as_bytes();
-const WASIP1_IMPORT_PATH_READLINK: &[u8] = Wasip1ImportName::PathReadlink.name().as_bytes();
-const WASIP1_IMPORT_PATH_CREATE_DIRECTORY: &[u8] =
-    Wasip1ImportName::PathCreateDirectory.name().as_bytes();
-const WASIP1_IMPORT_PATH_REMOVE_DIRECTORY: &[u8] =
-    Wasip1ImportName::PathRemoveDirectory.name().as_bytes();
-const WASIP1_IMPORT_PATH_UNLINK_FILE: &[u8] = Wasip1ImportName::PathUnlinkFile.name().as_bytes();
-const WASIP1_IMPORT_PATH_RENAME: &[u8] = Wasip1ImportName::PathRename.name().as_bytes();
-const WASIP1_IMPORT_PATH_FILESTAT_SET_TIMES: &[u8] =
-    Wasip1ImportName::PathFilestatSetTimes.name().as_bytes();
-const WASIP1_IMPORT_PATH_LINK: &[u8] = Wasip1ImportName::PathLink.name().as_bytes();
-const WASIP1_IMPORT_PATH_SYMLINK: &[u8] = Wasip1ImportName::PathSymlink.name().as_bytes();
-const WASIP1_IMPORT_ARGS_GET: &[u8] = Wasip1ImportName::ArgsGet.name().as_bytes();
-const WASIP1_IMPORT_ARGS_SIZES_GET: &[u8] = Wasip1ImportName::ArgsSizesGet.name().as_bytes();
-const WASIP1_IMPORT_ENVIRON_GET: &[u8] = Wasip1ImportName::EnvironGet.name().as_bytes();
-const WASIP1_IMPORT_ENVIRON_SIZES_GET: &[u8] = Wasip1ImportName::EnvironSizesGet.name().as_bytes();
-const WASIP1_IMPORT_RANDOM_GET: &[u8] = Wasip1ImportName::RandomGet.name().as_bytes();
-const WASIP1_IMPORT_PROC_EXIT: &[u8] = Wasip1ImportName::ProcExit.name().as_bytes();
-const WASIP1_IMPORT_PROC_RAISE: &[u8] = Wasip1ImportName::ProcRaise.name().as_bytes();
-const WASIP1_IMPORT_SOCK_ACCEPT: &[u8] = Wasip1ImportName::SockAccept.name().as_bytes();
-const WASIP1_IMPORT_SOCK_RECV: &[u8] = Wasip1ImportName::SockRecv.name().as_bytes();
-const WASIP1_IMPORT_SOCK_SEND: &[u8] = Wasip1ImportName::SockSend.name().as_bytes();
-const WASIP1_IMPORT_SOCK_SHUTDOWN: &[u8] = Wasip1ImportName::SockShutdown.name().as_bytes();
 const WASM_MAX_DATA_SEGMENTS: usize = 8;
 #[cfg(test)]
 const TEST_RESUME_FUEL: u32 = 1024;
@@ -322,108 +247,14 @@ const WASIP1_EVENT_ERROR_OFFSET: u32 = 8;
 const WASIP1_EVENT_TYPE_OFFSET: u32 = 10;
 const WASIP1_EVENT_SIZE: usize = 32;
 #[cfg(test)]
-pub const WASIP1_FILETYPE_DIRECTORY: u8 = 3;
-#[cfg(test)]
 pub const WASIP1_FILETYPE_REGULAR_FILE: u8 = 4;
 pub const WASIP1_FDSTAT_SIZE: usize = 24;
 pub const WASIP1_FDSTAT_FILETYPE_OFFSET: u32 = 0;
 pub const WASIP1_FDSTAT_FLAGS_OFFSET: u32 = 2;
 pub const WASIP1_FDSTAT_RIGHTS_BASE_OFFSET: u32 = 8;
 pub const WASIP1_FDSTAT_RIGHTS_INHERITING_OFFSET: u32 = 16;
-#[cfg(test)]
-pub const WASIP1_PRESTAT_SIZE: usize = 8;
-#[cfg(test)]
-pub const WASIP1_PRESTAT_TAG_DIR: u8 = 0;
-#[cfg(test)]
-pub const WASIP1_PRESTAT_TAG_OFFSET: u32 = 0;
-#[cfg(test)]
-pub const WASIP1_PRESTAT_DIR_NAME_LEN_OFFSET: u32 = 4;
-#[cfg(test)]
-pub const WASIP1_FILESTAT_SIZE: usize = 64;
-#[cfg(test)]
-pub const WASIP1_FILESTAT_FILETYPE_OFFSET: u32 = 16;
-#[cfg(test)]
-pub const WASIP1_FILESTAT_SIZE_OFFSET: u32 = 32;
 
 type LinearMemory = [u8; CORE_WASM_MEMORY_SIZE];
-
-#[cfg(test)]
-const TEST_LOG_YIELD_WASM_GUEST: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60,
-    0x00, 0x00, 0x02, 0x25, 0x02, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61, 0x07, 0x6c, 0x6f, 0x67,
-    0x5f, 0x75, 0x33, 0x32, 0x00, 0x00, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61, 0x09, 0x79, 0x69,
-    0x65, 0x6c, 0x64, 0x5f, 0x6e, 0x6f, 0x77, 0x00, 0x01, 0x03, 0x02, 0x01, 0x01, 0x07, 0x0a, 0x01,
-    0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x02, 0x0a, 0x0e, 0x01, 0x0c, 0x00, 0x41, 0xc1,
-    0x84, 0xa5, 0xc2, 0x04, 0x10, 0x00, 0x10, 0x01, 0x0b,
-];
-
-#[cfg(test)]
-const ROUTE_WASM_NORMAL_VALUE: u32 = 0x0000_0031;
-#[cfg(test)]
-const ROUTE_WASM_ALERT_VALUE: u32 = 0x4849_4241;
-
-#[cfg(test)]
-const BAD_ROUTE_EARLY_YIELD_WASM_GUEST: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60,
-    0x00, 0x00, 0x02, 0x25, 0x02, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61, 0x07, 0x6c, 0x6f, 0x67,
-    0x5f, 0x75, 0x33, 0x32, 0x00, 0x00, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61, 0x09, 0x79, 0x69,
-    0x65, 0x6c, 0x64, 0x5f, 0x6e, 0x6f, 0x77, 0x00, 0x01, 0x03, 0x02, 0x01, 0x01, 0x07, 0x0a, 0x01,
-    0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x02, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x01,
-    0x0b,
-];
-
-#[cfg(test)]
-const TRAP_WASM_GUEST: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60,
-    0x00, 0x00, 0x02, 0x25, 0x02, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61, 0x07, 0x6c, 0x6f, 0x67,
-    0x5f, 0x75, 0x33, 0x32, 0x00, 0x00, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61, 0x09, 0x79, 0x69,
-    0x65, 0x6c, 0x64, 0x5f, 0x6e, 0x6f, 0x77, 0x00, 0x01, 0x03, 0x02, 0x01, 0x01, 0x07, 0x0a, 0x01,
-    0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x02, 0x0a, 0x05, 0x01, 0x03, 0x00, 0x00, 0x0b,
-];
-
-#[cfg(test)]
-const FUEL_EXHAUSTION_WASM_GUEST: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60,
-    0x00, 0x00, 0x02, 0x25, 0x02, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61, 0x07, 0x6c, 0x6f, 0x67,
-    0x5f, 0x75, 0x33, 0x32, 0x00, 0x00, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61, 0x09, 0x79, 0x69,
-    0x65, 0x6c, 0x64, 0x5f, 0x6e, 0x6f, 0x77, 0x00, 0x01, 0x03, 0x02, 0x01, 0x01, 0x07, 0x0a, 0x01,
-    0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x02, 0x0a, 0x13, 0x01, 0x11, 0x00, 0x01, 0x01,
-    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
-];
-
-#[cfg(test)]
-const NORMAL_WASM_GUEST: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60,
-    0x00, 0x00, 0x02, 0x25, 0x02, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61, 0x07, 0x6c, 0x6f, 0x67,
-    0x5f, 0x75, 0x33, 0x32, 0x00, 0x00, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61, 0x09, 0x79, 0x69,
-    0x65, 0x6c, 0x64, 0x5f, 0x6e, 0x6f, 0x77, 0x00, 0x01, 0x03, 0x02, 0x01, 0x01, 0x07, 0x0a, 0x01,
-    0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x02, 0x0a, 0x0a, 0x01, 0x08, 0x00, 0x41, 0x31,
-    0x10, 0x00, 0x10, 0x01, 0x0b,
-];
-
-#[cfg(test)]
-const ROUTE_WASM_GUEST: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60,
-    0x00, 0x00, 0x02, 0x25, 0x02, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61, 0x07, 0x6c, 0x6f, 0x67,
-    0x5f, 0x75, 0x33, 0x32, 0x00, 0x00, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61, 0x09, 0x79, 0x69,
-    0x65, 0x6c, 0x64, 0x5f, 0x6e, 0x6f, 0x77, 0x00, 0x01, 0x03, 0x02, 0x01, 0x01, 0x07, 0x0a, 0x01,
-    0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x02, 0x0a, 0x12, 0x01, 0x10, 0x00, 0x41, 0x31,
-    0x10, 0x00, 0x41, 0xc1, 0x84, 0xa5, 0xc2, 0x04, 0x10, 0x00, 0x10, 0x01, 0x0b,
-];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(test)]
-enum TestVmEvent {
-    HostCall(EngineReq),
-    Done,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(test)]
-enum TestBudgetedVmEvent {
-    Guest(TestVmEvent),
-    BudgetExpired(BudgetExpired),
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WasmError {
@@ -586,8 +417,13 @@ impl FuncType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Import<'a> {
     pub function_index: u32,
-    pub module: &'a [u8],
-    pub name: &'a [u8],
+    pub host: HostImport,
+    _module: core::marker::PhantomData<&'a [u8]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HostImport {
+    Wasip1(Wasip1ImportName),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -628,16 +464,13 @@ pub(super) enum VmEvent {
     ClockTimeGet(ClockTimeGetCall),
     PollOneoff(PollOneoffCall),
     RandomGet(RandomGetCall),
-    SchedYield,
-    PathMinimal(PathCall),
-    PathFull(PathCall),
-    Socket(SocketCall),
+    PathOpen(PathCall),
+    FdReaddir(PathCall),
     ArgsSizesGet(ArgsSizesGetCall),
     ArgsGet(ArgsGetCall),
     EnvironSizesGet(EnvironSizesGetCall),
     EnvironGet(EnvironGetCall),
     ProcExit(u32),
-    ProcRaise(u32),
     MemoryGrow(MemoryGrowEvent),
     BudgetExpired(BudgetExpired),
     Done,
@@ -645,78 +478,8 @@ pub(super) enum VmEvent {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PathOp {
-    FdPrestatGet,
-    FdPrestatDirName,
-    FdFilestatGet,
     FdReaddir,
-    FdAdvise,
-    FdAllocate,
-    FdDatasync,
-    FdFdstatSetFlags,
-    FdFdstatSetRights,
-    FdFilestatSetSize,
-    FdFilestatSetTimes,
-    FdPread,
-    FdPwrite,
-    FdRenumber,
-    FdSeek,
-    FdSync,
-    FdTell,
     PathOpen,
-    PathFilestatGet,
-    PathReadlink,
-    PathCreateDirectory,
-    PathRemoveDirectory,
-    PathUnlinkFile,
-    PathRename,
-    PathFilestatSetTimes,
-    PathLink,
-    PathSymlink,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SocketOp {
-    SockAccept,
-    SockRecv,
-    SockSend,
-    SockShutdown,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct SocketCall {
-    kind: SocketOp,
-    args: [Value; CORE_WASM_MAX_PARAMS],
-    arg_count: usize,
-}
-
-impl SocketCall {
-    #[cfg(test)]
-    pub(super) const fn kind(self) -> SocketOp {
-        self.kind
-    }
-
-    #[cfg(all(test, any(feature = "wasip1-sys-sock", feature = "wasm-engine-core")))]
-    fn args(&self) -> &[Value] {
-        &self.args[..self.arg_count]
-    }
-
-    #[cfg(test)]
-    fn arg_i32(&self, index: usize) -> Result<u32, WasmError> {
-        self.args
-            .get(index)
-            .copied()
-            .ok_or(WasmError::Invalid("socket import argument missing"))?
-            .as_i32()
-    }
-
-    #[cfg(test)]
-    pub(super) fn fd(&self) -> Result<u8, WasmError> {
-        let fd = self.arg_i32(0)?;
-        if fd > u8::MAX as u32 {
-            return Err(WasmError::Invalid("fd does not fit u8"));
-        }
-        Ok(fd as u8)
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -727,6 +490,7 @@ pub(super) struct PathCall {
 }
 
 impl PathCall {
+    #[cfg(test)]
     pub(super) const fn kind(self) -> PathOp {
         self.kind
     }
@@ -808,28 +572,6 @@ impl FdStat {
 
     pub const fn rights_inheriting(self) -> u64 {
         self.rights_inheriting
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(test)]
-pub struct FileStat {
-    filetype: u8,
-    size: u64,
-}
-
-#[cfg(test)]
-impl FileStat {
-    pub const fn new(filetype: u8, size: u64) -> Self {
-        Self { filetype, size }
-    }
-
-    pub const fn filetype(self) -> u8 {
-        self.filetype
-    }
-
-    pub const fn size(self) -> u64 {
-        self.size
     }
 }
 
@@ -975,23 +717,62 @@ struct CodeBody<'a> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct DataSegment<'a> {
-    active: bool,
-    offset: u32,
-    bytes: &'a [u8],
+enum Instr {
+    Nop,
+    Simple(u8),
+    U32(u8, u32),
+    CallIndirect { type_index: u32, table_index: u32 },
+    Mem { opcode: u8, offset: u32 },
+    I32Const(u32),
+    I64Const(u64),
+    F32Const(u32),
+    F64Const(u64),
+    BrTable(BrTableInstr),
+    Misc(MiscInstr),
+    Block(ControlInstr),
+    Loop(ControlInstr),
+    If(ControlInstr),
+    Else,
+    End,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ElementSegment {
-    functions: [u32; CORE_WASM_TABLE_CAPACITY],
-    function_count: usize,
+struct ControlInstr {
+    result_count: usize,
+    result_kind: ValueKind,
+    else_pos: u16,
+    end_pos: u16,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Global {
-    kind: ValueKind,
-    mutable: bool,
-    initial: Value,
+impl ControlInstr {
+    const NONE: u16 = u16::MAX;
+
+    const fn new(result_count: usize, result_kind: ValueKind) -> Self {
+        Self {
+            result_count,
+            result_kind,
+            else_pos: Self::NONE,
+            end_pos: Self::NONE,
+        }
+    }
+
+    const fn else_pos(self) -> usize {
+        if self.else_pos == Self::NONE {
+            usize::MAX
+        } else {
+            self.else_pos as usize
+        }
+    }
+
+    fn end(self) -> Result<usize, WasmError> {
+        if self.end_pos == Self::NONE {
+            Err(WasmError::Invalid(
+                "decoded control instruction missing end",
+            ))
+        } else {
+            Ok(self.end_pos as usize)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1021,22 +802,63 @@ impl CoreControlTarget {
     const fn start(self) -> usize {
         self.start_pos as usize
     }
+}
 
-    const fn else_pos(self) -> usize {
-        if self.else_pos == Self::NONE {
-            usize::MAX
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BrTableInstr {
+    labels: [u16; CORE_WASM_BR_TABLE_CAPACITY],
+    label_count: u8,
+    default: u16,
+}
+
+impl BrTableInstr {
+    const EMPTY: Self = Self {
+        labels: [0; CORE_WASM_BR_TABLE_CAPACITY],
+        label_count: 0,
+        default: 0,
+    };
+
+    const fn selected_depth(self, selected: usize) -> usize {
+        if selected < self.label_count as usize {
+            self.labels[selected] as usize
         } else {
-            self.else_pos as usize
+            self.default as usize
         }
     }
+}
 
-    fn end(self) -> Result<usize, WasmError> {
-        if self.end_pos == Self::NONE {
-            Err(WasmError::Invalid("core control target missing end"))
-        } else {
-            Ok(self.end_pos as usize)
-        }
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MiscInstr {
+    MemoryInit { data_index: usize },
+    DataDrop { data_index: usize },
+    MemoryCopy,
+    MemoryFill,
+    TableInit { elem_index: usize, table_index: u32 },
+    ElemDrop { elem_index: usize },
+    TableCopy { dst_table: u32, src_table: u32 },
+    TableGrow { table_index: u32 },
+    TableSize { table_index: u32 },
+    TableFill { table_index: u32 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DataSegment<'a> {
+    active: bool,
+    offset: u32,
+    bytes: &'a [u8],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ElementSegment {
+    functions: [u32; CORE_WASM_TABLE_CAPACITY],
+    function_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Global {
+    kind: ValueKind,
+    mutable: bool,
+    initial: Value,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1131,38 +953,6 @@ pub(super) struct Vm<'a> {
 }
 
 static EMPTY_MODULE: Module<'static> = Module::empty();
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-#[cfg(test)]
-enum FuncSig {
-    #[default]
-    Unsupported,
-    I32ToUnit,
-    UnitToUnit,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(test)]
-enum PendingHostCall {
-    LogU32(u32),
-    Yield,
-}
-
-#[derive(Clone, Copy)]
-#[cfg(test)]
-struct TestWasmModule<'a> {
-    start_body: &'a [u8],
-}
-
-#[cfg(test)]
-struct TestWasmInstance<'a> {
-    code: &'a [u8],
-    pc: usize,
-    stack: [i32; STACK_CAPACITY],
-    stack_len: usize,
-    pending: Option<PendingHostCall>,
-    done: bool,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct FdWriteCall {
@@ -1343,13 +1133,6 @@ impl<'a> Module<'a> {
         }
     }
 
-    #[cfg(test)]
-    fn parse(bytes: &'a [u8]) -> Result<Self, WasmError> {
-        let mut module = Self::empty();
-        module.parse_from(bytes)?;
-        Ok(module)
-    }
-
     unsafe fn parse_in_place(dst: *mut Self, bytes: &'a [u8]) -> Result<(), WasmError> {
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -1417,16 +1200,6 @@ impl<'a> Module<'a> {
         Ok(())
     }
 
-    #[cfg(test)]
-    fn instantiate(self) -> Result<Interpreter<'a>, WasmError> {
-        let mut interpreter = core::mem::MaybeUninit::<Interpreter<'a>>::uninit();
-        unsafe {
-            core::ptr::addr_of_mut!((*interpreter.as_mut_ptr()).module).write(self);
-            Interpreter::init_from_parsed_module_in_place(interpreter.as_mut_ptr())?;
-            Ok(interpreter.assume_init())
-        }
-    }
-
     fn parse_core_type_section(&mut self, section: &mut Reader<'a>) -> Result<(), WasmError> {
         let count = section.read_var_u32()? as usize;
         if count > CORE_WASM_MAX_TYPES {
@@ -1469,6 +1242,7 @@ impl<'a> Module<'a> {
         for index in 0..count {
             let module = section.read_name()?;
             let name = section.read_name()?;
+            let host = decode_host_import(module, name)?;
             if section.read_u8()? != EXTERNAL_KIND_FUNC {
                 return Err(WasmError::Unsupported(
                     "core wasm only supports function imports",
@@ -1478,8 +1252,8 @@ impl<'a> Module<'a> {
             self.core_func_type(type_index)?;
             self.imports[index] = Some(Import {
                 function_index: index as u32,
-                module,
-                name,
+                host,
+                _module: core::marker::PhantomData,
             });
             self.import_type_indices[index] = type_index;
         }
@@ -1918,6 +1692,15 @@ fn parse_core_i32_offset_expr(section: &mut Reader<'_>) -> Result<i32, WasmError
     Ok(offset)
 }
 
+fn decode_host_import(module: &[u8], name: &[u8]) -> Result<HostImport, WasmError> {
+    if module != WASIP1_PREVIEW1_MODULE.as_bytes() {
+        return Err(WasmError::Unsupported("unsupported host import module"));
+    }
+    let name = Wasip1ImportName::from_bytes(name)
+        .ok_or(WasmError::Unsupported("unsupported wasi p1 import"))?;
+    Ok(HostImport::Wasip1(name))
+}
+
 fn decode_core_block_type(byte: u8) -> Result<(usize, ValueKind), WasmError> {
     if byte == WASM_BLOCKTYPE_EMPTY {
         Ok((0, ValueKind::I32))
@@ -1963,7 +1746,7 @@ fn decode_core_control_targets(
                 let target = targets
                     .get_mut(target_index)
                     .ok_or(WasmError::Invalid("core control target missing"))?;
-                if target.else_pos != CoreControlTarget::NONE {
+                if target.else_pos != ControlInstr::NONE {
                     return Err(WasmError::Invalid("duplicate else"));
                 }
                 target.else_pos = u16::try_from(opcode_pos)
@@ -1998,95 +1781,11 @@ fn decode_core_control_targets(
     Ok(count)
 }
 
-fn validate_core_wasip1_imports(
-    module: &Module<'_>,
-    handlers: Wasip1HandlerSet,
-) -> Result<(), WasmError> {
-    for import in module
-        .imports
-        .iter()
-        .copied()
-        .flatten()
-        .take(module.import_count)
-    {
-        if import.module != WASIP1_IMPORT_MODULE {
-            continue;
-        }
-        let name = Wasip1ImportName::from_bytes(import.name)
-            .ok_or(WasmError::Unsupported("unsupported wasi p1 import"))?;
-        if !handlers.supports(name.syscall()) {
-            return Err(WasmError::Unsupported(disabled_wasip1_import_message(name)));
-        }
-    }
-    Ok(())
-}
-
-fn disabled_wasip1_import_message(name: Wasip1ImportName) -> &'static str {
-    match name.syscall() {
-        Wasip1Syscall::PathMinimal => {
-            return "wasip1 path-minimal disabled by feature profile";
-        }
-        Wasip1Syscall::PathFull => return "wasip1 path-full disabled by feature profile",
-        Wasip1Syscall::NetworkObject => {
-            return "wasip1 NetworkObject imports disabled by feature profile";
-        }
-        Wasip1Syscall::ArgsEnv => return "wasip1 args/env disabled by feature profile",
-        _ => {}
-    }
-    match name {
-        Wasip1ImportName::FdWrite => "wasip1 fd_write disabled by feature profile",
-        Wasip1ImportName::FdRead => "wasip1 fd_read disabled by feature profile",
-        Wasip1ImportName::FdFdstatGet => "wasip1 fd_fdstat_get disabled by feature profile",
-        Wasip1ImportName::FdClose => "wasip1 fd_close disabled by feature profile",
-        Wasip1ImportName::PollOneoff => "wasip1 poll_oneoff disabled by feature profile",
-        Wasip1ImportName::ProcExit => "wasip1 proc_exit disabled by feature profile",
-        Wasip1ImportName::ProcRaise => "wasip1 proc_raise disabled by feature profile",
-        Wasip1ImportName::SchedYield => "wasip1 sched_yield disabled by feature profile",
-        Wasip1ImportName::ClockResGet => "wasip1 clock_res_get disabled by feature profile",
-        Wasip1ImportName::ClockTimeGet => "wasip1 clock_time_get disabled by feature profile",
-        Wasip1ImportName::RandomGet => "wasip1 random_get disabled by feature profile",
-        Wasip1ImportName::SockAccept
-        | Wasip1ImportName::SockRecv
-        | Wasip1ImportName::SockSend
-        | Wasip1ImportName::SockShutdown => unreachable!(),
-        Wasip1ImportName::ArgsGet
-        | Wasip1ImportName::ArgsSizesGet
-        | Wasip1ImportName::EnvironGet
-        | Wasip1ImportName::EnvironSizesGet => unreachable!(),
-        Wasip1ImportName::FdAdvise
-        | Wasip1ImportName::FdAllocate
-        | Wasip1ImportName::FdDatasync
-        | Wasip1ImportName::FdFdstatSetFlags
-        | Wasip1ImportName::FdFdstatSetRights
-        | Wasip1ImportName::FdFilestatGet
-        | Wasip1ImportName::FdFilestatSetSize
-        | Wasip1ImportName::FdFilestatSetTimes
-        | Wasip1ImportName::FdPread
-        | Wasip1ImportName::FdPrestatGet
-        | Wasip1ImportName::FdPrestatDirName
-        | Wasip1ImportName::FdPwrite
-        | Wasip1ImportName::FdReaddir
-        | Wasip1ImportName::FdRenumber
-        | Wasip1ImportName::FdSeek
-        | Wasip1ImportName::FdSync
-        | Wasip1ImportName::FdTell
-        | Wasip1ImportName::PathCreateDirectory
-        | Wasip1ImportName::PathFilestatGet
-        | Wasip1ImportName::PathFilestatSetTimes
-        | Wasip1ImportName::PathLink
-        | Wasip1ImportName::PathOpen
-        | Wasip1ImportName::PathReadlink
-        | Wasip1ImportName::PathRemoveDirectory
-        | Wasip1ImportName::PathRename
-        | Wasip1ImportName::PathSymlink
-        | Wasip1ImportName::PathUnlinkFile => unreachable!(),
-    }
-}
-
 fn skip_core_immediates(reader: &mut Reader<'_>, opcode: u8) -> Result<(), WasmError> {
     match opcode {
         OPCODE_BR | OPCODE_BR_IF | OPCODE_CALL | OPCODE_LOCAL_GET | OPCODE_LOCAL_SET
-        | OPCODE_LOCAL_TEE | OPCODE_GLOBAL_GET | OPCODE_GLOBAL_SET | OPCODE_REF_FUNC => {
+        | OPCODE_LOCAL_TEE | OPCODE_GLOBAL_GET | OPCODE_GLOBAL_SET | OPCODE_REF_FUNC
+        | OPCODE_TABLE_GET | OPCODE_TABLE_SET | OPCODE_MEMORY_SIZE | OPCODE_MEMORY_GROW => {
             reader.read_var_u32()?;
         }
         OPCODE_BR_TABLE => {
@@ -2117,42 +1816,187 @@ fn skip_core_immediates(reader: &mut Reader<'_>, opcode: u8) -> Result<(), WasmE
             reader.read_var_i64()?;
         }
         OPCODE_F32_CONST => {
-            reader.read_bytes(4)?;
+            reader.read_fixed_u32()?;
         }
         OPCODE_F64_CONST => {
-            reader.read_bytes(8)?;
+            reader.read_fixed_u64()?;
         }
         OPCODE_REF_NULL => {
             reader.read_u8()?;
         }
         OPCODE_MISC => {
-            let subopcode = reader.read_var_u32()?;
-            match subopcode {
-                8 | 12 => {
-                    reader.read_var_u32()?;
-                    reader.read_var_u32()?;
-                }
-                9 | 13 => {
-                    reader.read_var_u32()?;
-                }
-                10 | 11 | 14 | 15 => {}
-                _ => return Err(WasmError::Unsupported("unsupported misc opcode")),
-            }
+            decode_core_misc_instr(reader)?;
         }
         _ => {}
     }
     Ok(())
 }
 
-impl<'a> Interpreter<'a> {
-    #[cfg(test)]
-    fn new(module: &'a [u8]) -> Result<Self, WasmError> {
-        Module::parse(module)?.instantiate()
+fn decode_core_br_table(reader: &mut Reader<'_>) -> Result<BrTableInstr, WasmError> {
+    let count = reader.read_var_u32()? as usize;
+    if count > CORE_WASM_BR_TABLE_CAPACITY {
+        return Err(WasmError::Unsupported("core br_table too large"));
     }
+    let mut table = BrTableInstr::EMPTY;
+    table.label_count =
+        u8::try_from(count).map_err(|_| WasmError::Unsupported("core br_table too large"))?;
+    for slot in table.labels.iter_mut().take(count) {
+        *slot = u16::try_from(reader.read_var_u32()?)
+            .map_err(|_| WasmError::Unsupported("core br_table depth too large"))?;
+    }
+    table.default = u16::try_from(reader.read_var_u32()?)
+        .map_err(|_| WasmError::Unsupported("core br_table depth too large"))?;
+    Ok(table)
+}
 
+fn decode_core_misc_instr(reader: &mut Reader<'_>) -> Result<MiscInstr, WasmError> {
+    let subopcode = reader.read_var_u32()?;
+    match subopcode {
+        8 => {
+            let data_index = reader.read_var_u32()? as usize;
+            if reader.read_var_u32()? != 0 {
+                return Err(WasmError::Invalid(
+                    "core memory.init memory index must be zero",
+                ));
+            }
+            Ok(MiscInstr::MemoryInit { data_index })
+        }
+        9 => Ok(MiscInstr::DataDrop {
+            data_index: reader.read_var_u32()? as usize,
+        }),
+        10 => {
+            if reader.read_var_u32()? != 0 || reader.read_var_u32()? != 0 {
+                return Err(WasmError::Invalid(
+                    "core memory.copy memory index must be zero",
+                ));
+            }
+            Ok(MiscInstr::MemoryCopy)
+        }
+        11 => {
+            if reader.read_var_u32()? != 0 {
+                return Err(WasmError::Invalid(
+                    "core memory.fill memory index must be zero",
+                ));
+            }
+            Ok(MiscInstr::MemoryFill)
+        }
+        12 => {
+            let elem_index = reader.read_var_u32()? as usize;
+            let table_index = reader.read_var_u32()?;
+            Ok(MiscInstr::TableInit {
+                elem_index,
+                table_index,
+            })
+        }
+        13 => Ok(MiscInstr::ElemDrop {
+            elem_index: reader.read_var_u32()? as usize,
+        }),
+        14 => Ok(MiscInstr::TableCopy {
+            dst_table: reader.read_var_u32()?,
+            src_table: reader.read_var_u32()?,
+        }),
+        15 => Ok(MiscInstr::TableGrow {
+            table_index: reader.read_var_u32()?,
+        }),
+        16 => Ok(MiscInstr::TableSize {
+            table_index: reader.read_var_u32()?,
+        }),
+        17 => Ok(MiscInstr::TableFill {
+            table_index: reader.read_var_u32()?,
+        }),
+        _ => Err(WasmError::Unsupported("unsupported misc opcode")),
+    }
+}
+
+fn validate_core_wasip1_imports(
+    module: &Module<'_>,
+    handlers: Wasip1HandlerSet,
+) -> Result<(), WasmError> {
+    for import in module
+        .imports
+        .iter()
+        .copied()
+        .flatten()
+        .take(module.import_count)
+    {
+        let HostImport::Wasip1(name) = import.host;
+        let Some(syscall) = name.supported_syscall() else {
+            return Err(WasmError::Unsupported(disabled_wasip1_import_message(name)));
+        };
+        if !handlers.supports(syscall) {
+            return Err(WasmError::Unsupported(disabled_wasip1_import_message(name)));
+        }
+    }
+    Ok(())
+}
+
+fn disabled_wasip1_import_message(name: Wasip1ImportName) -> &'static str {
+    if matches!(name.supported_syscall(), Some(Wasip1Syscall::ArgsEnv)) {
+        return "wasip1 args/env disabled by feature profile";
+    }
+    match name {
+        Wasip1ImportName::FdWrite => "wasip1 fd_write disabled by feature profile",
+        Wasip1ImportName::FdRead => "wasip1 fd_read disabled by feature profile",
+        Wasip1ImportName::FdReaddir => "wasip1 fd_readdir disabled by feature profile",
+        Wasip1ImportName::FdFdstatGet => "wasip1 fd_fdstat_get disabled by feature profile",
+        Wasip1ImportName::FdClose => "wasip1 fd_close disabled by feature profile",
+        Wasip1ImportName::PollOneoff => "wasip1 poll_oneoff disabled by feature profile",
+        Wasip1ImportName::ProcExit => "wasip1 proc_exit disabled by feature profile",
+        Wasip1ImportName::ProcRaise => "wasip1 proc_raise unsupported",
+        Wasip1ImportName::SchedYield => "wasip1 sched_yield unsupported",
+        Wasip1ImportName::ClockResGet => "wasip1 clock_res_get disabled by feature profile",
+        Wasip1ImportName::ClockTimeGet => "wasip1 clock_time_get disabled by feature profile",
+        Wasip1ImportName::RandomGet => "wasip1 random_get disabled by feature profile",
+        Wasip1ImportName::SockAccept
+        | Wasip1ImportName::SockRecv
+        | Wasip1ImportName::SockSend
+        | Wasip1ImportName::SockShutdown => "wasip1 sock_* unsupported",
+        Wasip1ImportName::ArgsGet
+        | Wasip1ImportName::ArgsSizesGet
+        | Wasip1ImportName::EnvironGet
+        | Wasip1ImportName::EnvironSizesGet => "wasip1 args/env disabled by feature profile",
+        Wasip1ImportName::FdAdvise
+        | Wasip1ImportName::FdAllocate
+        | Wasip1ImportName::FdDatasync
+        | Wasip1ImportName::FdFdstatSetFlags
+        | Wasip1ImportName::FdFdstatSetRights
+        | Wasip1ImportName::FdFilestatGet
+        | Wasip1ImportName::FdFilestatSetSize
+        | Wasip1ImportName::FdFilestatSetTimes
+        | Wasip1ImportName::FdPread
+        | Wasip1ImportName::FdPrestatGet
+        | Wasip1ImportName::FdPrestatDirName
+        | Wasip1ImportName::FdPwrite
+        | Wasip1ImportName::FdRenumber
+        | Wasip1ImportName::FdSeek
+        | Wasip1ImportName::FdSync
+        | Wasip1ImportName::FdTell
+        | Wasip1ImportName::PathCreateDirectory
+        | Wasip1ImportName::PathFilestatGet
+        | Wasip1ImportName::PathFilestatSetTimes
+        | Wasip1ImportName::PathLink
+        | Wasip1ImportName::PathOpen
+        | Wasip1ImportName::PathReadlink
+        | Wasip1ImportName::PathRemoveDirectory
+        | Wasip1ImportName::PathRename
+        | Wasip1ImportName::PathSymlink
+        | Wasip1ImportName::PathUnlinkFile => "wasip1 import unsupported by hibana-pico core",
+    }
+}
+
+impl<'a> Interpreter<'a> {
     #[cfg(test)]
     fn resume(&mut self) -> Result<ExecutionEvent<'a>, WasmError> {
         self.run(TEST_RESUME_FUEL)
+    }
+
+    #[cfg(test)]
+    unsafe fn init_in_place(dst: *mut Self, module: &'a [u8]) -> Result<(), WasmError> {
+        unsafe {
+            Module::parse_in_place(core::ptr::addr_of_mut!((*dst).module), module)?;
+            Self::init_from_parsed_module_in_place(dst)?;
+        }
+        Ok(())
     }
 
     fn run(&mut self, mut fuel: u32) -> Result<ExecutionEvent<'a>, WasmError> {
@@ -2173,825 +2017,858 @@ impl<'a> Interpreter<'a> {
             }
             fuel -= 1;
 
-            let opcode = self.current_read_u8()?;
-            match opcode {
-                OPCODE_UNREACHABLE => return Err(WasmError::Trap),
-                OPCODE_NOP => {}
-                OPCODE_BLOCK | OPCODE_LOOP => {
-                    let block_type = self.current_read_u8()?;
-                    let (result_count, result_kind) = decode_core_block_type(block_type)?;
-                    let frame = self.current_frame_mut()?;
-                    let start_pos = frame.pc;
-                    let target = self.current_control_target(start_pos)?;
-                    let end_pos = target.end()?;
-                    let kind = if opcode == OPCODE_LOOP {
-                        ControlKind::Loop
-                    } else {
-                        ControlKind::Block
-                    };
-                    let stack_height = self.value_len;
-                    self.push_core_control(ControlFrame {
-                        kind,
-                        start_pos,
-                        else_pos: usize::MAX,
-                        end_pos,
-                        result_count,
-                        result_kind,
-                        stack_height,
-                    })?;
-                }
-                OPCODE_IF => {
-                    let block_type = self.current_read_u8()?;
-                    let (result_count, result_kind) = decode_core_block_type(block_type)?;
-                    let condition = self.pop_core_i32()?;
-                    let frame = self.current_frame_mut()?;
-                    let start_pos = frame.pc;
-                    let target = self.current_control_target(start_pos)?;
-                    let else_pos = target.else_pos();
-                    let end_pos = target.end()?;
-                    let stack_height = self.value_len;
-                    if condition != 0 {
-                        self.push_core_control(ControlFrame {
-                            kind: ControlKind::If,
-                            start_pos,
-                            else_pos,
-                            end_pos,
-                            result_count,
-                            result_kind,
-                            stack_height,
-                        })?;
-                    } else if else_pos != usize::MAX {
-                        self.push_core_control(ControlFrame {
-                            kind: ControlKind::If,
-                            start_pos: else_pos.saturating_add(1),
-                            else_pos,
-                            end_pos,
-                            result_count,
-                            result_kind,
-                            stack_height,
-                        })?;
-                        self.current_frame_mut()?.pc = else_pos.saturating_add(1);
-                    } else if result_count == 0 {
-                        self.current_frame_mut()?.pc = end_pos.saturating_add(1);
-                    } else {
-                        return Err(WasmError::Invalid("if result requires else arm"));
-                    }
-                }
-                OPCODE_ELSE => {
-                    let control = self.pop_core_control()?;
-                    if control.kind != ControlKind::If {
-                        return Err(WasmError::Invalid("else without if"));
-                    }
-                    self.normalize_core_control_result(control)?;
-                    self.current_frame_mut()?.pc = control.end_pos.saturating_add(1);
-                }
-                OPCODE_BR => {
-                    let depth = self.current_read_var_u32()? as usize;
-                    self.core_branch(depth)?;
-                }
-                OPCODE_BR_IF => {
-                    let depth = self.current_read_var_u32()? as usize;
-                    if self.pop_core_i32()? != 0 {
-                        self.core_branch(depth)?;
-                    }
-                }
-                OPCODE_BR_TABLE => {
-                    let depth = self.decode_core_br_table_depth()?;
-                    self.core_branch(depth)?;
-                }
-                OPCODE_RETURN => self.pop_frame()?,
-                OPCODE_CALL => {
-                    let function_index = self.current_read_var_u32()?;
-                    if function_index < self.module.import_count as u32 {
-                        return self.call_core_import(function_index);
-                    }
-                    self.push_frame(function_index)?;
-                }
-                OPCODE_CALL_INDIRECT => {
-                    let expected_type_index = self.current_read_var_u32()?;
-                    self.expect_zero_table_index_var()?;
-                    let table_index = self.pop_core_i32()? as usize;
-                    let function_index = *self
-                        .table_functions
-                        .get(table_index)
-                        .ok_or(WasmError::Invalid("core call_indirect table out of range"))?;
-                    if table_index >= self.table_size || function_index == u32::MAX {
-                        return Err(WasmError::Invalid("core call_indirect empty slot"));
-                    }
-                    if self.module.core_func_type_index(function_index)? != expected_type_index {
-                        return Err(WasmError::Invalid("core call_indirect type mismatch"));
-                    }
-                    if function_index < self.module.import_count as u32 {
-                        return self.call_core_import(function_index);
-                    }
-                    self.push_frame(function_index)?;
-                }
-                OPCODE_DROP => {
-                    let dropped_value = self.pop_core_value()?;
-                    core::hint::black_box(dropped_value);
-                }
-                OPCODE_SELECT => {
-                    let condition = self.pop_core_i32()?;
-                    let alternate = self.pop_core_value()?;
-                    let consequent = self.pop_core_value()?;
-                    self.push_core_value(if condition != 0 {
-                        consequent
-                    } else {
-                        alternate
-                    })?;
-                }
-                OPCODE_LOCAL_GET => {
-                    let local = self.current_read_var_u32()? as usize;
-                    let value = *self
-                        .current_frame()?
-                        .locals
-                        .get(local)
-                        .ok_or(WasmError::Invalid("core local.get out of range"))?;
-                    if local >= self.current_frame()?.local_count {
-                        return Err(WasmError::Invalid("core local.get inactive local"));
-                    }
-                    self.push_core_value(value)?;
-                }
-                OPCODE_LOCAL_SET => {
-                    let local = self.current_read_var_u32()? as usize;
-                    let value = self.pop_core_value()?;
-                    self.set_core_local(local, value)?;
-                }
-                OPCODE_LOCAL_TEE => {
-                    let local = self.current_read_var_u32()? as usize;
-                    let value = *self
-                        .values
-                        .get(self.value_len.saturating_sub(1))
-                        .ok_or(WasmError::StackUnderflow)?;
-                    self.set_core_local(local, value)?;
-                }
-                OPCODE_GLOBAL_GET => {
-                    let global = self.current_read_var_u32()? as usize;
-                    if global >= self.global_count {
-                        return Err(WasmError::Invalid("core global.get out of range"));
-                    }
-                    let value = *self
-                        .globals
-                        .get(global)
-                        .ok_or(WasmError::Invalid("core global.get out of range"))?;
-                    self.push_core_value(value)?;
-                }
-                OPCODE_GLOBAL_SET => {
-                    let global = self.current_read_var_u32()? as usize;
-                    if global >= self.global_count {
-                        return Err(WasmError::Invalid("core global.set out of range"));
-                    }
-                    if !self.global_mutable[global] {
-                        return Err(WasmError::Invalid("core global.set immutable global"));
-                    }
-                    let value = self.pop_core_value()?;
-                    if value.kind() != self.global_kinds[global] {
-                        return Err(WasmError::Invalid("core global type mismatch"));
-                    }
-                    self.globals[global] = value;
-                }
-                OPCODE_TABLE_GET => {
-                    self.expect_zero_table_index_var()?;
-                    let index = self.pop_core_i32()? as usize;
-                    if index >= self.table_size {
-                        return Err(WasmError::Invalid("core table.get out of range"));
-                    }
-                    self.push_core_value(Value::FuncRef(self.table_functions[index]))?;
-                }
-                OPCODE_TABLE_SET => {
-                    self.expect_zero_table_index_var()?;
-                    let value = self.pop_core_value()?.as_funcref()?;
-                    let index = self.pop_core_i32()? as usize;
-                    if index >= self.table_size {
-                        return Err(WasmError::Invalid("core table.set out of range"));
-                    }
-                    if value != u32::MAX {
-                        self.module.core_func_type_index(value)?;
-                    }
-                    self.table_functions[index] = value;
-                }
-                OPCODE_I32_LOAD => {
-                    let addr = self.core_load_effective_addr()?;
-                    self.push_core_value(Value::I32(self.core_read_u32(addr)?))?;
-                }
-                OPCODE_I64_LOAD => {
-                    let addr = self.core_load_effective_addr()?;
-                    self.push_core_value(Value::I64(self.core_read_u64(addr)?))?;
-                }
-                OPCODE_F32_LOAD => {
-                    let addr = self.core_load_effective_addr()?;
-                    self.push_core_value(Value::F32(self.core_read_u32(addr)?))?;
-                }
-                OPCODE_F64_LOAD => {
-                    let addr = self.core_load_effective_addr()?;
-                    self.push_core_value(Value::F64(self.core_read_u64(addr)?))?;
-                }
-                OPCODE_I32_LOAD8_S => {
-                    let addr = self.core_load_effective_addr()?;
-                    self.push_core_value(Value::I32(
-                        (self.core_read_u8(addr)? as i8 as i32) as u32,
-                    ))?;
-                }
-                OPCODE_I32_LOAD8_U => {
-                    let addr = self.core_load_effective_addr()?;
-                    self.push_core_value(Value::I32(self.core_read_u8(addr)? as u32))?;
-                }
-                OPCODE_I32_LOAD16_S => {
-                    let addr = self.core_load_effective_addr()?;
-                    self.push_core_value(Value::I32(
-                        (self.core_read_u16(addr)? as i16 as i32) as u32,
-                    ))?;
-                }
-                OPCODE_I32_LOAD16_U => {
-                    let addr = self.core_load_effective_addr()?;
-                    self.push_core_value(Value::I32(self.core_read_u16(addr)? as u32))?;
-                }
-                OPCODE_I64_LOAD8_S => {
-                    let addr = self.core_load_effective_addr()?;
-                    self.push_core_value(Value::I64(
-                        (self.core_read_u8(addr)? as i8 as i64) as u64,
-                    ))?;
-                }
-                OPCODE_I64_LOAD8_U => {
-                    let addr = self.core_load_effective_addr()?;
-                    self.push_core_value(Value::I64(self.core_read_u8(addr)? as u64))?;
-                }
-                OPCODE_I64_LOAD16_S => {
-                    let addr = self.core_load_effective_addr()?;
-                    self.push_core_value(Value::I64(
-                        (self.core_read_u16(addr)? as i16 as i64) as u64,
-                    ))?;
-                }
-                OPCODE_I64_LOAD16_U => {
-                    let addr = self.core_load_effective_addr()?;
-                    self.push_core_value(Value::I64(self.core_read_u16(addr)? as u64))?;
-                }
-                OPCODE_I64_LOAD32_S => {
-                    let addr = self.core_load_effective_addr()?;
-                    self.push_core_value(Value::I64(
-                        (self.core_read_u32(addr)? as i32 as i64) as u64,
-                    ))?;
-                }
-                OPCODE_I64_LOAD32_U => {
-                    let addr = self.core_load_effective_addr()?;
-                    self.push_core_value(Value::I64(self.core_read_u32(addr)? as u64))?;
-                }
-                OPCODE_I32_STORE => {
-                    let value = self.pop_core_i32()?;
-                    let addr = self.core_store_effective_addr()?;
-                    self.core_write_u32(addr, value)?;
-                }
-                OPCODE_I64_STORE => {
-                    let value = self.pop_core_i64()?;
-                    let addr = self.core_store_effective_addr()?;
-                    self.core_write_u64(addr, value)?;
-                }
-                OPCODE_F32_STORE => {
-                    let value = self.pop_core_f32_bits()?;
-                    let addr = self.core_store_effective_addr()?;
-                    self.core_write_u32(addr, value)?;
-                }
-                OPCODE_F64_STORE => {
-                    let value = self.pop_core_f64_bits()?;
-                    let addr = self.core_store_effective_addr()?;
-                    self.core_write_u64(addr, value)?;
-                }
-                OPCODE_I32_STORE8 => {
-                    let value = self.pop_core_i32()? as u8;
-                    let addr = self.core_store_effective_addr()?;
-                    self.core_write_u8(addr, value)?;
-                }
-                OPCODE_I32_STORE16 => {
-                    let value = self.pop_core_i32()? as u16;
-                    let addr = self.core_store_effective_addr()?;
-                    self.core_write_u16(addr, value)?;
-                }
-                OPCODE_I64_STORE8 => {
-                    let value = self.pop_core_i64()? as u8;
-                    let addr = self.core_store_effective_addr()?;
-                    self.core_write_u8(addr, value)?;
-                }
-                OPCODE_I64_STORE16 => {
-                    let value = self.pop_core_i64()? as u16;
-                    let addr = self.core_store_effective_addr()?;
-                    self.core_write_u16(addr, value)?;
-                }
-                OPCODE_I64_STORE32 => {
-                    let value = self.pop_core_i64()? as u32;
-                    let addr = self.core_store_effective_addr()?;
-                    self.core_write_u32(addr, value)?;
-                }
-                OPCODE_MEMORY_SIZE => {
-                    self.expect_zero_memory_index()?;
-                    self.push_core_value(Value::I32(self.memory_pages))?;
-                }
-                OPCODE_MEMORY_GROW => {
-                    self.expect_zero_memory_index()?;
-                    let requested_pages = self.pop_core_i32()?;
-                    let previous_pages = self.memory_pages;
-                    let new_pages = previous_pages
-                        .checked_add(requested_pages)
-                        .and_then(|pages| {
-                            if pages <= self.module.memory_max_pages
-                                && pages <= CORE_WASM_MAX_MEMORY_PAGES
-                            {
-                                Some(pages)
-                            } else {
-                                None
-                            }
-                        });
-                    if let Some(pages) = new_pages {
-                        self.memory_pages = pages;
-                        self.push_core_value(Value::I32(previous_pages))?;
-                    } else {
-                        self.push_core_value(Value::I32(u32::MAX))?;
-                    }
-                    let event = MemoryGrowEvent {
-                        previous_pages,
-                        requested_pages,
-                        new_pages,
-                    };
-                    self.pending = Some(PendingExecution::MemoryGrow(event));
-                    return Ok(ExecutionEvent::MemoryGrow(event));
-                }
-                OPCODE_I32_CONST => {
-                    let value = self.current_read_var_i32()? as u32;
-                    self.push_core_value(Value::I32(value))?;
-                }
-                OPCODE_I64_CONST => {
-                    let value = self.current_read_var_i64()? as u64;
-                    self.push_core_value(Value::I64(value))?;
-                }
-                OPCODE_F32_CONST => {
-                    let value = self.current_read_fixed_u32()?;
-                    self.push_core_value(Value::F32(value))?;
-                }
-                OPCODE_F64_CONST => {
-                    let value = self.current_read_fixed_u64()?;
-                    self.push_core_value(Value::F64(value))?;
-                }
-                OPCODE_I32_EQZ => {
-                    let value = self.pop_core_i32()?;
-                    self.push_core_value(Value::I32((value == 0) as u32))?;
-                }
-                OPCODE_I32_EQ => self.core_binary_i32(|a, b| (a == b) as u32)?,
-                OPCODE_I32_NE => self.core_binary_i32(|a, b| (a != b) as u32)?,
-                OPCODE_I32_LT_S => self.core_binary_i32(|a, b| ((a as i32) < (b as i32)) as u32)?,
-                OPCODE_I32_LT_U => self.core_binary_i32(|a, b| (a < b) as u32)?,
-                OPCODE_I32_GT_S => self.core_binary_i32(|a, b| ((a as i32) > (b as i32)) as u32)?,
-                OPCODE_I32_GT_U => self.core_binary_i32(|a, b| (a > b) as u32)?,
-                OPCODE_I32_LE_S => {
-                    self.core_binary_i32(|a, b| ((a as i32) <= (b as i32)) as u32)?
-                }
-                OPCODE_I32_LE_U => self.core_binary_i32(|a, b| (a <= b) as u32)?,
-                OPCODE_I32_GE_S => {
-                    self.core_binary_i32(|a, b| ((a as i32) >= (b as i32)) as u32)?
-                }
-                OPCODE_I32_GE_U => self.core_binary_i32(|a, b| (a >= b) as u32)?,
-                OPCODE_I64_EQZ => {
-                    let value = self.pop_core_i64()?;
-                    self.push_core_value(Value::I32((value == 0) as u32))?;
-                }
-                OPCODE_I64_EQ => self.core_binary_i64_cmp(|a, b| a == b)?,
-                OPCODE_I64_NE => self.core_binary_i64_cmp(|a, b| a != b)?,
-                OPCODE_I64_LT_S => self.core_binary_i64_cmp(|a, b| (a as i64) < (b as i64))?,
-                OPCODE_I64_LT_U => self.core_binary_i64_cmp(|a, b| a < b)?,
-                OPCODE_I64_GT_S => self.core_binary_i64_cmp(|a, b| (a as i64) > (b as i64))?,
-                OPCODE_I64_GT_U => self.core_binary_i64_cmp(|a, b| a > b)?,
-                OPCODE_I64_LE_S => self.core_binary_i64_cmp(|a, b| (a as i64) <= (b as i64))?,
-                OPCODE_I64_LE_U => self.core_binary_i64_cmp(|a, b| a <= b)?,
-                OPCODE_I64_GE_S => self.core_binary_i64_cmp(|a, b| (a as i64) >= (b as i64))?,
-                OPCODE_I64_GE_U => self.core_binary_i64_cmp(|a, b| a >= b)?,
-                OPCODE_F32_EQ => self.core_binary_f32_cmp(|a, b| a == b)?,
-                OPCODE_F32_NE => self.core_binary_f32_cmp(|a, b| a != b)?,
-                OPCODE_F32_LT => self.core_binary_f32_cmp(|a, b| a < b)?,
-                OPCODE_F32_GT => self.core_binary_f32_cmp(|a, b| a > b)?,
-                OPCODE_F32_LE => self.core_binary_f32_cmp(|a, b| a <= b)?,
-                OPCODE_F32_GE => self.core_binary_f32_cmp(|a, b| a >= b)?,
-                OPCODE_F64_EQ => self.core_binary_f64_cmp(|a, b| a == b)?,
-                OPCODE_F64_NE => self.core_binary_f64_cmp(|a, b| a != b)?,
-                OPCODE_F64_LT => self.core_binary_f64_cmp(|a, b| a < b)?,
-                OPCODE_F64_GT => self.core_binary_f64_cmp(|a, b| a > b)?,
-                OPCODE_F64_LE => self.core_binary_f64_cmp(|a, b| a <= b)?,
-                OPCODE_F64_GE => self.core_binary_f64_cmp(|a, b| a >= b)?,
-                OPCODE_I32_CLZ => {
-                    let value = self.pop_core_i32()?;
-                    self.push_core_value(Value::I32(value.leading_zeros()))?;
-                }
-                OPCODE_I32_CTZ => {
-                    let value = self.pop_core_i32()?;
-                    self.push_core_value(Value::I32(value.trailing_zeros()))?;
-                }
-                OPCODE_I32_POPCNT => {
-                    let value = self.pop_core_i32()?;
-                    self.push_core_value(Value::I32(value.count_ones()))?;
-                }
-                OPCODE_I32_ADD => self.core_binary_i32(u32::wrapping_add)?,
-                OPCODE_I32_SUB => self.core_binary_i32(u32::wrapping_sub)?,
-                OPCODE_I32_MUL => self.core_binary_i32(u32::wrapping_mul)?,
-                OPCODE_I32_DIV_S => {
-                    let rhs = self.pop_core_i32()? as i32;
-                    if rhs == 0 {
-                        return Err(WasmError::Trap);
-                    }
-                    let lhs = self.pop_core_i32()? as i32;
-                    if lhs == i32::MIN && rhs == -1 {
-                        return Err(WasmError::Trap);
-                    }
-                    self.push_core_value(Value::I32(lhs.wrapping_div(rhs) as u32))?;
-                }
-                OPCODE_I32_DIV_U => {
-                    let rhs = self.pop_core_i32()?;
-                    if rhs == 0 {
-                        return Err(WasmError::Trap);
-                    }
-                    let lhs = self.pop_core_i32()?;
-                    self.push_core_value(Value::I32(lhs / rhs))?;
-                }
-                OPCODE_I32_REM_S => {
-                    let rhs = self.pop_core_i32()? as i32;
-                    if rhs == 0 {
-                        return Err(WasmError::Trap);
-                    }
-                    let lhs = self.pop_core_i32()? as i32;
-                    self.push_core_value(Value::I32(lhs.wrapping_rem(rhs) as u32))?;
-                }
-                OPCODE_I32_REM_U => {
-                    let rhs = self.pop_core_i32()?;
-                    if rhs == 0 {
-                        return Err(WasmError::Trap);
-                    }
-                    let lhs = self.pop_core_i32()?;
-                    self.push_core_value(Value::I32(lhs % rhs))?;
-                }
-                OPCODE_I32_AND => self.core_binary_i32(|a, b| a & b)?,
-                OPCODE_I32_OR => self.core_binary_i32(|a, b| a | b)?,
-                OPCODE_I32_XOR => self.core_binary_i32(|a, b| a ^ b)?,
-                OPCODE_I32_SHL => self.core_binary_i32(|a, b| a.wrapping_shl(b & 31))?,
-                OPCODE_I32_SHR_S => self.core_binary_i32(|a, b| ((a as i32) >> (b & 31)) as u32)?,
-                OPCODE_I32_SHR_U => self.core_binary_i32(|a, b| a.wrapping_shr(b & 31))?,
-                OPCODE_I32_ROTL => self.core_binary_i32(|a, b| a.rotate_left(b & 31))?,
-                OPCODE_I32_ROTR => self.core_binary_i32(|a, b| a.rotate_right(b & 31))?,
-                OPCODE_I64_CLZ => {
-                    let value = self.pop_core_i64()?;
-                    self.push_core_value(Value::I64(value.leading_zeros() as u64))?;
-                }
-                OPCODE_I64_CTZ => {
-                    let value = self.pop_core_i64()?;
-                    self.push_core_value(Value::I64(value.trailing_zeros() as u64))?;
-                }
-                OPCODE_I64_POPCNT => {
-                    let value = self.pop_core_i64()?;
-                    self.push_core_value(Value::I64(value.count_ones() as u64))?;
-                }
-                OPCODE_I64_ADD => self.core_binary_i64(u64::wrapping_add)?,
-                OPCODE_I64_SUB => self.core_binary_i64(u64::wrapping_sub)?,
-                OPCODE_I64_MUL => self.core_binary_i64(u64::wrapping_mul)?,
-                OPCODE_I64_DIV_S => {
-                    let rhs = self.pop_core_i64()? as i64;
-                    if rhs == 0 {
-                        return Err(WasmError::Trap);
-                    }
-                    let lhs = self.pop_core_i64()? as i64;
-                    if lhs == i64::MIN && rhs == -1 {
-                        return Err(WasmError::Trap);
-                    }
-                    self.push_core_value(Value::I64(lhs.wrapping_div(rhs) as u64))?;
-                }
-                OPCODE_I64_DIV_U => {
-                    let rhs = self.pop_core_i64()?;
-                    if rhs == 0 {
-                        return Err(WasmError::Trap);
-                    }
-                    let lhs = self.pop_core_i64()?;
-                    self.push_core_value(Value::I64(lhs / rhs))?;
-                }
-                OPCODE_I64_REM_S => {
-                    let rhs = self.pop_core_i64()? as i64;
-                    if rhs == 0 {
-                        return Err(WasmError::Trap);
-                    }
-                    let lhs = self.pop_core_i64()? as i64;
-                    self.push_core_value(Value::I64(lhs.wrapping_rem(rhs) as u64))?;
-                }
-                OPCODE_I64_REM_U => {
-                    let rhs = self.pop_core_i64()?;
-                    if rhs == 0 {
-                        return Err(WasmError::Trap);
-                    }
-                    let lhs = self.pop_core_i64()?;
-                    self.push_core_value(Value::I64(lhs % rhs))?;
-                }
-                OPCODE_I64_AND => self.core_binary_i64(|a, b| a & b)?,
-                OPCODE_I64_OR => self.core_binary_i64(|a, b| a | b)?,
-                OPCODE_I64_XOR => self.core_binary_i64(|a, b| a ^ b)?,
-                OPCODE_I64_SHL => {
-                    let rhs = self.pop_core_i64()? as u32;
-                    let lhs = self.pop_core_i64()?;
-                    self.push_core_value(Value::I64(lhs.wrapping_shl(rhs & 63)))?;
-                }
-                OPCODE_I64_SHR_S => {
-                    let rhs = self.pop_core_i64()? as u32;
-                    let lhs = self.pop_core_i64()? as i64;
-                    self.push_core_value(Value::I64((lhs >> (rhs & 63)) as u64))?;
-                }
-                OPCODE_I64_SHR_U => {
-                    let rhs = self.pop_core_i64()? as u32;
-                    let lhs = self.pop_core_i64()?;
-                    self.push_core_value(Value::I64(lhs.wrapping_shr(rhs & 63)))?;
-                }
-                OPCODE_I64_ROTL => {
-                    self.core_binary_i64(|a, b| a.rotate_left((b & 63) as u32))?;
-                }
-                OPCODE_I64_ROTR => {
-                    self.core_binary_i64(|a, b| a.rotate_right((b & 63) as u32))?;
-                }
-                OPCODE_F32_ABS => self.core_unary_f32(wasm_f32_abs)?,
-                OPCODE_F32_NEG => self.core_unary_f32(wasm_f32_neg)?,
-                OPCODE_F32_CEIL => self.core_unary_f32(wasm_f32_ceil)?,
-                OPCODE_F32_FLOOR => self.core_unary_f32(wasm_f32_floor)?,
-                OPCODE_F32_TRUNC => self.core_unary_f32(wasm_f32_trunc)?,
-                OPCODE_F32_NEAREST => self.core_unary_f32(wasm_f32_nearest)?,
-                OPCODE_F32_SQRT => self.core_unary_f32(wasm_f32_sqrt)?,
-                OPCODE_F32_ADD => self.core_binary_f32(|a, b| a + b)?,
-                OPCODE_F32_SUB => self.core_binary_f32(|a, b| a - b)?,
-                OPCODE_F32_MUL => self.core_binary_f32(|a, b| a * b)?,
-                OPCODE_F32_DIV => self.core_binary_f32(|a, b| a / b)?,
-                OPCODE_F32_MIN => self.core_binary_f32(wasm_f32_min)?,
-                OPCODE_F32_MAX => self.core_binary_f32(wasm_f32_max)?,
-                OPCODE_F32_COPYSIGN => self.core_binary_f32(wasm_f32_copysign)?,
-                OPCODE_F64_ABS => self.core_unary_f64(wasm_f64_abs)?,
-                OPCODE_F64_NEG => self.core_unary_f64(wasm_f64_neg)?,
-                OPCODE_F64_CEIL => self.core_unary_f64(wasm_f64_ceil)?,
-                OPCODE_F64_FLOOR => self.core_unary_f64(wasm_f64_floor)?,
-                OPCODE_F64_TRUNC => self.core_unary_f64(wasm_f64_trunc)?,
-                OPCODE_F64_NEAREST => self.core_unary_f64(wasm_f64_nearest)?,
-                OPCODE_F64_SQRT => self.core_unary_f64(wasm_f64_sqrt)?,
-                OPCODE_F64_ADD => self.core_binary_f64(|a, b| a + b)?,
-                OPCODE_F64_SUB => self.core_binary_f64(|a, b| a - b)?,
-                OPCODE_F64_MUL => self.core_binary_f64(|a, b| a * b)?,
-                OPCODE_F64_DIV => self.core_binary_f64(|a, b| a / b)?,
-                OPCODE_F64_MIN => self.core_binary_f64(wasm_f64_min)?,
-                OPCODE_F64_MAX => self.core_binary_f64(wasm_f64_max)?,
-                OPCODE_F64_COPYSIGN => self.core_binary_f64(wasm_f64_copysign)?,
-                OPCODE_I32_WRAP_I64 => {
-                    let value = self.pop_core_i64()? as u32;
-                    self.push_core_value(Value::I32(value))?;
-                }
-                OPCODE_I32_TRUNC_F32_S => {
-                    let value = trunc_f32_to_i32_s(self.pop_core_f32()?)?;
-                    self.push_core_value(Value::I32(value))?;
-                }
-                OPCODE_I32_TRUNC_F32_U => {
-                    let value = trunc_f32_to_i32_u(self.pop_core_f32()?)?;
-                    self.push_core_value(Value::I32(value))?;
-                }
-                OPCODE_I32_TRUNC_F64_S => {
-                    let value = trunc_f64_to_i32_s(self.pop_core_f64()?)?;
-                    self.push_core_value(Value::I32(value))?;
-                }
-                OPCODE_I32_TRUNC_F64_U => {
-                    let value = trunc_f64_to_i32_u(self.pop_core_f64()?)?;
-                    self.push_core_value(Value::I32(value))?;
-                }
-                OPCODE_I64_EXTEND_I32_S => {
-                    let value = self.pop_core_i32()? as i32 as i64 as u64;
-                    self.push_core_value(Value::I64(value))?;
-                }
-                OPCODE_I64_EXTEND_I32_U => {
-                    let value = self.pop_core_i32()? as u64;
-                    self.push_core_value(Value::I64(value))?;
-                }
-                OPCODE_I64_TRUNC_F32_S => {
-                    let value = trunc_f32_to_i64_s(self.pop_core_f32()?)?;
-                    self.push_core_value(Value::I64(value))?;
-                }
-                OPCODE_I64_TRUNC_F32_U => {
-                    let value = trunc_f32_to_i64_u(self.pop_core_f32()?)?;
-                    self.push_core_value(Value::I64(value))?;
-                }
-                OPCODE_I64_TRUNC_F64_S => {
-                    let value = trunc_f64_to_i64_s(self.pop_core_f64()?)?;
-                    self.push_core_value(Value::I64(value))?;
-                }
-                OPCODE_I64_TRUNC_F64_U => {
-                    let value = trunc_f64_to_i64_u(self.pop_core_f64()?)?;
-                    self.push_core_value(Value::I64(value))?;
-                }
-                OPCODE_F32_CONVERT_I32_S => {
-                    let value = self.pop_core_i32()? as i32 as f32;
-                    self.push_core_value(Value::F32(value.to_bits()))?;
-                }
-                OPCODE_F32_CONVERT_I32_U => {
-                    let value = self.pop_core_i32()? as f32;
-                    self.push_core_value(Value::F32(value.to_bits()))?;
-                }
-                OPCODE_F32_CONVERT_I64_S => {
-                    let value = self.pop_core_i64()? as i64 as f32;
-                    self.push_core_value(Value::F32(value.to_bits()))?;
-                }
-                OPCODE_F32_CONVERT_I64_U => {
-                    let value = self.pop_core_i64()? as f32;
-                    self.push_core_value(Value::F32(value.to_bits()))?;
-                }
-                OPCODE_F32_DEMOTE_F64 => {
-                    let value = self.pop_core_f64()? as f32;
-                    self.push_core_value(Value::F32(value.to_bits()))?;
-                }
-                OPCODE_F64_CONVERT_I32_S => {
-                    let value = self.pop_core_i32()? as i32 as f64;
-                    self.push_core_value(Value::F64(value.to_bits()))?;
-                }
-                OPCODE_F64_CONVERT_I32_U => {
-                    let value = self.pop_core_i32()? as f64;
-                    self.push_core_value(Value::F64(value.to_bits()))?;
-                }
-                OPCODE_F64_CONVERT_I64_S => {
-                    let value = self.pop_core_i64()? as i64 as f64;
-                    self.push_core_value(Value::F64(value.to_bits()))?;
-                }
-                OPCODE_F64_CONVERT_I64_U => {
-                    let value = self.pop_core_i64()? as f64;
-                    self.push_core_value(Value::F64(value.to_bits()))?;
-                }
-                OPCODE_F64_PROMOTE_F32 => {
-                    let value = self.pop_core_f32()? as f64;
-                    self.push_core_value(Value::F64(value.to_bits()))?;
-                }
-                OPCODE_I32_REINTERPRET_F32 => {
-                    let value = self.pop_core_f32_bits()?;
-                    self.push_core_value(Value::I32(value))?;
-                }
-                OPCODE_I64_REINTERPRET_F64 => {
-                    let value = self.pop_core_f64_bits()?;
-                    self.push_core_value(Value::I64(value))?;
-                }
-                OPCODE_F32_REINTERPRET_I32 => {
-                    let value = self.pop_core_i32()?;
-                    self.push_core_value(Value::F32(value))?;
-                }
-                OPCODE_F64_REINTERPRET_I64 => {
-                    let value = self.pop_core_i64()?;
-                    self.push_core_value(Value::F64(value))?;
-                }
-                OPCODE_I32_EXTEND8_S => {
-                    let value = self.pop_core_i32()? as i8 as i32 as u32;
-                    self.push_core_value(Value::I32(value))?;
-                }
-                OPCODE_I32_EXTEND16_S => {
-                    let value = self.pop_core_i32()? as i16 as i32 as u32;
-                    self.push_core_value(Value::I32(value))?;
-                }
-                OPCODE_I64_EXTEND8_S => {
-                    let value = self.pop_core_i64()? as i8 as i64 as u64;
-                    self.push_core_value(Value::I64(value))?;
-                }
-                OPCODE_I64_EXTEND16_S => {
-                    let value = self.pop_core_i64()? as i16 as i64 as u64;
-                    self.push_core_value(Value::I64(value))?;
-                }
-                OPCODE_I64_EXTEND32_S => {
-                    let value = self.pop_core_i64()? as i32 as i64 as u64;
-                    self.push_core_value(Value::I64(value))?;
-                }
-                OPCODE_REF_NULL => {
-                    let heap_type = self.current_read_u8()?;
-                    if heap_type != VALTYPE_FUNCREF {
-                        return Err(WasmError::Unsupported("only null funcref is supported"));
-                    }
-                    self.push_core_value(Value::FuncRef(u32::MAX))?;
-                }
-                OPCODE_REF_IS_NULL => {
-                    let value = self.pop_core_value()?.as_funcref()?;
-                    self.push_core_value(Value::I32((value == u32::MAX) as u32))?;
-                }
-                OPCODE_REF_FUNC => {
-                    let function_index = self.current_read_var_u32()?;
-                    self.module.core_func_type_index(function_index)?;
-                    self.push_core_value(Value::FuncRef(function_index))?;
-                }
-                OPCODE_MISC => {
-                    let subopcode = self.current_read_var_u32()?;
-                    match subopcode {
-                        8 => {
-                            let data_index = self.current_read_var_u32()? as usize;
-                            self.expect_zero_memory_index()?;
-                            let len = self.pop_core_i32()? as usize;
-                            let src_addr = self.pop_core_i32()? as usize;
-                            let dst_addr = self.pop_core_i32()?;
-                            let dst = self.core_translate_addr(dst_addr)?;
-                            self.core_memory_init(data_index, dst, src_addr, len)?;
-                        }
-                        9 => {
-                            let data_index = self.current_read_var_u32()? as usize;
-                            if data_index >= self.data_dropped.len()
-                                || self.module.data_segments[data_index].is_none()
-                            {
-                                return Err(WasmError::Invalid("core data.drop out of range"));
-                            }
-                            self.data_dropped[data_index] = true;
-                        }
-                        10 => {
-                            self.expect_zero_memory_index()?;
-                            self.expect_zero_memory_index()?;
-                            let len = self.pop_core_i32()? as usize;
-                            let src_addr = self.pop_core_i32()?;
-                            let dst_addr = self.pop_core_i32()?;
-                            let src = self.core_translate_addr(src_addr)?;
-                            let dst = self.core_translate_addr(dst_addr)?;
-                            self.core_memory_copy(dst, src, len)?;
-                        }
-                        11 => {
-                            self.expect_zero_memory_index()?;
-                            let len = self.pop_core_i32()? as usize;
-                            let value = self.pop_core_i32()? as u8;
-                            let dst_addr = self.pop_core_i32()?;
-                            let dst = self.core_translate_addr(dst_addr)?;
-                            self.core_memory_fill(dst, value, len)?;
-                        }
-                        12 => {
-                            let elem_index = self.current_read_var_u32()? as usize;
-                            self.expect_zero_table_index_var()?;
-                            let len = self.pop_core_i32()? as usize;
-                            let src = self.pop_core_i32()? as usize;
-                            let dst = self.pop_core_i32()? as usize;
-                            self.core_table_init(elem_index, dst, src, len)?;
-                        }
-                        13 => {
-                            let elem_index = self.current_read_var_u32()? as usize;
-                            if elem_index >= self.element_dropped.len()
-                                || self.module.element_segments[elem_index].is_none()
-                            {
-                                return Err(WasmError::Invalid("core elem.drop out of range"));
-                            }
-                            self.element_dropped[elem_index] = true;
-                        }
-                        14 => {
-                            self.expect_zero_table_index_var()?;
-                            self.expect_zero_table_index_var()?;
-                            let len = self.pop_core_i32()? as usize;
-                            let src = self.pop_core_i32()? as usize;
-                            let dst = self.pop_core_i32()? as usize;
-                            self.core_table_copy(dst, src, len)?;
-                        }
-                        15 => {
-                            self.expect_zero_table_index_var()?;
-                            let delta = self.pop_core_i32()? as usize;
-                            let init = self.pop_core_value()?.as_funcref()?;
-                            if init != u32::MAX {
-                                self.module.core_func_type_index(init)?;
-                            }
-                            let previous = self.table_size;
-                            let Some(new_size) = self.table_size.checked_add(delta) else {
-                                self.push_core_value(Value::I32(u32::MAX))?;
-                                continue;
-                            };
-                            if new_size > CORE_WASM_TABLE_CAPACITY {
-                                self.push_core_value(Value::I32(u32::MAX))?;
-                            } else {
-                                for slot in self
-                                    .table_functions
-                                    .iter_mut()
-                                    .take(new_size)
-                                    .skip(self.table_size)
-                                {
-                                    *slot = init;
-                                }
-                                self.table_size = new_size;
-                                self.push_core_value(Value::I32(previous as u32))?;
-                            }
-                        }
-                        16 => {
-                            self.expect_zero_table_index_var()?;
-                            self.push_core_value(Value::I32(self.table_size as u32))?;
-                        }
-                        17 => {
-                            self.expect_zero_table_index_var()?;
-                            let len = self.pop_core_i32()? as usize;
-                            let value = self.pop_core_value()?.as_funcref()?;
-                            let start = self.pop_core_i32()? as usize;
-                            if value != u32::MAX {
-                                self.module.core_func_type_index(value)?;
-                            }
-                            self.core_table_fill(start, value, len)?;
-                        }
-                        _ => return Err(WasmError::UnsupportedOpcode(OPCODE_MISC)),
-                    }
-                }
-                OPCODE_END => {
-                    if self.current_frame()?.control_len == 0 {
-                        self.pop_frame()?;
-                    } else {
-                        let control = self.pop_core_control()?;
-                        self.normalize_core_control_result(control)?;
-                    }
-                }
-                _ => return Err(WasmError::UnsupportedOpcode(opcode)),
+            let instr = self.current_instr()?;
+            if let Some(event) = self.exec_instr(instr)? {
+                return Ok(event);
             }
         }
     }
 
-    pub(super) fn complete_host_import(&mut self, results: &[Value]) -> Result<(), WasmError> {
+    fn exec_instr(&mut self, instr: Instr) -> Result<Option<ExecutionEvent<'a>>, WasmError> {
+        match instr {
+            Instr::Nop => {}
+            Instr::Simple(opcode) => return self.exec_simple(opcode),
+            Instr::U32(opcode, value) => return self.exec_u32(opcode, value),
+            Instr::CallIndirect {
+                type_index,
+                table_index,
+            } => {
+                if table_index != 0 {
+                    return Err(WasmError::Invalid(
+                        "core table instruction index must be zero",
+                    ));
+                }
+                let table_index = self.pop_core_i32()? as usize;
+                let function_index = *self
+                    .table_functions
+                    .get(table_index)
+                    .ok_or(WasmError::Invalid("core call_indirect table out of range"))?;
+                if table_index >= self.table_size || function_index == u32::MAX {
+                    return Err(WasmError::Invalid("core call_indirect empty slot"));
+                }
+                if self.module.core_func_type_index(function_index)? != type_index {
+                    return Err(WasmError::Invalid("core call_indirect type mismatch"));
+                }
+                if function_index < self.module.import_count as u32 {
+                    return Ok(Some(self.call_core_import(function_index)?));
+                }
+                self.push_frame(function_index)?;
+            }
+            Instr::Mem { opcode, offset } => self.exec_mem(opcode, offset)?,
+            Instr::I32Const(value) => self.push_core_value(Value::I32(value))?,
+            Instr::I64Const(value) => self.push_core_value(Value::I64(value))?,
+            Instr::F32Const(value) => self.push_core_value(Value::F32(value))?,
+            Instr::F64Const(value) => self.push_core_value(Value::F64(value))?,
+            Instr::BrTable(table) => {
+                let selected = self.pop_core_i32()? as usize;
+                self.core_branch(table.selected_depth(selected))?;
+            }
+            Instr::Misc(instr) => self.exec_misc(instr)?,
+            Instr::Block(target) | Instr::Loop(target) => {
+                let frame = self.current_frame()?;
+                let start_pos = frame.pc;
+                let end_pos = target.end()?;
+                let kind = match instr {
+                    Instr::Loop(_) => ControlKind::Loop,
+                    _ => ControlKind::Block,
+                };
+                let stack_height = self.value_len;
+                self.push_core_control(ControlFrame {
+                    kind,
+                    start_pos,
+                    else_pos: usize::MAX,
+                    end_pos,
+                    result_count: target.result_count,
+                    result_kind: target.result_kind,
+                    stack_height,
+                })?;
+            }
+            Instr::If(target) => {
+                let condition = self.pop_core_i32()?;
+                let frame = self.current_frame()?;
+                let start_pos = frame.pc;
+                let else_pos = target.else_pos();
+                let end_pos = target.end()?;
+                let stack_height = self.value_len;
+                if condition != 0 {
+                    self.push_core_control(ControlFrame {
+                        kind: ControlKind::If,
+                        start_pos,
+                        else_pos,
+                        end_pos,
+                        result_count: target.result_count,
+                        result_kind: target.result_kind,
+                        stack_height,
+                    })?;
+                } else if else_pos != usize::MAX {
+                    self.push_core_control(ControlFrame {
+                        kind: ControlKind::If,
+                        start_pos: else_pos.saturating_add(1),
+                        else_pos,
+                        end_pos,
+                        result_count: target.result_count,
+                        result_kind: target.result_kind,
+                        stack_height,
+                    })?;
+                    self.current_frame_mut()?.pc = else_pos.saturating_add(1);
+                } else if target.result_count == 0 {
+                    self.current_frame_mut()?.pc = end_pos.saturating_add(1);
+                } else {
+                    return Err(WasmError::Invalid("if result requires else arm"));
+                }
+            }
+            Instr::Else => {
+                let control = self.pop_core_control()?;
+                if control.kind != ControlKind::If {
+                    return Err(WasmError::Invalid("else without if"));
+                }
+                self.normalize_core_control_result(control)?;
+                self.current_frame_mut()?.pc = control.end_pos.saturating_add(1);
+            }
+            Instr::End => {
+                if self.current_frame()?.control_len == 0 {
+                    self.pop_frame()?;
+                } else {
+                    let control = self.pop_core_control()?;
+                    self.normalize_core_control_result(control)?;
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn exec_u32(
+        &mut self,
+        opcode: u8,
+        value: u32,
+    ) -> Result<Option<ExecutionEvent<'a>>, WasmError> {
+        match opcode {
+            OPCODE_BR => self.core_branch(value as usize)?,
+            OPCODE_BR_IF => {
+                if self.pop_core_i32()? != 0 {
+                    self.core_branch(value as usize)?;
+                }
+            }
+            OPCODE_CALL => {
+                if value < self.module.import_count as u32 {
+                    return Ok(Some(self.call_core_import(value)?));
+                }
+                self.push_frame(value)?;
+            }
+            OPCODE_LOCAL_GET => {
+                let local = value as usize;
+                let value = *self
+                    .current_frame()?
+                    .locals
+                    .get(local)
+                    .ok_or(WasmError::Invalid("core local.get out of range"))?;
+                if local >= self.current_frame()?.local_count {
+                    return Err(WasmError::Invalid("core local.get inactive local"));
+                }
+                self.push_core_value(value)?;
+            }
+            OPCODE_LOCAL_SET => {
+                let value_to_set = self.pop_core_value()?;
+                self.set_core_local(value as usize, value_to_set)?;
+            }
+            OPCODE_LOCAL_TEE => {
+                let value_to_set = *self
+                    .values
+                    .get(self.value_len.saturating_sub(1))
+                    .ok_or(WasmError::StackUnderflow)?;
+                self.set_core_local(value as usize, value_to_set)?;
+            }
+            OPCODE_GLOBAL_GET => {
+                let global = value as usize;
+                if global >= self.global_count {
+                    return Err(WasmError::Invalid("core global.get out of range"));
+                }
+                let value = *self
+                    .globals
+                    .get(global)
+                    .ok_or(WasmError::Invalid("core global.get out of range"))?;
+                self.push_core_value(value)?;
+            }
+            OPCODE_GLOBAL_SET => {
+                let global = value as usize;
+                if global >= self.global_count {
+                    return Err(WasmError::Invalid("core global.set out of range"));
+                }
+                if !self.global_mutable[global] {
+                    return Err(WasmError::Invalid("core global.set immutable global"));
+                }
+                let value_to_set = self.pop_core_value()?;
+                if value_to_set.kind() != self.global_kinds[global] {
+                    return Err(WasmError::Invalid("core global type mismatch"));
+                }
+                self.globals[global] = value_to_set;
+            }
+            OPCODE_TABLE_GET => {
+                if value != 0 {
+                    return Err(WasmError::Invalid(
+                        "core table instruction index must be zero",
+                    ));
+                }
+                let index = self.pop_core_i32()? as usize;
+                if index >= self.table_size {
+                    return Err(WasmError::Invalid("core table.get out of range"));
+                }
+                self.push_core_value(Value::FuncRef(self.table_functions[index]))?;
+            }
+            OPCODE_TABLE_SET => {
+                if value != 0 {
+                    return Err(WasmError::Invalid(
+                        "core table instruction index must be zero",
+                    ));
+                }
+                let value_to_set = self.pop_core_value()?.as_funcref()?;
+                let index = self.pop_core_i32()? as usize;
+                if index >= self.table_size {
+                    return Err(WasmError::Invalid("core table.set out of range"));
+                }
+                if value_to_set != u32::MAX {
+                    self.module.core_func_type_index(value_to_set)?;
+                }
+                self.table_functions[index] = value_to_set;
+            }
+            OPCODE_REF_FUNC => {
+                self.module.core_func_type_index(value)?;
+                self.push_core_value(Value::FuncRef(value))?;
+            }
+            OPCODE_REF_NULL => {
+                if value as u8 != VALTYPE_FUNCREF {
+                    return Err(WasmError::Unsupported("only null funcref is supported"));
+                }
+                self.push_core_value(Value::FuncRef(u32::MAX))?;
+            }
+            OPCODE_MEMORY_SIZE => {
+                if value != 0 {
+                    return Err(WasmError::Invalid(
+                        "core memory instruction index must be zero",
+                    ));
+                }
+                self.push_core_value(Value::I32(self.memory_pages))?;
+            }
+            OPCODE_MEMORY_GROW => {
+                if value != 0 {
+                    return Err(WasmError::Invalid(
+                        "core memory instruction index must be zero",
+                    ));
+                }
+                let requested_pages = self.pop_core_i32()?;
+                let previous_pages = self.memory_pages;
+                let new_pages = previous_pages
+                    .checked_add(requested_pages)
+                    .and_then(|pages| {
+                        if pages <= self.module.memory_max_pages
+                            && pages <= CORE_WASM_MAX_MEMORY_PAGES
+                        {
+                            Some(pages)
+                        } else {
+                            None
+                        }
+                    });
+                if let Some(pages) = new_pages {
+                    self.memory_pages = pages;
+                    self.push_core_value(Value::I32(previous_pages))?;
+                } else {
+                    self.push_core_value(Value::I32(u32::MAX))?;
+                }
+                let event = MemoryGrowEvent {
+                    previous_pages,
+                    requested_pages,
+                    new_pages,
+                };
+                self.pending = Some(PendingExecution::MemoryGrow(event));
+                return Ok(Some(ExecutionEvent::MemoryGrow(event)));
+            }
+            _ => return Err(WasmError::UnsupportedOpcode(opcode)),
+        }
+        Ok(None)
+    }
+
+    fn exec_mem(&mut self, opcode: u8, offset: u32) -> Result<(), WasmError> {
+        match opcode {
+            OPCODE_I32_LOAD => {
+                let addr = self.core_effective_addr(offset)?;
+                self.push_core_value(Value::I32(self.core_read_u32(addr)?))?;
+            }
+            OPCODE_I64_LOAD => {
+                let addr = self.core_effective_addr(offset)?;
+                self.push_core_value(Value::I64(self.core_read_u64(addr)?))?;
+            }
+            OPCODE_F32_LOAD => {
+                let addr = self.core_effective_addr(offset)?;
+                self.push_core_value(Value::F32(self.core_read_u32(addr)?))?;
+            }
+            OPCODE_F64_LOAD => {
+                let addr = self.core_effective_addr(offset)?;
+                self.push_core_value(Value::F64(self.core_read_u64(addr)?))?;
+            }
+            OPCODE_I32_LOAD8_S => {
+                let addr = self.core_effective_addr(offset)?;
+                self.push_core_value(Value::I32((self.core_read_u8(addr)? as i8 as i32) as u32))?;
+            }
+            OPCODE_I32_LOAD8_U => {
+                let addr = self.core_effective_addr(offset)?;
+                self.push_core_value(Value::I32(self.core_read_u8(addr)? as u32))?;
+            }
+            OPCODE_I32_LOAD16_S => {
+                let addr = self.core_effective_addr(offset)?;
+                self.push_core_value(Value::I32((self.core_read_u16(addr)? as i16 as i32) as u32))?;
+            }
+            OPCODE_I32_LOAD16_U => {
+                let addr = self.core_effective_addr(offset)?;
+                self.push_core_value(Value::I32(self.core_read_u16(addr)? as u32))?;
+            }
+            OPCODE_I64_LOAD8_S => {
+                let addr = self.core_effective_addr(offset)?;
+                self.push_core_value(Value::I64((self.core_read_u8(addr)? as i8 as i64) as u64))?;
+            }
+            OPCODE_I64_LOAD8_U => {
+                let addr = self.core_effective_addr(offset)?;
+                self.push_core_value(Value::I64(self.core_read_u8(addr)? as u64))?;
+            }
+            OPCODE_I64_LOAD16_S => {
+                let addr = self.core_effective_addr(offset)?;
+                self.push_core_value(Value::I64((self.core_read_u16(addr)? as i16 as i64) as u64))?;
+            }
+            OPCODE_I64_LOAD16_U => {
+                let addr = self.core_effective_addr(offset)?;
+                self.push_core_value(Value::I64(self.core_read_u16(addr)? as u64))?;
+            }
+            OPCODE_I64_LOAD32_S => {
+                let addr = self.core_effective_addr(offset)?;
+                self.push_core_value(Value::I64((self.core_read_u32(addr)? as i32 as i64) as u64))?;
+            }
+            OPCODE_I64_LOAD32_U => {
+                let addr = self.core_effective_addr(offset)?;
+                self.push_core_value(Value::I64(self.core_read_u32(addr)? as u64))?;
+            }
+            OPCODE_I32_STORE => {
+                let value = self.pop_core_i32()?;
+                let addr = self.core_effective_addr(offset)?;
+                self.core_write_u32(addr, value)?;
+            }
+            OPCODE_I64_STORE => {
+                let value = self.pop_core_i64()?;
+                let addr = self.core_effective_addr(offset)?;
+                self.core_write_u64(addr, value)?;
+            }
+            OPCODE_F32_STORE => {
+                let value = self.pop_core_f32_bits()?;
+                let addr = self.core_effective_addr(offset)?;
+                self.core_write_u32(addr, value)?;
+            }
+            OPCODE_F64_STORE => {
+                let value = self.pop_core_f64_bits()?;
+                let addr = self.core_effective_addr(offset)?;
+                self.core_write_u64(addr, value)?;
+            }
+            OPCODE_I32_STORE8 => {
+                let value = self.pop_core_i32()? as u8;
+                let addr = self.core_effective_addr(offset)?;
+                self.core_write_u8(addr, value)?;
+            }
+            OPCODE_I32_STORE16 => {
+                let value = self.pop_core_i32()? as u16;
+                let addr = self.core_effective_addr(offset)?;
+                self.core_write_u16(addr, value)?;
+            }
+            OPCODE_I64_STORE8 => {
+                let value = self.pop_core_i64()? as u8;
+                let addr = self.core_effective_addr(offset)?;
+                self.core_write_u8(addr, value)?;
+            }
+            OPCODE_I64_STORE16 => {
+                let value = self.pop_core_i64()? as u16;
+                let addr = self.core_effective_addr(offset)?;
+                self.core_write_u16(addr, value)?;
+            }
+            OPCODE_I64_STORE32 => {
+                let value = self.pop_core_i64()? as u32;
+                let addr = self.core_effective_addr(offset)?;
+                self.core_write_u32(addr, value)?;
+            }
+            _ => return Err(WasmError::UnsupportedOpcode(opcode)),
+        }
+        Ok(())
+    }
+
+    fn exec_simple(&mut self, opcode: u8) -> Result<Option<ExecutionEvent<'a>>, WasmError> {
+        match opcode {
+            OPCODE_UNREACHABLE => return Err(WasmError::Trap),
+            OPCODE_NOP => {}
+            OPCODE_RETURN => self.pop_frame()?,
+            OPCODE_DROP => {
+                let dropped_value = self.pop_core_value()?;
+                core::hint::black_box(dropped_value);
+            }
+            OPCODE_SELECT => {
+                let condition = self.pop_core_i32()?;
+                let alternate = self.pop_core_value()?;
+                let consequent = self.pop_core_value()?;
+                self.push_core_value(if condition != 0 {
+                    consequent
+                } else {
+                    alternate
+                })?;
+            }
+            OPCODE_I32_EQZ => {
+                let value = self.pop_core_i32()?;
+                self.push_core_value(Value::I32((value == 0) as u32))?;
+            }
+            OPCODE_I32_EQ => self.core_binary_i32(|a, b| (a == b) as u32)?,
+            OPCODE_I32_NE => self.core_binary_i32(|a, b| (a != b) as u32)?,
+            OPCODE_I32_LT_S => self.core_binary_i32(|a, b| ((a as i32) < (b as i32)) as u32)?,
+            OPCODE_I32_LT_U => self.core_binary_i32(|a, b| (a < b) as u32)?,
+            OPCODE_I32_GT_S => self.core_binary_i32(|a, b| ((a as i32) > (b as i32)) as u32)?,
+            OPCODE_I32_GT_U => self.core_binary_i32(|a, b| (a > b) as u32)?,
+            OPCODE_I32_LE_S => self.core_binary_i32(|a, b| ((a as i32) <= (b as i32)) as u32)?,
+            OPCODE_I32_LE_U => self.core_binary_i32(|a, b| (a <= b) as u32)?,
+            OPCODE_I32_GE_S => self.core_binary_i32(|a, b| ((a as i32) >= (b as i32)) as u32)?,
+            OPCODE_I32_GE_U => self.core_binary_i32(|a, b| (a >= b) as u32)?,
+            OPCODE_I64_EQZ => {
+                let value = self.pop_core_i64()?;
+                self.push_core_value(Value::I32((value == 0) as u32))?;
+            }
+            OPCODE_I64_EQ => self.core_binary_i64_cmp(|a, b| a == b)?,
+            OPCODE_I64_NE => self.core_binary_i64_cmp(|a, b| a != b)?,
+            OPCODE_I64_LT_S => self.core_binary_i64_cmp(|a, b| (a as i64) < (b as i64))?,
+            OPCODE_I64_LT_U => self.core_binary_i64_cmp(|a, b| a < b)?,
+            OPCODE_I64_GT_S => self.core_binary_i64_cmp(|a, b| (a as i64) > (b as i64))?,
+            OPCODE_I64_GT_U => self.core_binary_i64_cmp(|a, b| a > b)?,
+            OPCODE_I64_LE_S => self.core_binary_i64_cmp(|a, b| (a as i64) <= (b as i64))?,
+            OPCODE_I64_LE_U => self.core_binary_i64_cmp(|a, b| a <= b)?,
+            OPCODE_I64_GE_S => self.core_binary_i64_cmp(|a, b| (a as i64) >= (b as i64))?,
+            OPCODE_I64_GE_U => self.core_binary_i64_cmp(|a, b| a >= b)?,
+            OPCODE_F32_EQ => self.core_binary_f32_cmp(|a, b| a == b)?,
+            OPCODE_F32_NE => self.core_binary_f32_cmp(|a, b| a != b)?,
+            OPCODE_F32_LT => self.core_binary_f32_cmp(|a, b| a < b)?,
+            OPCODE_F32_GT => self.core_binary_f32_cmp(|a, b| a > b)?,
+            OPCODE_F32_LE => self.core_binary_f32_cmp(|a, b| a <= b)?,
+            OPCODE_F32_GE => self.core_binary_f32_cmp(|a, b| a >= b)?,
+            OPCODE_F64_EQ => self.core_binary_f64_cmp(|a, b| a == b)?,
+            OPCODE_F64_NE => self.core_binary_f64_cmp(|a, b| a != b)?,
+            OPCODE_F64_LT => self.core_binary_f64_cmp(|a, b| a < b)?,
+            OPCODE_F64_GT => self.core_binary_f64_cmp(|a, b| a > b)?,
+            OPCODE_F64_LE => self.core_binary_f64_cmp(|a, b| a <= b)?,
+            OPCODE_F64_GE => self.core_binary_f64_cmp(|a, b| a >= b)?,
+            OPCODE_I32_CLZ => {
+                let value = self.pop_core_i32()?;
+                self.push_core_value(Value::I32(value.leading_zeros()))?;
+            }
+            OPCODE_I32_CTZ => {
+                let value = self.pop_core_i32()?;
+                self.push_core_value(Value::I32(value.trailing_zeros()))?;
+            }
+            OPCODE_I32_POPCNT => {
+                let value = self.pop_core_i32()?;
+                self.push_core_value(Value::I32(value.count_ones()))?;
+            }
+            OPCODE_I32_ADD => self.core_binary_i32(u32::wrapping_add)?,
+            OPCODE_I32_SUB => self.core_binary_i32(u32::wrapping_sub)?,
+            OPCODE_I32_MUL => self.core_binary_i32(u32::wrapping_mul)?,
+            OPCODE_I32_DIV_S => {
+                let rhs = self.pop_core_i32()? as i32;
+                if rhs == 0 {
+                    return Err(WasmError::Trap);
+                }
+                let lhs = self.pop_core_i32()? as i32;
+                if lhs == i32::MIN && rhs == -1 {
+                    return Err(WasmError::Trap);
+                }
+                self.push_core_value(Value::I32(lhs.wrapping_div(rhs) as u32))?;
+            }
+            OPCODE_I32_DIV_U => {
+                let rhs = self.pop_core_i32()?;
+                if rhs == 0 {
+                    return Err(WasmError::Trap);
+                }
+                let lhs = self.pop_core_i32()?;
+                self.push_core_value(Value::I32(lhs / rhs))?;
+            }
+            OPCODE_I32_REM_S => {
+                let rhs = self.pop_core_i32()? as i32;
+                if rhs == 0 {
+                    return Err(WasmError::Trap);
+                }
+                let lhs = self.pop_core_i32()? as i32;
+                self.push_core_value(Value::I32(lhs.wrapping_rem(rhs) as u32))?;
+            }
+            OPCODE_I32_REM_U => {
+                let rhs = self.pop_core_i32()?;
+                if rhs == 0 {
+                    return Err(WasmError::Trap);
+                }
+                let lhs = self.pop_core_i32()?;
+                self.push_core_value(Value::I32(lhs % rhs))?;
+            }
+            OPCODE_I32_AND => self.core_binary_i32(|a, b| a & b)?,
+            OPCODE_I32_OR => self.core_binary_i32(|a, b| a | b)?,
+            OPCODE_I32_XOR => self.core_binary_i32(|a, b| a ^ b)?,
+            OPCODE_I32_SHL => self.core_binary_i32(|a, b| a.wrapping_shl(b & 31))?,
+            OPCODE_I32_SHR_S => self.core_binary_i32(|a, b| ((a as i32) >> (b & 31)) as u32)?,
+            OPCODE_I32_SHR_U => self.core_binary_i32(|a, b| a.wrapping_shr(b & 31))?,
+            OPCODE_I32_ROTL => self.core_binary_i32(|a, b| a.rotate_left(b & 31))?,
+            OPCODE_I32_ROTR => self.core_binary_i32(|a, b| a.rotate_right(b & 31))?,
+            OPCODE_I64_CLZ => {
+                let value = self.pop_core_i64()?;
+                self.push_core_value(Value::I64(value.leading_zeros() as u64))?;
+            }
+            OPCODE_I64_CTZ => {
+                let value = self.pop_core_i64()?;
+                self.push_core_value(Value::I64(value.trailing_zeros() as u64))?;
+            }
+            OPCODE_I64_POPCNT => {
+                let value = self.pop_core_i64()?;
+                self.push_core_value(Value::I64(value.count_ones() as u64))?;
+            }
+            OPCODE_I64_ADD => self.core_binary_i64(u64::wrapping_add)?,
+            OPCODE_I64_SUB => self.core_binary_i64(u64::wrapping_sub)?,
+            OPCODE_I64_MUL => self.core_binary_i64(u64::wrapping_mul)?,
+            OPCODE_I64_DIV_S => {
+                let rhs = self.pop_core_i64()? as i64;
+                if rhs == 0 {
+                    return Err(WasmError::Trap);
+                }
+                let lhs = self.pop_core_i64()? as i64;
+                if lhs == i64::MIN && rhs == -1 {
+                    return Err(WasmError::Trap);
+                }
+                self.push_core_value(Value::I64(lhs.wrapping_div(rhs) as u64))?;
+            }
+            OPCODE_I64_DIV_U => {
+                let rhs = self.pop_core_i64()?;
+                if rhs == 0 {
+                    return Err(WasmError::Trap);
+                }
+                let lhs = self.pop_core_i64()?;
+                self.push_core_value(Value::I64(lhs / rhs))?;
+            }
+            OPCODE_I64_REM_S => {
+                let rhs = self.pop_core_i64()? as i64;
+                if rhs == 0 {
+                    return Err(WasmError::Trap);
+                }
+                let lhs = self.pop_core_i64()? as i64;
+                self.push_core_value(Value::I64(lhs.wrapping_rem(rhs) as u64))?;
+            }
+            OPCODE_I64_REM_U => {
+                let rhs = self.pop_core_i64()?;
+                if rhs == 0 {
+                    return Err(WasmError::Trap);
+                }
+                let lhs = self.pop_core_i64()?;
+                self.push_core_value(Value::I64(lhs % rhs))?;
+            }
+            OPCODE_I64_AND => self.core_binary_i64(|a, b| a & b)?,
+            OPCODE_I64_OR => self.core_binary_i64(|a, b| a | b)?,
+            OPCODE_I64_XOR => self.core_binary_i64(|a, b| a ^ b)?,
+            OPCODE_I64_SHL => {
+                let rhs = self.pop_core_i64()? as u32;
+                let lhs = self.pop_core_i64()?;
+                self.push_core_value(Value::I64(lhs.wrapping_shl(rhs & 63)))?;
+            }
+            OPCODE_I64_SHR_S => {
+                let rhs = self.pop_core_i64()? as u32;
+                let lhs = self.pop_core_i64()? as i64;
+                self.push_core_value(Value::I64((lhs >> (rhs & 63)) as u64))?;
+            }
+            OPCODE_I64_SHR_U => {
+                let rhs = self.pop_core_i64()? as u32;
+                let lhs = self.pop_core_i64()?;
+                self.push_core_value(Value::I64(lhs.wrapping_shr(rhs & 63)))?;
+            }
+            OPCODE_I64_ROTL => {
+                self.core_binary_i64(|a, b| a.rotate_left((b & 63) as u32))?;
+            }
+            OPCODE_I64_ROTR => {
+                self.core_binary_i64(|a, b| a.rotate_right((b & 63) as u32))?;
+            }
+            OPCODE_F32_ABS => self.core_unary_f32(wasm_f32_abs)?,
+            OPCODE_F32_NEG => self.core_unary_f32(wasm_f32_neg)?,
+            OPCODE_F32_CEIL => self.core_unary_f32(wasm_f32_ceil)?,
+            OPCODE_F32_FLOOR => self.core_unary_f32(wasm_f32_floor)?,
+            OPCODE_F32_TRUNC => self.core_unary_f32(wasm_f32_trunc)?,
+            OPCODE_F32_NEAREST => self.core_unary_f32(wasm_f32_nearest)?,
+            OPCODE_F32_SQRT => self.core_unary_f32(wasm_f32_sqrt)?,
+            OPCODE_F32_ADD => self.core_binary_f32(|a, b| a + b)?,
+            OPCODE_F32_SUB => self.core_binary_f32(|a, b| a - b)?,
+            OPCODE_F32_MUL => self.core_binary_f32(|a, b| a * b)?,
+            OPCODE_F32_DIV => self.core_binary_f32(|a, b| a / b)?,
+            OPCODE_F32_MIN => self.core_binary_f32(wasm_f32_min)?,
+            OPCODE_F32_MAX => self.core_binary_f32(wasm_f32_max)?,
+            OPCODE_F32_COPYSIGN => self.core_binary_f32(wasm_f32_copysign)?,
+            OPCODE_F64_ABS => self.core_unary_f64(wasm_f64_abs)?,
+            OPCODE_F64_NEG => self.core_unary_f64(wasm_f64_neg)?,
+            OPCODE_F64_CEIL => self.core_unary_f64(wasm_f64_ceil)?,
+            OPCODE_F64_FLOOR => self.core_unary_f64(wasm_f64_floor)?,
+            OPCODE_F64_TRUNC => self.core_unary_f64(wasm_f64_trunc)?,
+            OPCODE_F64_NEAREST => self.core_unary_f64(wasm_f64_nearest)?,
+            OPCODE_F64_SQRT => self.core_unary_f64(wasm_f64_sqrt)?,
+            OPCODE_F64_ADD => self.core_binary_f64(|a, b| a + b)?,
+            OPCODE_F64_SUB => self.core_binary_f64(|a, b| a - b)?,
+            OPCODE_F64_MUL => self.core_binary_f64(|a, b| a * b)?,
+            OPCODE_F64_DIV => self.core_binary_f64(|a, b| a / b)?,
+            OPCODE_F64_MIN => self.core_binary_f64(wasm_f64_min)?,
+            OPCODE_F64_MAX => self.core_binary_f64(wasm_f64_max)?,
+            OPCODE_F64_COPYSIGN => self.core_binary_f64(wasm_f64_copysign)?,
+            OPCODE_I32_WRAP_I64 => {
+                let value = self.pop_core_i64()? as u32;
+                self.push_core_value(Value::I32(value))?;
+            }
+            OPCODE_I32_TRUNC_F32_S => {
+                let value = trunc_f32_to_i32_s(self.pop_core_f32()?)?;
+                self.push_core_value(Value::I32(value))?;
+            }
+            OPCODE_I32_TRUNC_F32_U => {
+                let value = trunc_f32_to_i32_u(self.pop_core_f32()?)?;
+                self.push_core_value(Value::I32(value))?;
+            }
+            OPCODE_I32_TRUNC_F64_S => {
+                let value = trunc_f64_to_i32_s(self.pop_core_f64()?)?;
+                self.push_core_value(Value::I32(value))?;
+            }
+            OPCODE_I32_TRUNC_F64_U => {
+                let value = trunc_f64_to_i32_u(self.pop_core_f64()?)?;
+                self.push_core_value(Value::I32(value))?;
+            }
+            OPCODE_I64_EXTEND_I32_S => {
+                let value = self.pop_core_i32()? as i32 as i64 as u64;
+                self.push_core_value(Value::I64(value))?;
+            }
+            OPCODE_I64_EXTEND_I32_U => {
+                let value = self.pop_core_i32()? as u64;
+                self.push_core_value(Value::I64(value))?;
+            }
+            OPCODE_I64_TRUNC_F32_S => {
+                let value = trunc_f32_to_i64_s(self.pop_core_f32()?)?;
+                self.push_core_value(Value::I64(value))?;
+            }
+            OPCODE_I64_TRUNC_F32_U => {
+                let value = trunc_f32_to_i64_u(self.pop_core_f32()?)?;
+                self.push_core_value(Value::I64(value))?;
+            }
+            OPCODE_I64_TRUNC_F64_S => {
+                let value = trunc_f64_to_i64_s(self.pop_core_f64()?)?;
+                self.push_core_value(Value::I64(value))?;
+            }
+            OPCODE_I64_TRUNC_F64_U => {
+                let value = trunc_f64_to_i64_u(self.pop_core_f64()?)?;
+                self.push_core_value(Value::I64(value))?;
+            }
+            OPCODE_F32_CONVERT_I32_S => {
+                let value = self.pop_core_i32()? as i32 as f32;
+                self.push_core_value(Value::F32(value.to_bits()))?;
+            }
+            OPCODE_F32_CONVERT_I32_U => {
+                let value = self.pop_core_i32()? as f32;
+                self.push_core_value(Value::F32(value.to_bits()))?;
+            }
+            OPCODE_F32_CONVERT_I64_S => {
+                let value = self.pop_core_i64()? as i64 as f32;
+                self.push_core_value(Value::F32(value.to_bits()))?;
+            }
+            OPCODE_F32_CONVERT_I64_U => {
+                let value = self.pop_core_i64()? as f32;
+                self.push_core_value(Value::F32(value.to_bits()))?;
+            }
+            OPCODE_F32_DEMOTE_F64 => {
+                let value = self.pop_core_f64()? as f32;
+                self.push_core_value(Value::F32(value.to_bits()))?;
+            }
+            OPCODE_F64_CONVERT_I32_S => {
+                let value = self.pop_core_i32()? as i32 as f64;
+                self.push_core_value(Value::F64(value.to_bits()))?;
+            }
+            OPCODE_F64_CONVERT_I32_U => {
+                let value = self.pop_core_i32()? as f64;
+                self.push_core_value(Value::F64(value.to_bits()))?;
+            }
+            OPCODE_F64_CONVERT_I64_S => {
+                let value = self.pop_core_i64()? as i64 as f64;
+                self.push_core_value(Value::F64(value.to_bits()))?;
+            }
+            OPCODE_F64_CONVERT_I64_U => {
+                let value = self.pop_core_i64()? as f64;
+                self.push_core_value(Value::F64(value.to_bits()))?;
+            }
+            OPCODE_F64_PROMOTE_F32 => {
+                let value = self.pop_core_f32()? as f64;
+                self.push_core_value(Value::F64(value.to_bits()))?;
+            }
+            OPCODE_I32_REINTERPRET_F32 => {
+                let value = self.pop_core_f32_bits()?;
+                self.push_core_value(Value::I32(value))?;
+            }
+            OPCODE_I64_REINTERPRET_F64 => {
+                let value = self.pop_core_f64_bits()?;
+                self.push_core_value(Value::I64(value))?;
+            }
+            OPCODE_F32_REINTERPRET_I32 => {
+                let value = self.pop_core_i32()?;
+                self.push_core_value(Value::F32(value))?;
+            }
+            OPCODE_F64_REINTERPRET_I64 => {
+                let value = self.pop_core_i64()?;
+                self.push_core_value(Value::F64(value))?;
+            }
+            OPCODE_I32_EXTEND8_S => {
+                let value = self.pop_core_i32()? as i8 as i32 as u32;
+                self.push_core_value(Value::I32(value))?;
+            }
+            OPCODE_I32_EXTEND16_S => {
+                let value = self.pop_core_i32()? as i16 as i32 as u32;
+                self.push_core_value(Value::I32(value))?;
+            }
+            OPCODE_I64_EXTEND8_S => {
+                let value = self.pop_core_i64()? as i8 as i64 as u64;
+                self.push_core_value(Value::I64(value))?;
+            }
+            OPCODE_I64_EXTEND16_S => {
+                let value = self.pop_core_i64()? as i16 as i64 as u64;
+                self.push_core_value(Value::I64(value))?;
+            }
+            OPCODE_I64_EXTEND32_S => {
+                let value = self.pop_core_i64()? as i32 as i64 as u64;
+                self.push_core_value(Value::I64(value))?;
+            }
+            OPCODE_REF_IS_NULL => {
+                let value = self.pop_core_value()?.as_funcref()?;
+                self.push_core_value(Value::I32((value == u32::MAX) as u32))?;
+            }
+            _ => return Err(WasmError::UnsupportedOpcode(opcode)),
+        }
+        Ok(None)
+    }
+
+    fn exec_misc(&mut self, instr: MiscInstr) -> Result<(), WasmError> {
+        match instr {
+            MiscInstr::MemoryInit { data_index } => {
+                let len = self.pop_core_i32()? as usize;
+                let src_addr = self.pop_core_i32()? as usize;
+                let dst_addr = self.pop_core_i32()?;
+                let dst = self.core_translate_addr(dst_addr)?;
+                self.core_memory_init(data_index, dst, src_addr, len)?;
+            }
+            MiscInstr::DataDrop { data_index } => {
+                if data_index >= self.data_dropped.len()
+                    || self.module.data_segments[data_index].is_none()
+                {
+                    return Err(WasmError::Invalid("core data.drop out of range"));
+                }
+                self.data_dropped[data_index] = true;
+            }
+            MiscInstr::MemoryCopy => {
+                let len = self.pop_core_i32()? as usize;
+                let src_addr = self.pop_core_i32()?;
+                let dst_addr = self.pop_core_i32()?;
+                let src = self.core_translate_addr(src_addr)?;
+                let dst = self.core_translate_addr(dst_addr)?;
+                self.core_memory_copy(dst, src, len)?;
+            }
+            MiscInstr::MemoryFill => {
+                let len = self.pop_core_i32()? as usize;
+                let value = self.pop_core_i32()? as u8;
+                let dst_addr = self.pop_core_i32()?;
+                let dst = self.core_translate_addr(dst_addr)?;
+                self.core_memory_fill(dst, value, len)?;
+            }
+            MiscInstr::TableInit {
+                elem_index,
+                table_index,
+            } => {
+                if table_index != 0 {
+                    return Err(WasmError::Invalid(
+                        "core table instruction index must be zero",
+                    ));
+                }
+                let len = self.pop_core_i32()? as usize;
+                let src = self.pop_core_i32()? as usize;
+                let dst = self.pop_core_i32()? as usize;
+                self.core_table_init(elem_index, dst, src, len)?;
+            }
+            MiscInstr::ElemDrop { elem_index } => {
+                if elem_index >= self.element_dropped.len()
+                    || self.module.element_segments[elem_index].is_none()
+                {
+                    return Err(WasmError::Invalid("core elem.drop out of range"));
+                }
+                self.element_dropped[elem_index] = true;
+            }
+            MiscInstr::TableCopy {
+                dst_table,
+                src_table,
+            } => {
+                if dst_table != 0 || src_table != 0 {
+                    return Err(WasmError::Invalid(
+                        "core table instruction index must be zero",
+                    ));
+                }
+                let len = self.pop_core_i32()? as usize;
+                let src = self.pop_core_i32()? as usize;
+                let dst = self.pop_core_i32()? as usize;
+                self.core_table_copy(dst, src, len)?;
+            }
+            MiscInstr::TableGrow { table_index } => {
+                if table_index != 0 {
+                    return Err(WasmError::Invalid(
+                        "core table instruction index must be zero",
+                    ));
+                }
+                let delta = self.pop_core_i32()? as usize;
+                let init = self.pop_core_value()?.as_funcref()?;
+                if init != u32::MAX {
+                    self.module.core_func_type_index(init)?;
+                }
+                let previous = self.table_size;
+                let Some(new_size) = self.table_size.checked_add(delta) else {
+                    self.push_core_value(Value::I32(u32::MAX))?;
+                    return Ok(());
+                };
+                if new_size > CORE_WASM_TABLE_CAPACITY {
+                    self.push_core_value(Value::I32(u32::MAX))?;
+                } else {
+                    for slot in self
+                        .table_functions
+                        .iter_mut()
+                        .take(new_size)
+                        .skip(self.table_size)
+                    {
+                        *slot = init;
+                    }
+                    self.table_size = new_size;
+                    self.push_core_value(Value::I32(previous as u32))?;
+                }
+            }
+            MiscInstr::TableSize { table_index } => {
+                if table_index != 0 {
+                    return Err(WasmError::Invalid(
+                        "core table instruction index must be zero",
+                    ));
+                }
+                self.push_core_value(Value::I32(self.table_size as u32))?;
+            }
+            MiscInstr::TableFill { table_index } => {
+                if table_index != 0 {
+                    return Err(WasmError::Invalid(
+                        "core table instruction index must be zero",
+                    ));
+                }
+                let len = self.pop_core_i32()? as usize;
+                let value = self.pop_core_value()?.as_funcref()?;
+                let start = self.pop_core_i32()? as usize;
+                if value != u32::MAX {
+                    self.module.core_func_type_index(value)?;
+                }
+                self.core_table_fill(start, value, len)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish_host_import(&mut self, results: &[Value]) -> Result<(), WasmError> {
         let pending = self.pending.take().ok_or(WasmError::PendingRequired)?;
         let PendingExecution::HostImport(import) = pending else {
             self.pending = Some(pending);
@@ -3013,8 +2890,7 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(super) fn complete_memory_grow_event(&mut self) -> Result<MemoryGrowEvent, WasmError> {
+    pub(super) fn finish_memory_grow_event(&mut self) -> Result<MemoryGrowEvent, WasmError> {
         let pending = self.pending.take().ok_or(WasmError::PendingRequired)?;
         let PendingExecution::MemoryGrow(event) = pending else {
             self.pending = Some(pending);
@@ -3184,6 +3060,66 @@ impl<'a> Interpreter<'a> {
             .ok_or(WasmError::StackUnderflow)
     }
 
+    fn current_instr(&mut self) -> Result<Instr, WasmError> {
+        let opcode = self.current_read_u8()?;
+        match opcode {
+            OPCODE_NOP => Ok(Instr::Nop),
+            OPCODE_BLOCK | OPCODE_LOOP | OPCODE_IF => {
+                let block_type = self.current_read_u8()?;
+                let (result_count, result_kind) = decode_core_block_type(block_type)?;
+                let target = self.current_control_target(self.current_frame()?.pc)?;
+                let mut control = ControlInstr::new(result_count, result_kind);
+                if target.end_pos == CoreControlTarget::NONE {
+                    return Err(WasmError::Invalid("core control target missing end"));
+                }
+                control.else_pos = target.else_pos;
+                control.end_pos = target.end_pos;
+                match opcode {
+                    OPCODE_BLOCK => Ok(Instr::Block(control)),
+                    OPCODE_LOOP => Ok(Instr::Loop(control)),
+                    _ => Ok(Instr::If(control)),
+                }
+            }
+            OPCODE_ELSE => Ok(Instr::Else),
+            OPCODE_END => Ok(Instr::End),
+            OPCODE_BR | OPCODE_BR_IF | OPCODE_CALL | OPCODE_LOCAL_GET | OPCODE_LOCAL_SET
+            | OPCODE_LOCAL_TEE | OPCODE_GLOBAL_GET | OPCODE_GLOBAL_SET | OPCODE_REF_FUNC
+            | OPCODE_TABLE_GET | OPCODE_TABLE_SET | OPCODE_MEMORY_SIZE | OPCODE_MEMORY_GROW => {
+                Ok(Instr::U32(opcode, self.current_read_var_u32()?))
+            }
+            OPCODE_BR_TABLE => Ok(Instr::BrTable(self.current_br_table()?)),
+            OPCODE_CALL_INDIRECT => {
+                let type_index = self.current_read_var_u32()?;
+                let table_index = self.current_read_var_u32()?;
+                Ok(Instr::CallIndirect {
+                    type_index,
+                    table_index,
+                })
+            }
+            OPCODE_I32_LOAD | OPCODE_I64_LOAD | OPCODE_F32_LOAD | OPCODE_F64_LOAD
+            | OPCODE_I32_LOAD8_S | OPCODE_I32_LOAD8_U | OPCODE_I32_LOAD16_S
+            | OPCODE_I32_LOAD16_U | OPCODE_I64_LOAD8_S | OPCODE_I64_LOAD8_U
+            | OPCODE_I64_LOAD16_S | OPCODE_I64_LOAD16_U | OPCODE_I64_LOAD32_S
+            | OPCODE_I64_LOAD32_U | OPCODE_I32_STORE | OPCODE_I64_STORE | OPCODE_F32_STORE
+            | OPCODE_F64_STORE | OPCODE_I32_STORE8 | OPCODE_I32_STORE16 | OPCODE_I64_STORE8
+            | OPCODE_I64_STORE16 | OPCODE_I64_STORE32 => {
+                let align = self.current_read_var_u32()?;
+                core::hint::black_box(align);
+                Ok(Instr::Mem {
+                    opcode,
+                    offset: self.current_read_var_u32()?,
+                })
+            }
+            OPCODE_I32_CONST => Ok(Instr::I32Const(self.current_read_var_i32()? as u32)),
+            OPCODE_I64_CONST => Ok(Instr::I64Const(self.current_read_var_i64()? as u64)),
+            OPCODE_F32_CONST => Ok(Instr::F32Const(self.current_read_fixed_u32()?)),
+            OPCODE_F64_CONST => Ok(Instr::F64Const(self.current_read_fixed_u64()?)),
+            OPCODE_REF_NULL => Ok(Instr::U32(opcode, self.current_read_u8()? as u32)),
+            OPCODE_MISC => Ok(Instr::Misc(self.current_misc_instr()?)),
+            _ => Ok(Instr::Simple(opcode)),
+        }
+    }
+
     fn current_control_target(&self, start_pos: usize) -> Result<CoreControlTarget, WasmError> {
         self.control_targets
             .get(..self.control_target_count)
@@ -3197,7 +3133,7 @@ impl<'a> Interpreter<'a> {
     }
 
     fn decode_current_frame_control_targets(&mut self) -> Result<(), WasmError> {
-        let code = self.current_frame()?.code;
+        let code: &'a [u8] = self.current_frame()?.code;
         self.control_target_count = decode_core_control_targets(code, &mut self.control_targets)?;
         Ok(())
     }
@@ -3262,6 +3198,28 @@ impl<'a> Interpreter<'a> {
         let value = reader.read_fixed_u64()?;
         frame.pc = reader.pos;
         Ok(value)
+    }
+
+    fn current_br_table(&mut self) -> Result<BrTableInstr, WasmError> {
+        let frame = self.current_frame_mut()?;
+        let mut reader = Reader {
+            bytes: frame.code,
+            pos: frame.pc,
+        };
+        let table = decode_core_br_table(&mut reader)?;
+        frame.pc = reader.pos;
+        Ok(table)
+    }
+
+    fn current_misc_instr(&mut self) -> Result<MiscInstr, WasmError> {
+        let frame = self.current_frame_mut()?;
+        let mut reader = Reader {
+            bytes: frame.code,
+            pos: frame.pc,
+        };
+        let instr = decode_core_misc_instr(&mut reader)?;
+        frame.pc = reader.pos;
+        Ok(instr)
     }
 
     fn push_core_value(&mut self, value: Value) -> Result<(), WasmError> {
@@ -3381,34 +3339,9 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    fn decode_core_br_table_depth(&mut self) -> Result<usize, WasmError> {
-        let count = self.current_read_var_u32()? as usize;
-        if count > CORE_WASM_BR_TABLE_CAPACITY {
-            return Err(WasmError::Unsupported("core br_table too large"));
-        }
-        let mut labels = [0usize; CORE_WASM_BR_TABLE_CAPACITY];
-        for slot in labels.iter_mut().take(count) {
-            *slot = self.current_read_var_u32()? as usize;
-        }
-        let default = self.current_read_var_u32()? as usize;
-        let selected = self.pop_core_i32()? as usize;
-        Ok(if selected < count {
-            labels[selected]
-        } else {
-            default
-        })
-    }
-
-    fn core_load_effective_addr(&mut self) -> Result<usize, WasmError> {
-        let align = self.current_read_var_u32()?;
-        core::hint::black_box(align);
-        let offset = self.current_read_var_u32()?;
+    fn core_effective_addr(&mut self, offset: u32) -> Result<usize, WasmError> {
         let base = self.pop_core_i32()?;
         self.core_translate_addr(base.checked_add(offset).ok_or(WasmError::Truncated)?)
-    }
-
-    fn core_store_effective_addr(&mut self) -> Result<usize, WasmError> {
-        self.core_load_effective_addr()
     }
 
     fn core_translate_addr(&self, addr: u32) -> Result<usize, WasmError> {
@@ -3617,24 +3550,6 @@ impl<'a> Interpreter<'a> {
         }
         for slot in self.table_functions.iter_mut().take(end).skip(start) {
             *slot = value;
-        }
-        Ok(())
-    }
-
-    fn expect_zero_memory_index(&mut self) -> Result<(), WasmError> {
-        if self.current_read_u8()? != 0 {
-            return Err(WasmError::Invalid(
-                "core memory instruction index must be zero",
-            ));
-        }
-        Ok(())
-    }
-
-    fn expect_zero_table_index_var(&mut self) -> Result<(), WasmError> {
-        if self.current_read_var_u32()? != 0 {
-            return Err(WasmError::Invalid(
-                "core table instruction index must be zero",
-            ));
         }
         Ok(())
     }
@@ -3925,15 +3840,6 @@ fn trunc_f64_to_i64_u(value: f64) -> Result<u64, WasmError> {
 }
 
 impl<'a> Vm<'a> {
-    #[cfg(test)]
-    pub(super) fn new(module: &'a [u8], handlers: Wasip1HandlerSet) -> Result<Self, WasmError> {
-        let mut vm = core::mem::MaybeUninit::<Self>::uninit();
-        unsafe {
-            Self::init_in_place(vm.as_mut_ptr(), module, handlers)?;
-            Ok(vm.assume_init())
-        }
-    }
-
     pub(super) unsafe fn init_in_place(
         dst: *mut Self,
         module: &'a [u8],
@@ -3970,11 +3876,15 @@ impl<'a> Vm<'a> {
         }
     }
 
-    pub(super) fn complete_host_call(&mut self, errno: u32) -> Result<(), WasmError> {
-        self.core.complete_host_import(&[Value::I32(errno)])
+    pub(super) fn finish_host_call(&mut self, errno: u32) -> Result<(), WasmError> {
+        self.core.finish_host_import(&[Value::I32(errno)])
     }
 
-    pub(super) fn complete_fd_write(
+    pub(super) fn finish_memory_grow_event(&mut self) -> Result<MemoryGrowEvent, WasmError> {
+        self.core.finish_memory_grow_event()
+    }
+
+    pub(super) fn finish_fd_write(
         &mut self,
         call: FdWriteCall,
         errno: u32,
@@ -3985,10 +3895,10 @@ impl<'a> Vm<'a> {
             0
         };
         self.core.write_memory_u32(call.nwritten, written)?;
-        self.complete_host_call(errno)
+        self.finish_host_call(errno)
     }
 
-    pub(super) fn complete_fd_read(
+    pub(super) fn finish_fd_read(
         &mut self,
         call: FdReadCall,
         bytes: &[u8],
@@ -4004,10 +3914,10 @@ impl<'a> Vm<'a> {
         } else {
             self.core.write_memory_u32(call.nread, 0)?;
         }
-        self.complete_host_call(errno)
+        self.finish_host_call(errno)
     }
 
-    pub(super) fn complete_fd_fdstat_get(
+    pub(super) fn finish_fd_fdstat_get(
         &mut self,
         call: FdRequestCall,
         stat: FdStat,
@@ -4026,10 +3936,10 @@ impl<'a> Vm<'a> {
                 .copy_from_slice(&stat.rights_inheriting().to_le_bytes());
             self.core.write_memory(call.out_ptr, &bytes)?;
         }
-        self.complete_host_call(errno)
+        self.finish_host_call(errno)
     }
 
-    pub(super) fn complete_clock_time_get(
+    pub(super) fn finish_clock_time_get(
         &mut self,
         call: ClockTimeGetCall,
         nanos: u64,
@@ -4039,10 +3949,10 @@ impl<'a> Vm<'a> {
             self.core
                 .write_memory(call.time_ptr, &nanos.to_le_bytes())?;
         }
-        self.complete_host_call(errno)
+        self.finish_host_call(errno)
     }
 
-    pub(super) fn complete_clock_res_get(
+    pub(super) fn finish_clock_res_get(
         &mut self,
         call: ClockResGetCall,
         resolution_nanos: u64,
@@ -4052,10 +3962,10 @@ impl<'a> Vm<'a> {
             self.core
                 .write_memory(call.resolution_ptr, &resolution_nanos.to_le_bytes())?;
         }
-        self.complete_host_call(errno)
+        self.finish_host_call(errno)
     }
 
-    pub(super) fn complete_poll_oneoff(
+    pub(super) fn finish_poll_oneoff(
         &mut self,
         call: PollOneoffCall,
         ready: u32,
@@ -4080,10 +3990,10 @@ impl<'a> Vm<'a> {
                 self.core.write_memory(call.out_ptr, &event)?;
             }
         }
-        self.complete_host_call(errno)
+        self.finish_host_call(errno)
     }
 
-    pub(super) fn complete_random_get(
+    pub(super) fn finish_random_get(
         &mut self,
         call: RandomGetCall,
         bytes: &[u8],
@@ -4095,51 +4005,15 @@ impl<'a> Vm<'a> {
             }
             self.core.write_memory(call.buf, bytes)?;
         }
-        self.complete_host_call(errno)
-    }
-
-    #[cfg(test)]
-    pub(super) fn complete_sched_yield(&mut self, errno: u32) -> Result<(), WasmError> {
-        self.complete_host_call(errno)
-    }
-
-    #[cfg(test)]
-    pub(super) fn complete_proc_raise(&mut self, errno: u32) -> Result<(), WasmError> {
-        self.complete_host_call(errno)
-    }
-
-    #[cfg(test)]
-    pub(super) fn complete_path_minimal(
-        &mut self,
-        _call: PathCall,
-        errno: u32,
-    ) -> Result<(), WasmError> {
-        self.complete_host_call(errno)
-    }
-
-    #[cfg(test)]
-    pub(super) fn complete_path_full(
-        &mut self,
-        _call: PathCall,
-        errno: u32,
-    ) -> Result<(), WasmError> {
-        self.complete_host_call(errno)
+        self.finish_host_call(errno)
     }
 
     pub(super) fn path_bytes(&self, call: PathCall) -> Result<PathBytes, WasmError> {
-        let (ptr, len) = match call.kind {
-            PathOp::PathOpen
-            | PathOp::PathFilestatGet
-            | PathOp::PathFilestatSetTimes
-            | PathOp::PathLink => (call.arg_i32(2)?, call.arg_i32(3)?),
-            PathOp::PathReadlink
-            | PathOp::PathCreateDirectory
-            | PathOp::PathRemoveDirectory
-            | PathOp::PathUnlinkFile
-            | PathOp::PathRename => (call.arg_i32(1)?, call.arg_i32(2)?),
-            PathOp::PathSymlink => (call.arg_i32(0)?, call.arg_i32(1)?),
-            _ => return Err(WasmError::Invalid("path import has no path bytes")),
-        };
+        if call.kind != PathOp::PathOpen {
+            return Err(WasmError::Invalid("only path_open carries path bytes"));
+        }
+        let ptr = call.arg_i32(2)?;
+        let len = call.arg_i32(3)?;
         if len as usize > CORE_WASIP1_PATH_CAPACITY {
             return Err(WasmError::Unsupported("path import path too long"));
         }
@@ -4151,7 +4025,7 @@ impl<'a> Vm<'a> {
         })
     }
 
-    pub(super) fn complete_path_open(
+    pub(super) fn finish_path_open(
         &mut self,
         call: PathCall,
         opened_fd: u32,
@@ -4163,113 +4037,10 @@ impl<'a> Vm<'a> {
         if errno == 0 {
             self.core.write_memory_u32(call.arg_i32(8)?, opened_fd)?;
         }
-        self.complete_host_call(errno)
+        self.finish_host_call(errno)
     }
 
-    #[cfg(test)]
-    pub(super) fn complete_fd_prestat_get(
-        &mut self,
-        call: PathCall,
-        name_len: u32,
-        errno: u32,
-    ) -> Result<(), WasmError> {
-        if call.kind != PathOp::FdPrestatGet {
-            return Err(WasmError::Invalid(
-                "fd_prestat_get completion kind mismatch",
-            ));
-        }
-        if errno == 0 {
-            let out = call.arg_i32(1)?;
-            let mut bytes = [0u8; WASIP1_PRESTAT_SIZE];
-            bytes[WASIP1_PRESTAT_TAG_OFFSET as usize] = WASIP1_PRESTAT_TAG_DIR;
-            bytes[WASIP1_PRESTAT_DIR_NAME_LEN_OFFSET as usize
-                ..WASIP1_PRESTAT_DIR_NAME_LEN_OFFSET as usize + 4]
-                .copy_from_slice(&name_len.to_le_bytes());
-            self.core.write_memory(out, &bytes)?;
-        }
-        self.complete_host_call(errno)
-    }
-
-    #[cfg(test)]
-    pub(super) fn complete_fd_prestat_dir_name(
-        &mut self,
-        call: PathCall,
-        name: &[u8],
-        errno: u32,
-    ) -> Result<(), WasmError> {
-        if call.kind != PathOp::FdPrestatDirName {
-            return Err(WasmError::Invalid(
-                "fd_prestat_dir_name completion kind mismatch",
-            ));
-        }
-        let ptr = call.arg_i32(1)?;
-        let len = call.arg_i32(2)?;
-        if errno == 0 {
-            if name.len() > len as usize {
-                return Err(WasmError::Unsupported("preopen name exceeds guest buffer"));
-            }
-            self.core.write_memory(ptr, name)?;
-        }
-        self.complete_host_call(errno)
-    }
-
-    #[cfg(test)]
-    pub(super) fn complete_fd_filestat_get(
-        &mut self,
-        call: PathCall,
-        stat: FileStat,
-        errno: u32,
-    ) -> Result<(), WasmError> {
-        if call.kind != PathOp::FdFilestatGet {
-            return Err(WasmError::Invalid(
-                "fd_filestat_get completion kind mismatch",
-            ));
-        }
-        self.complete_filestat_at(call.arg_i32(1)?, stat, errno)
-    }
-
-    #[cfg(test)]
-    pub(super) fn complete_path_filestat_get(
-        &mut self,
-        call: PathCall,
-        stat: FileStat,
-        errno: u32,
-    ) -> Result<(), WasmError> {
-        if call.kind != PathOp::PathFilestatGet {
-            return Err(WasmError::Invalid(
-                "path_filestat_get completion kind mismatch",
-            ));
-        }
-        self.complete_filestat_at(call.arg_i32(4)?, stat, errno)
-    }
-
-    #[cfg(test)]
-    pub(super) fn complete_path_readlink(
-        &mut self,
-        call: PathCall,
-        target: &[u8],
-        errno: u32,
-    ) -> Result<(), WasmError> {
-        if call.kind != PathOp::PathReadlink {
-            return Err(WasmError::Invalid("path_readlink completion kind mismatch"));
-        }
-        let buf = call.arg_i32(3)?;
-        let buf_len = call.arg_i32(4)?;
-        let bufused = call.arg_i32(5)?;
-        if errno == 0 {
-            if target.len() > buf_len as usize {
-                return Err(WasmError::Unsupported("readlink target exceeds buffer"));
-            }
-            self.core.write_memory(buf, target)?;
-            self.core.write_memory_u32(bufused, target.len() as u32)?;
-        } else {
-            self.core.write_memory_u32(bufused, 0)?;
-        }
-        self.complete_host_call(errno)
-    }
-
-    #[cfg(test)]
-    pub(super) fn complete_fd_readdir(
+    pub(super) fn finish_fd_readdir(
         &mut self,
         call: PathCall,
         bytes: &[u8],
@@ -4290,179 +4061,10 @@ impl<'a> Vm<'a> {
         } else {
             self.core.write_memory_u32(bufused, 0)?;
         }
-        self.complete_host_call(errno)
+        self.finish_host_call(errno)
     }
 
-    #[cfg(test)]
-    pub(super) fn complete_fd_pread(
-        &mut self,
-        call: PathCall,
-        bytes: &[u8],
-        errno: u32,
-    ) -> Result<(), WasmError> {
-        if call.kind != PathOp::FdPread {
-            return Err(WasmError::Invalid("fd_pread completion kind mismatch"));
-        }
-        let nread = call.arg_i32(4)?;
-        if errno == 0 {
-            let (dst, max_len) = self.path_fd_iovec(call, 1, 2)?;
-            if bytes.len() > max_len as usize {
-                return Err(WasmError::Unsupported("fd_pread reply exceeds iovec"));
-            }
-            self.core.write_memory(dst, bytes)?;
-            self.core.write_memory_u32(nread, bytes.len() as u32)?;
-        } else {
-            self.core.write_memory_u32(nread, 0)?;
-        }
-        self.complete_host_call(errno)
-    }
-
-    #[cfg(test)]
-    pub(super) fn complete_fd_seek(
-        &mut self,
-        call: PathCall,
-        new_offset: u64,
-        errno: u32,
-    ) -> Result<(), WasmError> {
-        if call.kind != PathOp::FdSeek {
-            return Err(WasmError::Invalid("fd_seek completion kind mismatch"));
-        }
-        if errno == 0 {
-            self.core
-                .write_memory(call.arg_i32(3)?, &new_offset.to_le_bytes())?;
-        }
-        self.complete_host_call(errno)
-    }
-
-    #[cfg(test)]
-    fn complete_filestat_at(
-        &mut self,
-        ptr: u32,
-        stat: FileStat,
-        errno: u32,
-    ) -> Result<(), WasmError> {
-        if errno == 0 {
-            let mut bytes = [0u8; WASIP1_FILESTAT_SIZE];
-            bytes[WASIP1_FILESTAT_FILETYPE_OFFSET as usize] = stat.filetype();
-            bytes[WASIP1_FILESTAT_SIZE_OFFSET as usize..WASIP1_FILESTAT_SIZE_OFFSET as usize + 8]
-                .copy_from_slice(&stat.size().to_le_bytes());
-            self.core.write_memory(ptr, &bytes)?;
-        }
-        self.complete_host_call(errno)
-    }
-
-    #[cfg(test)]
-    pub(super) fn complete_socket(
-        &mut self,
-        _call: SocketCall,
-        errno: u32,
-    ) -> Result<(), WasmError> {
-        if errno == 0 {
-            return Err(WasmError::Invalid(
-                "socket success requires typed socket completion",
-            ));
-        }
-        self.complete_host_call(errno)
-    }
-
-    #[cfg(test)]
-    pub(super) fn complete_sock_accept(
-        &mut self,
-        call: SocketCall,
-        accepted_fd: u32,
-        errno: u32,
-    ) -> Result<(), WasmError> {
-        if call.kind != SocketOp::SockAccept {
-            return Err(WasmError::Invalid("socket completion kind mismatch"));
-        }
-        if errno == 0 {
-            self.core.write_memory_u32(call.arg_i32(2)?, accepted_fd)?;
-        }
-        self.complete_host_call(errno)
-    }
-
-    #[cfg(test)]
-    pub(super) fn sock_recv_iovec(&self, call: SocketCall) -> Result<(u32, u32), WasmError> {
-        if call.kind != SocketOp::SockRecv {
-            return Err(WasmError::Invalid("socket recv kind mismatch"));
-        }
-        self.fd_read_iovec(FdReadCall {
-            fd: call.fd()?,
-            iovs: call.arg_i32(1)?,
-            iovs_len: call.arg_i32(2)?,
-            nread: call.arg_i32(4)?,
-        })
-    }
-
-    #[cfg(test)]
-    pub(super) fn complete_sock_recv(
-        &mut self,
-        call: SocketCall,
-        bytes: &[u8],
-        ro_flags: u32,
-        errno: u32,
-    ) -> Result<(), WasmError> {
-        if call.kind != SocketOp::SockRecv {
-            return Err(WasmError::Invalid("socket completion kind mismatch"));
-        }
-        let nread = call.arg_i32(4)?;
-        let ro_flags_ptr = call.arg_i32(5)?;
-        if errno == 0 {
-            let (dst, max_len) = self.sock_recv_iovec(call)?;
-            if bytes.len() > max_len as usize {
-                return Err(WasmError::Unsupported("sock_recv reply exceeds iovec"));
-            }
-            self.core.write_memory(dst, bytes)?;
-            self.core.write_memory_u32(nread, bytes.len() as u32)?;
-            self.core.write_memory_u32(ro_flags_ptr, ro_flags)?;
-        } else {
-            self.core.write_memory_u32(nread, 0)?;
-            self.core.write_memory_u32(ro_flags_ptr, 0)?;
-        }
-        self.complete_host_call(errno)
-    }
-
-    #[cfg(test)]
-    pub(super) fn sock_send_payload(&self, call: SocketCall) -> Result<InlinePayload, WasmError> {
-        if call.kind != SocketOp::SockSend {
-            return Err(WasmError::Invalid("socket send kind mismatch"));
-        }
-        self.fd_write_payload(FdWriteCall {
-            fd: call.fd()?,
-            iovs: call.arg_i32(1)?,
-            iovs_len: call.arg_i32(2)?,
-            nwritten: call.arg_i32(4)?,
-        })
-    }
-
-    #[cfg(test)]
-    pub(super) fn complete_sock_send(
-        &mut self,
-        call: SocketCall,
-        written: u32,
-        errno: u32,
-    ) -> Result<(), WasmError> {
-        if call.kind != SocketOp::SockSend {
-            return Err(WasmError::Invalid("socket completion kind mismatch"));
-        }
-        self.core
-            .write_memory_u32(call.arg_i32(4)?, if errno == 0 { written } else { 0 })?;
-        self.complete_host_call(errno)
-    }
-
-    #[cfg(test)]
-    pub(super) fn complete_sock_shutdown(
-        &mut self,
-        call: SocketCall,
-        errno: u32,
-    ) -> Result<(), WasmError> {
-        if call.kind != SocketOp::SockShutdown {
-            return Err(WasmError::Invalid("socket completion kind mismatch"));
-        }
-        self.complete_host_call(errno)
-    }
-
-    pub(super) fn complete_args_sizes_get(
+    pub(super) fn finish_args_sizes_get(
         &mut self,
         call: ArgsSizesGetCall,
         argc: u32,
@@ -4474,10 +4076,10 @@ impl<'a> Vm<'a> {
             self.core
                 .write_memory_u32(call.argv_buf_size_ptr, argv_buf_size)?;
         }
-        self.complete_host_call(errno)
+        self.finish_host_call(errno)
     }
 
-    pub(super) fn complete_environ_sizes_get(
+    pub(super) fn finish_environ_sizes_get(
         &mut self,
         call: EnvironSizesGetCall,
         environ_count: u32,
@@ -4490,10 +4092,10 @@ impl<'a> Vm<'a> {
             self.core
                 .write_memory_u32(call.environ_buf_size_ptr, environ_buf_size)?;
         }
-        self.complete_host_call(errno)
+        self.finish_host_call(errno)
     }
 
-    pub(super) fn complete_args_get(
+    pub(super) fn finish_args_get(
         &mut self,
         call: ArgsGetCall,
         args: &[&[u8]],
@@ -4502,10 +4104,10 @@ impl<'a> Vm<'a> {
         if errno == 0 {
             self.write_cstr_vector(call.argv, call.argv_buf, args)?;
         }
-        self.complete_host_call(errno)
+        self.finish_host_call(errno)
     }
 
-    pub(super) fn complete_environ_get(
+    pub(super) fn finish_environ_get(
         &mut self,
         call: EnvironGetCall,
         environ: &[(&[u8], &[u8])],
@@ -4514,7 +4116,7 @@ impl<'a> Vm<'a> {
         if errno == 0 {
             self.write_env_vector(call.environ, call.environ_buf, environ)?;
         }
-        self.complete_host_call(errno)
+        self.finish_host_call(errno)
     }
 
     #[cfg(test)]
@@ -4530,34 +4132,6 @@ impl<'a> Vm<'a> {
     #[cfg(test)]
     fn read_memory_u32(&self, addr: u32) -> Result<u32, WasmError> {
         self.core.read_memory_u32(addr)
-    }
-
-    #[cfg(all(test, any(feature = "wasip1-sys-sock", feature = "wasm-engine-core")))]
-    fn socket_as_engine_req(&self, call: SocketCall, lease_id: u8) -> Result<EngineReq, WasmError> {
-        match call.kind {
-            SocketOp::SockSend => {
-                let payload = self.sock_send_payload(call)?;
-                Ok(EngineReq::FdWrite(
-                    FdWrite::new_with_lease(call.fd()?, lease_id, payload.as_bytes()).map_err(
-                        |_| WasmError::Invalid("sock_send payload does not fit fd_write"),
-                    )?,
-                ))
-            }
-            SocketOp::SockRecv => {
-                let (_, max_len) = self.sock_recv_iovec(call)?;
-                if max_len > u8::MAX as u32 {
-                    return Err(WasmError::Invalid("sock_recv length does not fit fd_read"));
-                }
-                Ok(EngineReq::FdRead(
-                    FdRead::new_with_lease(call.fd()?, lease_id, max_len as u8)
-                        .map_err(|_| WasmError::Invalid("sock_recv length does not fit fd_read"))?,
-                ))
-            }
-            SocketOp::SockShutdown => Ok(EngineReq::FdClose(FdRequest::new(call.fd()?))),
-            SocketOp::SockAccept => Err(WasmError::Unsupported(
-                "sock_accept requires explicit network accept route",
-            )),
-        }
     }
 
     pub(super) fn fd_write_payload(&self, call: FdWriteCall) -> Result<InlinePayload, WasmError> {
@@ -4648,79 +4222,24 @@ impl<'a> Vm<'a> {
     }
 
     fn translate_wasip1_import(&mut self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if call.import.module != WASIP1_IMPORT_MODULE {
-            return Err(WasmError::Unsupported("unsupported host import module"));
-        }
-        match call.import.name {
-            WASIP1_IMPORT_FD_WRITE => self.translate_fd_write(call),
-            WASIP1_IMPORT_FD_READ => self.translate_fd_read(call),
-            WASIP1_IMPORT_FD_FDSTAT_GET => self.translate_fd_fdstat_get(call),
-            WASIP1_IMPORT_FD_CLOSE => self.translate_fd_close(call),
-            WASIP1_IMPORT_FD_PRESTAT_GET => self.translate_path_minimal(call, PathOp::FdPrestatGet),
-            WASIP1_IMPORT_FD_PRESTAT_DIR_NAME => {
-                self.translate_path_minimal(call, PathOp::FdPrestatDirName)
-            }
-            WASIP1_IMPORT_FD_FILESTAT_GET => {
-                self.translate_path_minimal(call, PathOp::FdFilestatGet)
-            }
-            WASIP1_IMPORT_FD_READDIR => self.translate_path_minimal(call, PathOp::FdReaddir),
-            WASIP1_IMPORT_FD_ADVISE => self.translate_path_full(call, PathOp::FdAdvise),
-            WASIP1_IMPORT_FD_ALLOCATE => self.translate_path_full(call, PathOp::FdAllocate),
-            WASIP1_IMPORT_FD_DATASYNC => self.translate_path_full(call, PathOp::FdDatasync),
-            WASIP1_IMPORT_FD_FDSTAT_SET_FLAGS => {
-                self.translate_path_full(call, PathOp::FdFdstatSetFlags)
-            }
-            WASIP1_IMPORT_FD_FDSTAT_SET_RIGHTS => {
-                self.translate_path_full(call, PathOp::FdFdstatSetRights)
-            }
-            WASIP1_IMPORT_FD_FILESTAT_SET_SIZE => {
-                self.translate_path_full(call, PathOp::FdFilestatSetSize)
-            }
-            WASIP1_IMPORT_FD_FILESTAT_SET_TIMES => {
-                self.translate_path_full(call, PathOp::FdFilestatSetTimes)
-            }
-            WASIP1_IMPORT_FD_PREAD => self.translate_path_full(call, PathOp::FdPread),
-            WASIP1_IMPORT_FD_PWRITE => self.translate_path_full(call, PathOp::FdPwrite),
-            WASIP1_IMPORT_FD_RENUMBER => self.translate_path_full(call, PathOp::FdRenumber),
-            WASIP1_IMPORT_FD_SEEK => self.translate_path_full(call, PathOp::FdSeek),
-            WASIP1_IMPORT_FD_SYNC => self.translate_path_full(call, PathOp::FdSync),
-            WASIP1_IMPORT_FD_TELL => self.translate_path_full(call, PathOp::FdTell),
-            WASIP1_IMPORT_CLOCK_RES_GET => self.translate_clock_res_get(call),
-            WASIP1_IMPORT_CLOCK_TIME_GET => self.translate_clock_time_get(call),
-            WASIP1_IMPORT_POLL_ONEOFF => self.translate_poll_oneoff(call),
-            WASIP1_IMPORT_SCHED_YIELD => self.translate_sched_yield(call),
-            WASIP1_IMPORT_PATH_OPEN => self.translate_path_minimal(call, PathOp::PathOpen),
-            WASIP1_IMPORT_PATH_FILESTAT_GET => {
-                self.translate_path_minimal(call, PathOp::PathFilestatGet)
-            }
-            WASIP1_IMPORT_PATH_READLINK => self.translate_path_minimal(call, PathOp::PathReadlink),
-            WASIP1_IMPORT_PATH_CREATE_DIRECTORY => {
-                self.translate_path_minimal(call, PathOp::PathCreateDirectory)
-            }
-            WASIP1_IMPORT_PATH_REMOVE_DIRECTORY => {
-                self.translate_path_minimal(call, PathOp::PathRemoveDirectory)
-            }
-            WASIP1_IMPORT_PATH_UNLINK_FILE => {
-                self.translate_path_minimal(call, PathOp::PathUnlinkFile)
-            }
-            WASIP1_IMPORT_PATH_RENAME => self.translate_path_minimal(call, PathOp::PathRename),
-            WASIP1_IMPORT_PATH_FILESTAT_SET_TIMES => {
-                self.translate_path_full(call, PathOp::PathFilestatSetTimes)
-            }
-            WASIP1_IMPORT_PATH_LINK => self.translate_path_full(call, PathOp::PathLink),
-            WASIP1_IMPORT_PATH_SYMLINK => self.translate_path_full(call, PathOp::PathSymlink),
-            WASIP1_IMPORT_RANDOM_GET => self.translate_random_get(call),
-            WASIP1_IMPORT_ARGS_SIZES_GET => self.translate_args_sizes_get(call),
-            WASIP1_IMPORT_ARGS_GET => self.translate_args_get(call),
-            WASIP1_IMPORT_ENVIRON_SIZES_GET => self.translate_environ_sizes_get(call),
-            WASIP1_IMPORT_ENVIRON_GET => self.translate_environ_get(call),
-            WASIP1_IMPORT_PROC_EXIT => self.translate_proc_exit(call),
-            WASIP1_IMPORT_PROC_RAISE => self.translate_proc_raise(call),
-            WASIP1_IMPORT_SOCK_ACCEPT => self.translate_socket(call, SocketOp::SockAccept),
-            WASIP1_IMPORT_SOCK_RECV => self.translate_socket(call, SocketOp::SockRecv),
-            WASIP1_IMPORT_SOCK_SEND => self.translate_socket(call, SocketOp::SockSend),
-            WASIP1_IMPORT_SOCK_SHUTDOWN => self.translate_socket(call, SocketOp::SockShutdown),
-            _ => Err(WasmError::Unsupported("unsupported wasip1 import")),
+        let HostImport::Wasip1(name) = call.import.host;
+        match name {
+            Wasip1ImportName::FdWrite => self.translate_fd_write(call),
+            Wasip1ImportName::FdRead => self.translate_fd_read(call),
+            Wasip1ImportName::FdFdstatGet => self.translate_fd_fdstat_get(call),
+            Wasip1ImportName::FdClose => self.translate_fd_close(call),
+            Wasip1ImportName::FdReaddir => self.translate_fd_readdir(call),
+            Wasip1ImportName::ClockResGet => self.translate_clock_res_get(call),
+            Wasip1ImportName::ClockTimeGet => self.translate_clock_time_get(call),
+            Wasip1ImportName::PollOneoff => self.translate_poll_oneoff(call),
+            Wasip1ImportName::PathOpen => self.translate_path_open(call),
+            Wasip1ImportName::RandomGet => self.translate_random_get(call),
+            Wasip1ImportName::ArgsSizesGet => self.translate_args_sizes_get(call),
+            Wasip1ImportName::ArgsGet => self.translate_args_get(call),
+            Wasip1ImportName::EnvironSizesGet => self.translate_environ_sizes_get(call),
+            Wasip1ImportName::EnvironGet => self.translate_environ_get(call),
+            Wasip1ImportName::ProcExit => self.translate_proc_exit(call),
+            _ => Err(WasmError::Unsupported(disabled_wasip1_import_message(name))),
         }
     }
 
@@ -4880,56 +4399,41 @@ impl<'a> Vm<'a> {
         }))
     }
 
-    fn translate_sched_yield(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::SchedYield) {
+    fn translate_fd_readdir(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
+        if !self.handlers.supports(Wasip1Syscall::FdReaddir) {
             return Err(WasmError::Unsupported(
-                "wasip1 sched_yield disabled by feature profile",
+                "wasip1 fd_readdir disabled by feature profile",
             ));
         }
-        if call.arg_count != 0 || call.result_count != 1 {
-            return Err(WasmError::Invalid("sched_yield import signature mismatch"));
+        if call.arg_count != 5 || call.result_count != 1 {
+            return Err(WasmError::Invalid("fd_readdir import signature mismatch"));
         }
-        Ok(VmEvent::SchedYield)
-    }
-
-    fn translate_path_minimal(
-        &self,
-        call: HostCall<'a>,
-        kind: PathOp,
-    ) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::PathMinimal) {
-            return Err(WasmError::Unsupported(
-                "wasip1 path-minimal disabled by feature profile",
-            ));
+        let fd = call.args()[0].as_i32()?;
+        if fd > u8::MAX as u32 {
+            return Err(WasmError::Invalid("fd does not fit u8"));
         }
-        Ok(VmEvent::PathMinimal(PathCall {
-            kind,
+        Ok(VmEvent::FdReaddir(PathCall {
+            kind: PathOp::FdReaddir,
             args: call.args,
             arg_count: call.arg_count,
         }))
     }
 
-    fn translate_path_full(&self, call: HostCall<'a>, kind: PathOp) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::PathFull) {
+    fn translate_path_open(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
+        if !self.handlers.supports(Wasip1Syscall::PathOpen) {
             return Err(WasmError::Unsupported(
-                "wasip1 path-full disabled by feature profile",
+                "wasip1 path_open disabled by feature profile",
             ));
         }
-        Ok(VmEvent::PathFull(PathCall {
-            kind,
-            args: call.args,
-            arg_count: call.arg_count,
-        }))
-    }
-
-    fn translate_socket(&self, call: HostCall<'a>, kind: SocketOp) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::NetworkObject) {
-            return Err(WasmError::Unsupported(
-                "wasip1 NetworkObject imports disabled by feature profile",
-            ));
+        if call.arg_count != 9 || call.result_count != 1 {
+            return Err(WasmError::Invalid("path_open import signature mismatch"));
         }
-        Ok(VmEvent::Socket(SocketCall {
-            kind,
+        let fd = call.args()[0].as_i32()?;
+        if fd > u8::MAX as u32 {
+            return Err(WasmError::Invalid("fd does not fit u8"));
+        }
+        Ok(VmEvent::PathOpen(PathCall {
+            kind: PathOp::PathOpen,
             args: call.args,
             arg_count: call.arg_count,
         }))
@@ -5013,21 +4517,9 @@ impl<'a> Vm<'a> {
             return Err(WasmError::Invalid("proc_exit import signature mismatch"));
         }
         let code = call.args()[0].as_i32()?;
-        self.core.complete_host_import(&[])?;
+        self.core.finish_host_import(&[])?;
         self.done = true;
         Ok(VmEvent::ProcExit(code))
-    }
-
-    fn translate_proc_raise(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::ProcRaise) {
-            return Err(WasmError::Unsupported(
-                "wasip1 proc_raise disabled by feature profile",
-            ));
-        }
-        if call.arg_count != 1 || call.result_count != 1 {
-            return Err(WasmError::Invalid("proc_raise import signature mismatch"));
-        }
-        Ok(VmEvent::ProcRaise(call.args()[0].as_i32()?))
     }
 
     fn read_core_u64(&self, addr: u32) -> Result<u64, WasmError> {
@@ -5045,25 +4537,6 @@ impl<'a> Vm<'a> {
         Ok((
             self.core.read_memory_u32(call.iovs)?,
             self.core.read_memory_u32(call.iovs.saturating_add(4))?,
-        ))
-    }
-
-    #[cfg(test)]
-    fn path_fd_iovec(
-        &self,
-        call: PathCall,
-        iovs_arg: usize,
-        iovs_len_arg: usize,
-    ) -> Result<(u32, u32), WasmError> {
-        if call.arg_i32(iovs_len_arg)? != 1 {
-            return Err(WasmError::Unsupported(
-                "only one path fd iovec is supported",
-            ));
-        }
-        let iovs = call.arg_i32(iovs_arg)?;
-        Ok((
-            self.core.read_memory_u32(iovs)?,
-            self.core.read_memory_u32(iovs.saturating_add(4))?,
         ))
     }
 
@@ -5113,371 +4586,81 @@ impl<'a> Vm<'a> {
 }
 
 #[cfg(test)]
-impl<'a> TestWasmModule<'a> {
-    fn parse(bytes: &'a [u8]) -> Result<Self, WasmError> {
-        let mut reader = Reader::new(bytes);
-        if reader.read_bytes(4)? != WASM_MAGIC {
-            return Err(WasmError::Invalid("invalid wasm magic"));
-        }
-        if reader.read_bytes(4)? != WASM_VERSION {
-            return Err(WasmError::Invalid("unsupported wasm version"));
-        }
-
-        let mut func_types = [FuncSig::Unsupported; MAX_FUNC_TYPES];
-        let mut type_count = 0usize;
-        let mut saw_imports = false;
-        let mut saw_functions = false;
-        let mut saw_exports = false;
-        let mut import_count = 0u32;
-        let mut local_start_sig = FuncSig::Unsupported;
-        let mut start_export_index = None;
-        let mut start_body = None;
-
-        while !reader.is_empty() {
-            let section_id = reader.read_u8()?;
-            let section_len = reader.read_var_u32()? as usize;
-            let section_bytes = reader.read_bytes(section_len)?;
-            let mut section = Reader::new(section_bytes);
-            match section_id {
-                SECTION_TYPE => {
-                    type_count = parse_type_section(&mut section, &mut func_types)?;
-                }
-                SECTION_IMPORT => {
-                    import_count = parse_import_section(&mut section, &func_types[..type_count])?;
-                    saw_imports = true;
-                }
-                SECTION_FUNCTION => {
-                    local_start_sig =
-                        parse_function_section(&mut section, &func_types[..type_count])?;
-                    saw_functions = true;
-                }
-                SECTION_EXPORT => {
-                    start_export_index = Some(parse_export_section(&mut section)?);
-                    saw_exports = true;
-                }
-                SECTION_CODE => {
-                    start_body = Some(parse_code_section(&mut section)?);
-                }
-                _ => {}
-            }
-            if !section.is_empty() {
-                return Err(WasmError::Invalid("section has trailing bytes"));
-            }
-        }
-
-        if !saw_imports {
-            return Err(WasmError::Invalid("missing import section"));
-        }
-        if !saw_functions {
-            return Err(WasmError::Invalid("missing function section"));
-        }
-        if !saw_exports {
-            return Err(WasmError::Invalid("missing export section"));
-        }
-        if !(MIN_IMPORT_COUNT..=MAX_IMPORT_COUNT).contains(&import_count) {
-            return Err(WasmError::Unsupported(
-                "test guest expects two or three function imports",
-            ));
-        }
-        if local_start_sig != FuncSig::UnitToUnit {
-            return Err(WasmError::Unsupported("start function must be () -> ()"));
-        }
-        if start_export_index != Some(import_count) {
-            return Err(WasmError::Invalid(
-                "expected _start to resolve to the first local function",
-            ));
-        }
-
-        Ok(Self {
-            start_body: start_body.ok_or(WasmError::Invalid("missing code section"))?,
-        })
-    }
-
-    fn instantiate(self) -> TestWasmInstance<'a> {
-        TestWasmInstance {
-            code: self.start_body,
-            pc: 0,
-            stack: [0; STACK_CAPACITY],
-            stack_len: 0,
-            pending: None,
-            done: false,
-        }
-    }
-}
-
-#[cfg(test)]
-impl<'a> TestWasmInstance<'a> {
-    fn new(module: &'a [u8]) -> Result<Self, WasmError> {
-        Ok(TestWasmModule::parse(module)?.instantiate())
-    }
-
-    fn resume(&mut self) -> Result<TestVmEvent, WasmError> {
-        self.resume_for_test_fuel(TEST_RESUME_FUEL)
-    }
-
-    fn resume_for_test_fuel(&mut self, mut fuel: u32) -> Result<TestVmEvent, WasmError> {
-        if self.done {
-            return Ok(TestVmEvent::Done);
-        }
-        if self.pending.is_some() {
-            return Err(WasmError::PendingHostCall);
-        }
-
-        let mut reader = Reader {
-            bytes: self.code,
-            pos: self.pc,
-        };
-
-        loop {
-            if fuel == 0 {
-                self.pc = reader.pos;
-                return Err(WasmError::FuelExhausted);
-            }
-            fuel -= 1;
-            let opcode = reader.read_u8()?;
-            match opcode {
-                OPCODE_UNREACHABLE => {
-                    self.pc = reader.pos;
-                    return Err(WasmError::Trap);
-                }
-                OPCODE_NOP => {
-                    self.pc = reader.pos;
-                }
-                OPCODE_I32_CONST => {
-                    let value = reader.read_var_i32()?;
-                    self.push(value)?;
-                    self.pc = reader.pos;
-                }
-                OPCODE_CALL => {
-                    let function_index = reader.read_var_u32()?;
-                    self.pc = reader.pos;
-                    return if function_index == LOG_IMPORT_INDEX {
-                        {
-                            let value = self.pop()? as u32;
-                            self.pending = Some(PendingHostCall::LogU32(value));
-                            Ok(TestVmEvent::HostCall(EngineReq::LogU32(value)))
-                        }
-                    } else if function_index == YIELD_IMPORT_INDEX {
-                        {
-                            self.pending = Some(PendingHostCall::Yield);
-                            Ok(TestVmEvent::HostCall(EngineReq::Yield))
-                        }
-                    } else {
-                        Err(WasmError::Unsupported("call target not supported"))
-                    };
-                }
-                OPCODE_END => {
-                    self.pc = reader.pos;
-                    if self.stack_len != 0 {
-                        return Err(WasmError::Invalid(
-                            "start function must end with an empty stack",
-                        ));
-                    }
-                    self.done = true;
-                    return Ok(TestVmEvent::Done);
-                }
-                _ => return Err(WasmError::Unsupported("opcode not supported")),
-            }
-        }
-    }
-
-    fn resume_for_test_budget(&mut self, run: BudgetRun) -> Result<TestBudgetedVmEvent, WasmError> {
-        match self.resume_for_test_fuel(run.fuel()) {
-            Ok(trap) => Ok(TestBudgetedVmEvent::Guest(trap)),
-            Err(WasmError::FuelExhausted) => Ok(TestBudgetedVmEvent::BudgetExpired(
-                BudgetExpired::new(run.run_id(), run.generation()),
-            )),
-            Err(error) => Err(error),
-        }
-    }
-
-    fn complete_host_call(&mut self, reply: EngineRet) -> Result<(), WasmError> {
-        let pending = self.pending.take().ok_or(WasmError::PendingRequired)?;
-        match (pending, reply) {
-            (PendingHostCall::LogU32(expected), EngineRet::Logged(actual))
-                if expected == actual =>
-            {
-                Ok(())
-            }
-            (PendingHostCall::Yield, EngineRet::Yielded) => Ok(()),
-            _ => Err(WasmError::PendingMismatch),
-        }
-    }
-
-    fn push(&mut self, value: i32) -> Result<(), WasmError> {
-        let slot = self
-            .stack
-            .get_mut(self.stack_len)
-            .ok_or(WasmError::StackOverflow)?;
-        *slot = value;
-        self.stack_len += 1;
-        Ok(())
-    }
-
-    fn pop(&mut self) -> Result<i32, WasmError> {
-        if self.stack_len == 0 {
-            return Err(WasmError::StackUnderflow);
-        }
-        self.stack_len -= 1;
-        Ok(self.stack[self.stack_len])
-    }
-}
-
-#[cfg(test)]
-fn parse_type_section(
-    section: &mut Reader<'_>,
-    func_types: &mut [FuncSig; MAX_FUNC_TYPES],
-) -> Result<usize, WasmError> {
-    let count = section.read_var_u32()? as usize;
-    if count > func_types.len() {
-        return Err(WasmError::Unsupported("too many test guest function types"));
-    }
-    for slot in func_types.iter_mut().take(count) {
-        if section.read_u8()? != FUNC_TYPE_FORM {
-            return Err(WasmError::Invalid("type section expects function forms"));
-        }
-        let param_count = section.read_var_u32()? as usize;
-        let sig = match param_count {
-            0 => FuncSig::UnitToUnit,
-            1 => {
-                if section.read_u8()? != VALTYPE_I32 {
-                    return Err(WasmError::Unsupported(
-                        "test guest import param must be i32",
-                    ));
-                }
-                FuncSig::I32ToUnit
-            }
-            _ => {
-                return Err(WasmError::Unsupported(
-                    "test guest import has too many params",
-                ));
-            }
-        };
-        let result_count = section.read_var_u32()? as usize;
-        if result_count != 0 {
-            return Err(WasmError::Unsupported(
-                "test guest import results are unsupported",
-            ));
-        }
-        *slot = sig;
-    }
-    Ok(count)
-}
-
-#[cfg(test)]
-fn parse_import_section(
-    section: &mut Reader<'_>,
-    func_types: &[FuncSig],
-) -> Result<u32, WasmError> {
-    let count = section.read_var_u32()?;
-    for index in 0..count {
-        let module = section.read_name()?;
-        let field = section.read_name()?;
-        if section.read_u8()? != EXTERNAL_KIND_FUNC {
-            return Err(WasmError::Unsupported(
-                "test guest imports must be functions",
-            ));
-        }
-        let type_index = section.read_var_u32()? as usize;
-        let sig = *func_types
-            .get(type_index)
-            .ok_or(WasmError::Invalid("import type index out of range"))?;
-        if module != b"hibana" {
-            return Err(WasmError::Invalid(
-                "test guest import module must be hibana",
-            ));
-        }
-        match index {
-            LOG_IMPORT_INDEX if field == b"log_u32" && sig == FuncSig::I32ToUnit => {}
-            YIELD_IMPORT_INDEX if field == b"yield_now" && sig == FuncSig::UnitToUnit => {}
-            _ => return Err(WasmError::Unsupported("unsupported test import shape")),
-        }
-    }
-    Ok(count)
-}
-
-#[cfg(test)]
-fn parse_function_section(
-    section: &mut Reader<'_>,
-    func_types: &[FuncSig],
-) -> Result<FuncSig, WasmError> {
-    let count = section.read_var_u32()?;
-    if count != 1 {
-        return Err(WasmError::Unsupported(
-            "test guest expects exactly one local function",
-        ));
-    }
-    let type_index = section.read_var_u32()? as usize;
-    let func_type = *func_types
-        .get(type_index)
-        .ok_or(WasmError::Invalid("function type index out of range"))?;
-    Ok(func_type)
-}
-
-#[cfg(test)]
-fn parse_export_section(section: &mut Reader<'_>) -> Result<u32, WasmError> {
-    let count = section.read_var_u32()?;
-    for export_index in 0..count {
-        core::hint::black_box(export_index);
-        let export_name = section.read_name()?;
-        let kind = section.read_u8()?;
-        let index = section.read_var_u32()?;
-        if export_name == b"_start" {
-            if kind != EXTERNAL_KIND_FUNC {
-                return Err(WasmError::Invalid("_start must export a function"));
-            }
-            return Ok(index);
-        }
-    }
-    Err(WasmError::Invalid("missing _start export"))
-}
-
-#[cfg(test)]
-fn parse_code_section<'a>(section: &mut Reader<'a>) -> Result<&'a [u8], WasmError> {
-    let count = section.read_var_u32()?;
-    if count != 1 {
-        return Err(WasmError::Unsupported(
-            "test guest expects exactly one code body",
-        ));
-    }
-    let body_len = section.read_var_u32()? as usize;
-    let body = section.read_bytes(body_len)?;
-    let mut body_reader = Reader::new(body);
-    let local_decl_count = body_reader.read_var_u32()?;
-    if local_decl_count != 0 {
-        return Err(WasmError::Unsupported("locals are not supported"));
-    }
-    Ok(&body[body_reader.pos..])
-}
-
-#[cfg(test)]
 mod tests {
+    #[cfg(any(feature = "wasip1-sys-path-open", feature = "wasm-engine-core"))]
+    use super::PathOp;
     use super::{
-        BAD_ROUTE_EARLY_YIELD_WASM_GUEST, EXTERNAL_KIND_FUNC, ExecutionEvent,
-        FUEL_EXHAUSTION_WASM_GUEST, FileStat, Interpreter, NORMAL_WASM_GUEST, OPCODE_CALL,
-        OPCODE_DROP, OPCODE_END, OPCODE_I32_CONST, OPCODE_I64_CONST, ROUTE_WASM_ALERT_VALUE,
-        ROUTE_WASM_GUEST, ROUTE_WASM_NORMAL_VALUE, SECTION_CODE, SECTION_EXPORT, SECTION_FUNCTION,
-        SECTION_IMPORT, SECTION_MEMORY, SECTION_TYPE, TEST_LOG_YIELD_WASM_GUEST, TEST_RESUME_FUEL,
-        TRAP_WASM_GUEST, TestBudgetedVmEvent, TestVmEvent, TestWasmInstance, TestWasmModule,
-        VALTYPE_I32, VALTYPE_I64, Value, Vm, VmEvent, WASIP1_FILESTAT_FILETYPE_OFFSET,
-        WASIP1_FILESTAT_SIZE_OFFSET, WASIP1_FILETYPE_DIRECTORY, WASIP1_FILETYPE_REGULAR_FILE,
-        WASIP1_IMPORT_MODULE, WASIP1_PRESTAT_DIR_NAME_LEN_OFFSET, WasmError,
+        EXTERNAL_KIND_FUNC, ExecutionEvent, Interpreter, OPCODE_CALL, OPCODE_DROP, OPCODE_END,
+        OPCODE_I32_CONST, OPCODE_I64_CONST, SECTION_CODE, SECTION_EXPORT, SECTION_FUNCTION,
+        SECTION_IMPORT, SECTION_MEMORY, SECTION_TYPE, TEST_RESUME_FUEL, VALTYPE_I32, VALTYPE_I64,
+        Value, Vm, VmEvent, WASIP1_FILETYPE_REGULAR_FILE, WasmError,
     };
     #[cfg(feature = "wasm-engine-core")]
     use super::{FdStat, WASIP1_FDSTAT_RIGHTS_BASE_OFFSET};
-    #[cfg(any(
-        feature = "wasip1-sys-path-open",
-        feature = "wasip1-sys-sock",
-        feature = "wasm-engine-core"
-    ))]
-    use super::{PathOp, SocketOp};
-    #[cfg(any(feature = "wasip1-sys-sock", feature = "wasm-engine-core"))]
-    use crate::choreography::protocol::{FdRead, FdRequest, FdWrite};
     use crate::{
-        choreography::protocol::{BudgetExpired, BudgetRun, EngineReq, EngineRet},
-        kernel::features::Wasip1HandlerSet,
+        choreography::protocol::BudgetRun,
+        kernel::features::{WASIP1_PREVIEW1_MODULE, Wasip1HandlerSet, Wasip1ImportName},
     };
+    use core::mem::MaybeUninit;
+    use std::boxed::Box;
+    use std::ops::{Deref, DerefMut};
     use std::vec::Vec;
+
+    struct TestInterpreter<'a> {
+        storage: Box<MaybeUninit<Interpreter<'a>>>,
+    }
+
+    impl<'a> TestInterpreter<'a> {
+        fn new(module: &'a [u8]) -> Result<Self, WasmError> {
+            let mut storage = Box::new(MaybeUninit::<Interpreter<'a>>::uninit());
+            unsafe {
+                Interpreter::init_in_place(storage.as_mut_ptr(), module)?;
+            }
+            Ok(Self { storage })
+        }
+    }
+
+    impl<'a> Deref for TestInterpreter<'a> {
+        type Target = Interpreter<'a>;
+
+        fn deref(&self) -> &Self::Target {
+            unsafe { self.storage.assume_init_ref() }
+        }
+    }
+
+    impl<'a> DerefMut for TestInterpreter<'a> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            unsafe { self.storage.assume_init_mut() }
+        }
+    }
+
+    struct TestVm<'a> {
+        storage: Box<MaybeUninit<Vm<'a>>>,
+    }
+
+    impl<'a> TestVm<'a> {
+        fn new(module: &'a [u8], handlers: Wasip1HandlerSet) -> Result<Self, WasmError> {
+            let mut storage = Box::new(MaybeUninit::<Vm<'a>>::uninit());
+            unsafe {
+                Vm::init_in_place(storage.as_mut_ptr(), module, handlers)?;
+            }
+            Ok(Self { storage })
+        }
+    }
+
+    impl<'a> Deref for TestVm<'a> {
+        type Target = Vm<'a>;
+
+        fn deref(&self) -> &Self::Target {
+            unsafe { self.storage.assume_init_ref() }
+        }
+    }
+
+    impl<'a> DerefMut for TestVm<'a> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            unsafe { self.storage.assume_init_mut() }
+        }
+    }
 
     #[derive(Clone, Copy)]
     enum TestWasmArg {
@@ -5541,7 +4724,7 @@ mod tests {
     }
 
     fn core_wasip1_single_import_module(
-        import_name: &[u8],
+        import_name: Wasip1ImportName,
         import_params: &[u8],
         import_results: &[u8],
         args: &[TestWasmArg],
@@ -5564,8 +4747,8 @@ mod tests {
 
         let mut imports = Vec::new();
         push_test_u32(&mut imports, 1);
-        push_test_name(&mut imports, WASIP1_IMPORT_MODULE);
-        push_test_name(&mut imports, import_name);
+        push_test_name(&mut imports, WASIP1_PREVIEW1_MODULE.as_bytes());
+        push_test_name(&mut imports, import_name.name().as_bytes());
         imports.push(EXTERNAL_KIND_FUNC);
         push_test_u32(&mut imports, 0);
         push_test_section(&mut module, SECTION_IMPORT, &imports);
@@ -5679,33 +4862,25 @@ mod tests {
     }
 
     #[test]
-    fn test_wasm_module_parses() {
-        let module = TestWasmModule::parse(TEST_LOG_YIELD_WASM_GUEST).expect("parse test wasm");
-        core::hint::black_box(module);
-    }
-
-    #[test]
-    fn core_wasm_engine_surfaces_imports_without_wasi_authority() {
-        static CORE_IMPORT_GUEST: &[u8] = &[
+    fn wasm_vm_rejects_non_wasip1_import_module() {
+        static HIBANA_IMPORT_GUEST: &[u8] = &[
             0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x01, 0x7f,
-            0x00, 0x60, 0x00, 0x00, 0x02, 0x23, 0x01, 0x16, b'w', b'a', b's', b'i', b'_', b's',
-            b'n', b'a', b'p', b's', b'h', b'o', b't', b'_', b'p', b'r', b'e', b'v', b'i', b'e',
-            b'w', b'1', 0x08, b'f', b'd', b'_', b'w', b'r', b'i', b't', b'e', 0x00, 0x00, 0x03,
-            0x02, 0x01, 0x01, 0x07, 0x0a, 0x01, 0x06, b'_', b's', b't', b'a', b'r', b't', 0x00,
-            0x01, 0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x07, 0x10, 0x00, 0x0b,
+            0x00, 0x60, 0x00, 0x00, 0x02, 0x25, 0x02, 0x06, b'h', b'i', b'b', b'a', b'n', b'a',
+            0x07, b'l', b'o', b'g', b'_', b'u', b'3', b'2', 0x00, 0x00, 0x06, b'h', b'i', b'b',
+            b'a', b'n', b'a', 0x09, b'y', b'i', b'e', b'l', b'd', b'_', b'n', b'o', b'w', 0x00,
+            0x01, 0x03, 0x02, 0x01, 0x01, 0x07, 0x0a, 0x01, 0x06, b'_', b's', b't', b'a', b'r',
+            b't', 0x00, 0x02, 0x0a, 0x0e, 0x01, 0x0c, 0x00, 0x41, 0xc1, 0x84, 0xa5, 0xc2, 0x04,
+            0x10, 0x00, 0x10, 0x01, 0x0b,
         ];
-        let mut core = Interpreter::new(CORE_IMPORT_GUEST).expect("instantiate core wasm");
-
-        let ExecutionEvent::HostImport(import) = core.resume().expect("resume to generic import")
-        else {
-            panic!("expected generic host import trap");
-        };
-        assert_eq!(import.import.module, b"wasi_snapshot_preview1");
-        assert_eq!(import.import.name, b"fd_write");
-        assert_eq!(import.args(), &[Value::I32(7)]);
-        core.complete_host_import(&[])
-            .expect("complete generic import without syscall handling");
-        assert_eq!(core.resume().expect("resume to done"), ExecutionEvent::Done);
+        match TestInterpreter::new(HIBANA_IMPORT_GUEST) {
+            Err(error) => {
+                assert_eq!(
+                    error,
+                    WasmError::Unsupported("unsupported host import module")
+                );
+            }
+            Ok(_) => panic!("non-WASI import module must be rejected"),
+        }
     }
 
     #[test]
@@ -5716,7 +4891,7 @@ mod tests {
             b'_', b's', b't', b'a', b'r', b't', 0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x41,
             0x01, 0x40, 0x00, 0x1a, 0x0b,
         ];
-        let mut core = Interpreter::new(CORE_MEMORY_GROW_GUEST).expect("instantiate core wasm");
+        let mut core = TestInterpreter::new(CORE_MEMORY_GROW_GUEST).expect("instantiate core wasm");
         assert_eq!(core.memory_pages(), 0);
 
         let ExecutionEvent::MemoryGrow(event) = core.resume().expect("resume to memory.grow event")
@@ -5728,7 +4903,7 @@ mod tests {
         assert_eq!(event.new_pages, Some(1));
         assert_eq!(core.memory_pages(), 1);
         assert_eq!(
-            core.complete_memory_grow_event()
+            core.finish_memory_grow_event()
                 .expect("host observes memory.grow"),
             event
         );
@@ -5744,7 +4919,7 @@ mod tests {
             0x0b, 0x05, 0x00, 0x10, 0x00, 0x1a, 0x0b,
         ];
         let mut core =
-            Interpreter::new(CORE_LOCAL_CALL_GUEST).expect("instantiate local-call core wasm");
+            TestInterpreter::new(CORE_LOCAL_CALL_GUEST).expect("instantiate local-call core wasm");
 
         assert_eq!(
             core.resume().expect("local call reaches done"),
@@ -5782,7 +4957,7 @@ mod tests {
         push_test_u32(&mut body, 0);
 
         let module = core_test_module(&body, true, None, None, None);
-        let mut core = Interpreter::new(&module).expect("instantiate if/block core wasm");
+        let mut core = TestInterpreter::new(&module).expect("instantiate if/block core wasm");
         assert_eq!(
             core.resume().expect("if/block reaches done"),
             ExecutionEvent::Done
@@ -5813,7 +4988,7 @@ mod tests {
         push_test_u32(&mut body, 0);
 
         let module = core_test_module(&body, true, None, None, None);
-        let mut core = Interpreter::new(&module).expect("instantiate sign-extension wasm");
+        let mut core = TestInterpreter::new(&module).expect("instantiate sign-extension wasm");
         assert_eq!(
             core.resume().expect("sign-extension reaches done"),
             ExecutionEvent::Done
@@ -5848,7 +5023,7 @@ mod tests {
         push_test_u32(&mut body, 0);
 
         let module = core_test_module(&body, true, None, Some(&data), None);
-        let mut core = Interpreter::new(&module).expect("instantiate passive data wasm");
+        let mut core = TestInterpreter::new(&module).expect("instantiate passive data wasm");
         assert_eq!(
             core.resume().expect("passive data reaches done"),
             ExecutionEvent::Done
@@ -5883,7 +5058,7 @@ mod tests {
         push_test_u32(&mut body, 0);
 
         let module = core_test_module(&body, true, None, None, None);
-        let mut core = Interpreter::new(&module).expect("instantiate float wasm");
+        let mut core = TestInterpreter::new(&module).expect("instantiate float wasm");
         assert_eq!(
             core.resume().expect("float reaches done"),
             ExecutionEvent::Done
@@ -5926,7 +5101,7 @@ mod tests {
         body.push(OPCODE_DROP);
 
         let module = core_test_module(&body, true, Some(1), None, None);
-        let mut core = Interpreter::new(&module).expect("instantiate table/ref wasm");
+        let mut core = TestInterpreter::new(&module).expect("instantiate table/ref wasm");
         assert_eq!(
             core.resume().expect("table/ref reaches done"),
             ExecutionEvent::Done
@@ -5948,13 +5123,13 @@ mod tests {
         ];
 
         assert!(matches!(
-            Vm::new(CORE_WASIP1_FD_WRITE_GUEST, Wasip1HandlerSet::EMPTY),
+            TestVm::new(CORE_WASIP1_FD_WRITE_GUEST, Wasip1HandlerSet::EMPTY),
             Err(WasmError::Unsupported(
                 "wasip1 fd_write disabled by feature profile"
             ))
         ));
 
-        let mut guest = Vm::new(CORE_WASIP1_FD_WRITE_GUEST, Wasip1HandlerSet::PICO_MIN)
+        let mut guest = TestVm::new(CORE_WASIP1_FD_WRITE_GUEST, Wasip1HandlerSet::PICO_MIN)
             .expect("instantiate core wasip1 fd_write guest");
         let VmEvent::FdWrite(write) = guest
             .resume(test_budget())
@@ -5970,7 +5145,7 @@ mod tests {
                 .as_bytes(),
             b"1"
         );
-        guest.complete_host_call(0).expect("return errno to core");
+        guest.finish_host_call(0).expect("return errno to core");
         assert_eq!(
             guest.resume(test_budget()).expect("done after fd_write"),
             VmEvent::Done
@@ -5985,7 +5160,7 @@ mod tests {
             .spawn(|| {
                 {
                     let fd_read = core_wasip1_single_import_module(
-                        b"fd_read",
+                        Wasip1ImportName::FdRead,
                         &[VALTYPE_I32, VALTYPE_I32, VALTYPE_I32, VALTYPE_I32],
                         &[VALTYPE_I32],
                         &[
@@ -5997,13 +5172,13 @@ mod tests {
                         true,
                     );
                     assert!(matches!(
-                        Vm::new(&fd_read, Wasip1HandlerSet::PICO_MIN),
+                        TestVm::new(&fd_read, Wasip1HandlerSet::PICO_MIN),
                         Err(WasmError::Unsupported(
                             "wasip1 fd_read disabled by feature profile"
                         ))
                     ));
                     let mut guest =
-                        Vm::new(&fd_read, Wasip1HandlerSet::FULL).expect("fd_read full");
+                        TestVm::new(&fd_read, Wasip1HandlerSet::FULL).expect("fd_read full");
                     let VmEvent::FdRead(read) = guest.resume(test_budget()).expect("fd_read trap")
                     else {
                         panic!("expected fd_read");
@@ -6012,18 +5187,19 @@ mod tests {
                     assert_eq!(read.iovs(), 16);
                     assert_eq!(read.iovs_len(), 1);
                     assert_eq!(read.nread(), 40);
-                    guest.complete_host_call(0).expect("complete fd_read errno");
+                    guest.finish_host_call(0).expect("complete fd_read errno");
                 }
 
                 {
                     let fdstat = core_wasip1_single_import_module(
-                        b"fd_fdstat_get",
+                        Wasip1ImportName::FdFdstatGet,
                         &[VALTYPE_I32, VALTYPE_I32],
                         &[VALTYPE_I32],
                         &[TestWasmArg::I32(1), TestWasmArg::I32(80)],
                         true,
                     );
-                    let mut guest = Vm::new(&fdstat, Wasip1HandlerSet::FULL).expect("fdstat full");
+                    let mut guest =
+                        TestVm::new(&fdstat, Wasip1HandlerSet::FULL).expect("fdstat full");
                     let VmEvent::FdFdstatGet(stat) =
                         guest.resume(test_budget()).expect("fdstat trap")
                     else {
@@ -6032,7 +5208,7 @@ mod tests {
                     assert_eq!(stat.fd(), 1);
                     assert_eq!(stat.out_ptr(), 80);
                     guest
-                        .complete_fd_fdstat_get(
+                        .finish_fd_fdstat_get(
                             stat,
                             FdStat::new(WASIP1_FILETYPE_REGULAR_FILE, 0, 0b11, 0),
                             0,
@@ -6047,60 +5223,26 @@ mod tests {
 
                 {
                     let fd_close = core_wasip1_single_import_module(
-                        b"fd_close",
+                        Wasip1ImportName::FdClose,
                         &[VALTYPE_I32],
                         &[VALTYPE_I32],
                         &[TestWasmArg::I32(7)],
                         false,
                     );
                     let mut guest =
-                        Vm::new(&fd_close, Wasip1HandlerSet::FULL).expect("fd_close full");
+                        TestVm::new(&fd_close, Wasip1HandlerSet::FULL).expect("fd_close full");
                     let VmEvent::FdClose(close) =
                         guest.resume(test_budget()).expect("fd_close trap")
                     else {
                         panic!("expected fd_close");
                     };
                     assert_eq!(close.fd(), 7);
-                    guest.complete_host_call(0).expect("complete fd_close");
-                }
-
-                {
-                    let fd_prestat_get = core_wasip1_single_import_module(
-                        b"fd_prestat_get",
-                        &[VALTYPE_I32, VALTYPE_I32],
-                        &[VALTYPE_I32],
-                        &[TestWasmArg::I32(3), TestWasmArg::I32(128)],
-                        true,
-                    );
-                    assert!(matches!(
-                        Vm::new(&fd_prestat_get, Wasip1HandlerSet::PICO_MIN),
-                        Err(WasmError::Unsupported(
-                            "wasip1 path-minimal disabled by feature profile"
-                        ))
-                    ));
-                    let mut guest = Vm::new(&fd_prestat_get, Wasip1HandlerSet::FULL)
-                        .expect("fd_prestat_get full");
-                    let VmEvent::PathMinimal(path) =
-                        guest.resume(test_budget()).expect("fd_prestat_get trap")
-                    else {
-                        panic!("expected path-minimal trap");
-                    };
-                    assert_eq!(path.kind(), PathOp::FdPrestatGet);
-                    assert_eq!(path.args(), &[Value::I32(3), Value::I32(128)]);
-                    guest
-                        .complete_path_minimal(path, 52)
-                        .expect("complete fd_prestat_get as ENOSYS");
-                    assert_eq!(
-                        guest
-                            .resume(test_budget())
-                            .expect("done after fd_prestat_get"),
-                        VmEvent::Done
-                    );
+                    guest.finish_host_call(0).expect("complete fd_close");
                 }
 
                 {
                     let path_open = core_wasip1_single_import_module(
-                        b"path_open",
+                        Wasip1ImportName::PathOpen,
                         &[
                             VALTYPE_I32,
                             VALTYPE_I32,
@@ -6127,17 +5269,17 @@ mod tests {
                         true,
                     );
                     let mut guest =
-                        Vm::new(&path_open, Wasip1HandlerSet::FULL).expect("path_open full");
-                    let VmEvent::PathMinimal(path) =
+                        TestVm::new(&path_open, Wasip1HandlerSet::FULL).expect("path_open full");
+                    let VmEvent::PathOpen(path) =
                         guest.resume(test_budget()).expect("path_open trap")
                     else {
-                        panic!("expected path-minimal path_open trap");
+                        panic!("expected path_open trap");
                     };
                     assert_eq!(path.kind(), PathOp::PathOpen);
                     assert_eq!(path.args().len(), 9);
                     assert_eq!(path.args()[5], Value::I64(1));
                     guest
-                        .complete_path_minimal(path, 52)
+                        .finish_path_open(path, 0, 52)
                         .expect("complete path_open as ENOSYS");
                     assert_eq!(
                         guest.resume(test_budget()).expect("done after path_open"),
@@ -6145,325 +5287,51 @@ mod tests {
                     );
                 }
 
-                {
-                    let fd_seek = core_wasip1_single_import_module(
-                        b"fd_seek",
-                        &[VALTYPE_I32, VALTYPE_I64, VALTYPE_I32, VALTYPE_I32],
+                for unsupported in [
+                    Wasip1ImportName::FdPrestatGet,
+                    Wasip1ImportName::FdSeek,
+                    Wasip1ImportName::FdFdstatSetRights,
+                    Wasip1ImportName::PathLink,
+                    Wasip1ImportName::SockSend,
+                    Wasip1ImportName::SockRecv,
+                    Wasip1ImportName::SockAccept,
+                    Wasip1ImportName::SockShutdown,
+                    Wasip1ImportName::SchedYield,
+                    Wasip1ImportName::ProcRaise,
+                ] {
+                    let module = core_wasip1_single_import_module(
+                        unsupported,
                         &[VALTYPE_I32],
-                        &[
-                            TestWasmArg::I32(3),
-                            TestWasmArg::I64(42),
-                            TestWasmArg::I32(0),
-                            TestWasmArg::I32(224),
-                        ],
-                        true,
-                    );
-                    assert!(matches!(
-                        Vm::new(&fd_seek, Wasip1HandlerSet::PICO_MIN),
-                        Err(WasmError::Unsupported(
-                            "wasip1 path-full disabled by feature profile"
-                        ))
-                    ));
-                    let mut guest =
-                        Vm::new(&fd_seek, Wasip1HandlerSet::FULL).expect("fd_seek full");
-                    let VmEvent::PathFull(path) =
-                        guest.resume(test_budget()).expect("fd_seek trap")
-                    else {
-                        panic!("expected path-full fd_seek trap");
-                    };
-                    assert_eq!(path.kind(), PathOp::FdSeek);
-                    assert_eq!(
-                        path.args(),
-                        &[
-                            Value::I32(3),
-                            Value::I64(42),
-                            Value::I32(0),
-                            Value::I32(224),
-                        ]
-                    );
-                    guest
-                        .complete_path_full(path, 52)
-                        .expect("complete fd_seek as ENOSYS");
-                    assert_eq!(
-                        guest.resume(test_budget()).expect("done after fd_seek"),
-                        VmEvent::Done
-                    );
-                }
-
-                {
-                    let fd_fdstat_set_rights = core_wasip1_single_import_module(
-                        b"fd_fdstat_set_rights",
-                        &[VALTYPE_I32, VALTYPE_I64, VALTYPE_I64],
                         &[VALTYPE_I32],
-                        &[
-                            TestWasmArg::I32(3),
-                            TestWasmArg::I64(0x10),
-                            TestWasmArg::I64(0x20),
-                        ],
-                        true,
+                        &[TestWasmArg::I32(3)],
+                        false,
                     );
-                    assert!(matches!(
-                        Vm::new(&fd_fdstat_set_rights, Wasip1HandlerSet::PICO_MIN),
-                        Err(WasmError::Unsupported(
-                            "wasip1 path-full disabled by feature profile"
-                        ))
-                    ));
-                    let mut guest = Vm::new(&fd_fdstat_set_rights, Wasip1HandlerSet::FULL)
-                        .expect("fd_fdstat_set_rights full");
-                    let VmEvent::PathFull(path) = guest
-                        .resume(test_budget())
-                        .expect("fd_fdstat_set_rights trap")
-                    else {
-                        panic!("expected path-full fd_fdstat_set_rights trap");
-                    };
-                    assert_eq!(path.kind(), PathOp::FdFdstatSetRights);
-                    assert_eq!(
-                        path.args(),
-                        &[Value::I32(3), Value::I64(0x10), Value::I64(0x20),]
+                    assert!(
+                        matches!(
+                            TestVm::new(&module, Wasip1HandlerSet::FULL),
+                            Err(WasmError::Unsupported(_))
+                        ),
+                        "{} should be rejected by the active WASI P1 surface",
+                        unsupported.name()
                     );
-                    guest
-                        .complete_path_full(path, 52)
-                        .expect("complete fd_fdstat_set_rights as ENOSYS");
-                    assert_eq!(
-                        guest
-                            .resume(test_budget())
-                            .expect("done after fd_fdstat_set_rights"),
-                        VmEvent::Done
-                    );
-                }
-
-                {
-                    let path_link = core_wasip1_single_import_module(
-                        b"path_link",
-                        &[
-                            VALTYPE_I32,
-                            VALTYPE_I32,
-                            VALTYPE_I32,
-                            VALTYPE_I32,
-                            VALTYPE_I32,
-                            VALTYPE_I32,
-                            VALTYPE_I32,
-                        ],
-                        &[VALTYPE_I32],
-                        &[
-                            TestWasmArg::I32(3),
-                            TestWasmArg::I32(0),
-                            TestWasmArg::I32(240),
-                            TestWasmArg::I32(4),
-                            TestWasmArg::I32(5),
-                            TestWasmArg::I32(264),
-                            TestWasmArg::I32(6),
-                        ],
-                        true,
-                    );
-                    let mut guest =
-                        Vm::new(&path_link, Wasip1HandlerSet::FULL).expect("path_link full");
-                    let VmEvent::PathFull(path) =
-                        guest.resume(test_budget()).expect("path_link trap")
-                    else {
-                        panic!("expected path-full path_link trap");
-                    };
-                    assert_eq!(path.kind(), PathOp::PathLink);
-                    assert_eq!(path.args().len(), 7);
-                    guest
-                        .complete_path_full(path, 52)
-                        .expect("complete path_link as ENOSYS");
-                }
-
-                {
-                    let sock_send = core_wasip1_single_import_module(
-                        b"sock_send",
-                        &[
-                            VALTYPE_I32,
-                            VALTYPE_I32,
-                            VALTYPE_I32,
-                            VALTYPE_I32,
-                            VALTYPE_I32,
-                        ],
-                        &[VALTYPE_I32],
-                        &[
-                            TestWasmArg::I32(30),
-                            TestWasmArg::I32(128),
-                            TestWasmArg::I32(1),
-                            TestWasmArg::I32(0),
-                            TestWasmArg::I32(152),
-                        ],
-                        true,
-                    );
-                    assert!(matches!(
-                        Vm::new(&sock_send, Wasip1HandlerSet::PICO_MIN),
-                        Err(WasmError::Unsupported(
-                            "wasip1 NetworkObject imports disabled by feature profile"
-                        ))
-                    ));
-                    let mut guest =
-                        Vm::new(&sock_send, Wasip1HandlerSet::FULL).expect("sock_send full");
-                    let VmEvent::Socket(sock) =
-                        guest.resume(test_budget()).expect("sock_send trap")
-                    else {
-                        panic!("expected socket sock_send trap");
-                    };
-                    assert_eq!(sock.kind(), SocketOp::SockSend);
-                    assert_eq!(
-                        sock.args(),
-                        &[
-                            Value::I32(30),
-                            Value::I32(128),
-                            Value::I32(1),
-                            Value::I32(0),
-                            Value::I32(152),
-                        ]
-                    );
-                    assert_eq!(
-                        guest
-                            .sock_send_payload(sock)
-                            .expect("sock_send payload")
-                            .as_bytes(),
-                        b""
-                    );
-                    assert_eq!(
-                        guest
-                            .socket_as_engine_req(sock, 8)
-                            .expect("sock_send as fd_write"),
-                        EngineReq::FdWrite(FdWrite::new_with_lease(30, 8, b"").expect("fd_write"))
-                    );
-                    guest
-                        .complete_sock_send(sock, 4, 0)
-                        .expect("complete sock_send");
-                    assert_eq!(guest.read_memory_u32(152).expect("sock_send nwritten"), 4);
-                    assert_eq!(
-                        guest.resume(test_budget()).expect("done after sock_send"),
-                        VmEvent::Done
-                    );
-                }
-
-                {
-                    let sock_recv = core_wasip1_single_import_module(
-                        b"sock_recv",
-                        &[
-                            VALTYPE_I32,
-                            VALTYPE_I32,
-                            VALTYPE_I32,
-                            VALTYPE_I32,
-                            VALTYPE_I32,
-                            VALTYPE_I32,
-                        ],
-                        &[VALTYPE_I32],
-                        &[
-                            TestWasmArg::I32(31),
-                            TestWasmArg::I32(160),
-                            TestWasmArg::I32(1),
-                            TestWasmArg::I32(0),
-                            TestWasmArg::I32(184),
-                            TestWasmArg::I32(188),
-                        ],
-                        true,
-                    );
-                    let mut guest =
-                        Vm::new(&sock_recv, Wasip1HandlerSet::FULL).expect("sock_recv full");
-                    let VmEvent::Socket(sock) =
-                        guest.resume(test_budget()).expect("sock_recv trap")
-                    else {
-                        panic!("expected socket sock_recv trap");
-                    };
-                    assert_eq!(sock.kind(), SocketOp::SockRecv);
-                    assert_eq!(sock.args().len(), 6);
-                    assert_eq!(
-                        guest
-                            .socket_as_engine_req(sock, 9)
-                            .expect("sock_recv as fd_read"),
-                        EngineReq::FdRead(FdRead::new_with_lease(31, 9, 0).expect("fd_read"))
-                    );
-                    guest
-                        .complete_sock_recv(sock, b"", 2, 0)
-                        .expect("complete sock_recv");
-                    assert_eq!(guest.read_memory_u32(184).expect("sock_recv nread"), 0);
-                    assert_eq!(guest.read_memory_u32(188).expect("sock_recv flags"), 2);
-                }
-
-                {
-                    let sock_accept = core_wasip1_single_import_module(
-                        b"sock_accept",
-                        &[VALTYPE_I32, VALTYPE_I32, VALTYPE_I32],
-                        &[VALTYPE_I32],
-                        &[
-                            TestWasmArg::I32(32),
-                            TestWasmArg::I32(0),
-                            TestWasmArg::I32(196),
-                        ],
-                        true,
-                    );
-                    let mut guest =
-                        Vm::new(&sock_accept, Wasip1HandlerSet::FULL).expect("sock_accept full");
-                    let VmEvent::Socket(sock) =
-                        guest.resume(test_budget()).expect("sock_accept trap")
-                    else {
-                        panic!("expected socket sock_accept trap");
-                    };
-                    assert_eq!(sock.kind(), SocketOp::SockAccept);
-                    assert_eq!(sock.args().len(), 3);
-                    assert!(matches!(
-                        guest.socket_as_engine_req(sock, 0),
-                        Err(WasmError::Unsupported(
-                            "sock_accept requires explicit network accept route"
-                        ))
-                    ));
-                    guest
-                        .complete_sock_accept(sock, 44, 0)
-                        .expect("complete sock_accept");
-                    assert_eq!(guest.read_memory_u32(196).expect("accepted fd"), 44);
-                }
-
-                {
-                    let sock_shutdown = core_wasip1_single_import_module(
-                        b"sock_shutdown",
-                        &[VALTYPE_I32, VALTYPE_I32],
-                        &[VALTYPE_I32],
-                        &[TestWasmArg::I32(33), TestWasmArg::I32(3)],
-                        true,
-                    );
-                    let mut guest = Vm::new(&sock_shutdown, Wasip1HandlerSet::FULL)
-                        .expect("sock_shutdown full");
-                    let VmEvent::Socket(sock) =
-                        guest.resume(test_budget()).expect("sock_shutdown trap")
-                    else {
-                        panic!("expected socket sock_shutdown trap");
-                    };
-                    assert_eq!(sock.kind(), SocketOp::SockShutdown);
-                    assert_eq!(sock.args(), &[Value::I32(33), Value::I32(3)]);
-                    assert_eq!(
-                        guest
-                            .socket_as_engine_req(sock, 0)
-                            .expect("sock_shutdown as fd_close"),
-                        EngineReq::FdClose(FdRequest::new(33))
-                    );
-                    assert!(matches!(
-                        guest.complete_socket(sock, 0),
-                        Err(WasmError::Invalid(
-                            "socket success requires typed socket completion"
-                        ))
-                    ));
-                    guest
-                        .complete_sock_shutdown(sock, 0)
-                        .expect("complete sock_shutdown");
                 }
 
                 {
                     let clock_res = core_wasip1_single_import_module(
-                        b"clock_res_get",
+                        Wasip1ImportName::ClockResGet,
                         &[VALTYPE_I32, VALTYPE_I32],
                         &[VALTYPE_I32],
                         &[TestWasmArg::I32(1), TestWasmArg::I32(88)],
                         true,
                     );
                     assert!(matches!(
-                        Vm::new(&clock_res, Wasip1HandlerSet::PICO_MIN),
+                        TestVm::new(&clock_res, Wasip1HandlerSet::PICO_MIN),
                         Err(WasmError::Unsupported(
                             "wasip1 clock_res_get disabled by feature profile"
                         ))
                     ));
-                    let mut guest =
-                        Vm::new(&clock_res, Wasip1HandlerSet::FULL).expect("clock_res_get full");
+                    let mut guest = TestVm::new(&clock_res, Wasip1HandlerSet::FULL)
+                        .expect("clock_res_get full");
                     let VmEvent::ClockResGet(clock) =
                         guest.resume(test_budget()).expect("clock_res_get trap")
                     else {
@@ -6472,7 +5340,7 @@ mod tests {
                     assert_eq!(clock.clock_id(), 1);
                     assert_eq!(clock.resolution_ptr(), 88);
                     guest
-                        .complete_clock_res_get(clock, 1_000_000, 0)
+                        .finish_clock_res_get(clock, 1_000_000, 0)
                         .expect("complete clock_res_get");
                     let mut resolution = [0u8; 8];
                     guest
@@ -6483,7 +5351,7 @@ mod tests {
 
                 {
                     let clock = core_wasip1_single_import_module(
-                        b"clock_time_get",
+                        Wasip1ImportName::ClockTimeGet,
                         &[VALTYPE_I32, VALTYPE_I64, VALTYPE_I32],
                         &[VALTYPE_I32],
                         &[
@@ -6493,7 +5361,8 @@ mod tests {
                         ],
                         true,
                     );
-                    let mut guest = Vm::new(&clock, Wasip1HandlerSet::FULL).expect("clock full");
+                    let mut guest =
+                        TestVm::new(&clock, Wasip1HandlerSet::FULL).expect("clock full");
                     let VmEvent::ClockTimeGet(clock) =
                         guest.resume(test_budget()).expect("clock trap")
                     else {
@@ -6503,7 +5372,7 @@ mod tests {
                     assert_eq!(clock.precision(), 1_000);
                     assert_eq!(clock.time_ptr(), 96);
                     guest
-                        .complete_clock_time_get(clock, 123_456_789, 0)
+                        .finish_clock_time_get(clock, 123_456_789, 0)
                         .expect("complete clock");
                     let mut nanos = [0u8; 8];
                     guest
@@ -6514,13 +5383,14 @@ mod tests {
 
                 {
                     let random = core_wasip1_single_import_module(
-                        b"random_get",
+                        Wasip1ImportName::RandomGet,
                         &[VALTYPE_I32, VALTYPE_I32],
                         &[VALTYPE_I32],
                         &[TestWasmArg::I32(112), TestWasmArg::I32(4)],
                         true,
                     );
-                    let mut guest = Vm::new(&random, Wasip1HandlerSet::FULL).expect("random full");
+                    let mut guest =
+                        TestVm::new(&random, Wasip1HandlerSet::FULL).expect("random full");
                     let VmEvent::RandomGet(random) =
                         guest.resume(test_budget()).expect("random trap")
                     else {
@@ -6529,69 +5399,13 @@ mod tests {
                     assert_eq!(random.buf(), 112);
                     assert_eq!(random.buf_len(), 4);
                     guest
-                        .complete_random_get(random, b"RAND", 0)
+                        .finish_random_get(random, b"RAND", 0)
                         .expect("complete random");
                     let mut random_out = [0u8; 4];
                     guest
                         .read_memory(112, &mut random_out)
                         .expect("read random result");
                     assert_eq!(&random_out, b"RAND");
-                }
-
-                {
-                    let sched_yield = core_wasip1_single_import_module(
-                        b"sched_yield",
-                        &[],
-                        &[VALTYPE_I32],
-                        &[],
-                        false,
-                    );
-                    assert!(matches!(
-                        Vm::new(&sched_yield, Wasip1HandlerSet::PICO_MIN),
-                        Err(WasmError::Unsupported(
-                            "wasip1 sched_yield disabled by feature profile"
-                        ))
-                    ));
-                    let mut guest =
-                        Vm::new(&sched_yield, Wasip1HandlerSet::FULL).expect("sched_yield full");
-                    assert_eq!(
-                        guest.resume(test_budget()).expect("sched_yield trap"),
-                        VmEvent::SchedYield
-                    );
-                    guest.complete_sched_yield(0).expect("complete sched_yield");
-                    assert_eq!(
-                        guest.resume(test_budget()).expect("done after sched_yield"),
-                        VmEvent::Done
-                    );
-                }
-
-                {
-                    let proc_raise = core_wasip1_single_import_module(
-                        b"proc_raise",
-                        &[VALTYPE_I32],
-                        &[VALTYPE_I32],
-                        &[TestWasmArg::I32(9)],
-                        false,
-                    );
-                    assert!(matches!(
-                        Vm::new(&proc_raise, Wasip1HandlerSet::PICO_MIN),
-                        Err(WasmError::Unsupported(
-                            "wasip1 proc_raise disabled by feature profile"
-                        ))
-                    ));
-                    let mut guest =
-                        Vm::new(&proc_raise, Wasip1HandlerSet::FULL).expect("proc_raise full");
-                    assert_eq!(
-                        guest.resume(test_budget()).expect("proc_raise trap"),
-                        VmEvent::ProcRaise(9)
-                    );
-                    guest
-                        .complete_proc_raise(52)
-                        .expect("complete proc_raise as ENOSYS");
-                    assert_eq!(
-                        guest.resume(test_budget()).expect("done after proc_raise"),
-                        VmEvent::Done
-                    );
                 }
             })
             .expect("spawn wasm test")
@@ -6603,7 +5417,7 @@ mod tests {
     #[test]
     fn core_wasip1_path_helpers_write_meaningful_choreofs_results() {
         let path_open = core_wasip1_single_import_module(
-            b"path_open",
+            Wasip1ImportName::PathOpen,
             &[
                 VALTYPE_I32,
                 VALTYPE_I32,
@@ -6629,12 +5443,11 @@ mod tests {
             ],
             true,
         );
-        let mut guest = Vm::new(&path_open, Wasip1HandlerSet::FULL).expect("path_open full");
+        let mut guest = TestVm::new(&path_open, Wasip1HandlerSet::FULL).expect("path_open full");
         guest
             .write_memory(160, b"app/config")
             .expect("write path bytes into guest memory");
-        let VmEvent::PathMinimal(path) = guest.resume(test_budget()).expect("path_open trap")
-        else {
+        let VmEvent::PathOpen(path) = guest.resume(test_budget()).expect("path_open trap") else {
             panic!("expected path_open trap");
         };
         assert_eq!(path.kind(), PathOp::PathOpen);
@@ -6643,7 +5456,7 @@ mod tests {
             b"app/config"
         );
         guest
-            .complete_path_open(path, 44, 0)
+            .finish_path_open(path, 44, 0)
             .expect("complete path_open with minted fd");
         assert_eq!(guest.read_memory_u32(196).expect("opened fd"), 44);
         assert_eq!(
@@ -6652,7 +5465,7 @@ mod tests {
         );
 
         let fd_readdir = core_wasip1_single_import_module(
-            b"fd_readdir",
+            Wasip1ImportName::FdReaddir,
             &[
                 VALTYPE_I32,
                 VALTYPE_I32,
@@ -6670,14 +5483,13 @@ mod tests {
             ],
             true,
         );
-        let mut guest = Vm::new(&fd_readdir, Wasip1HandlerSet::FULL).expect("readdir full");
-        let VmEvent::PathMinimal(path) = guest.resume(test_budget()).expect("fd_readdir trap")
-        else {
+        let mut guest = TestVm::new(&fd_readdir, Wasip1HandlerSet::FULL).expect("readdir full");
+        let VmEvent::FdReaddir(path) = guest.resume(test_budget()).expect("fd_readdir trap") else {
             panic!("expected fd_readdir trap");
         };
         assert_eq!(path.kind(), PathOp::FdReaddir);
         guest
-            .complete_fd_readdir(path, b"config\nstate\n", 0)
+            .finish_fd_readdir(path, b"config\nstate\n", 0)
             .expect("complete fd_readdir with manifest bytes");
         let mut bytes = [0u8; 13];
         guest
@@ -6692,238 +5504,27 @@ mod tests {
     }
 
     #[test]
-    fn core_wasip1_path_helpers_write_std_prestat_and_filestat_results() {
-        let fd_prestat_get = core_wasip1_single_import_module(
-            b"fd_prestat_get",
-            &[VALTYPE_I32, VALTYPE_I32],
-            &[VALTYPE_I32],
-            &[TestWasmArg::I32(3), TestWasmArg::I32(96)],
-            true,
-        );
-        let mut guest = Vm::new(&fd_prestat_get, Wasip1HandlerSet::FULL).expect("prestat");
-        let VmEvent::PathMinimal(path) = guest.resume(test_budget()).expect("prestat trap") else {
-            panic!("expected fd_prestat_get");
-        };
-        guest
-            .complete_fd_prestat_get(path, 3, 0)
-            .expect("complete prestat");
-        assert_eq!(
-            guest
-                .read_memory_u32(96 + WASIP1_PRESTAT_DIR_NAME_LEN_OFFSET)
-                .unwrap(),
-            3
-        );
-
-        let fd_prestat_dir_name = core_wasip1_single_import_module(
-            b"fd_prestat_dir_name",
-            &[VALTYPE_I32, VALTYPE_I32, VALTYPE_I32],
-            &[VALTYPE_I32],
-            &[
-                TestWasmArg::I32(3),
-                TestWasmArg::I32(128),
-                TestWasmArg::I32(8),
-            ],
-            true,
-        );
-        let mut guest =
-            Vm::new(&fd_prestat_dir_name, Wasip1HandlerSet::FULL).expect("prestat dir name");
-        let VmEvent::PathMinimal(path) = guest.resume(test_budget()).expect("prestat name trap")
-        else {
-            panic!("expected fd_prestat_dir_name");
-        };
-        guest
-            .complete_fd_prestat_dir_name(path, b"app", 0)
-            .expect("complete prestat dir name");
-        let mut name = [0u8; 3];
-        guest.read_memory(128, &mut name).expect("read name");
-        assert_eq!(&name, b"app");
-
-        let fd_filestat_get = core_wasip1_single_import_module(
-            b"fd_filestat_get",
-            &[VALTYPE_I32, VALTYPE_I32],
-            &[VALTYPE_I32],
-            &[TestWasmArg::I32(4), TestWasmArg::I32(160)],
-            true,
-        );
-        let mut guest = Vm::new(&fd_filestat_get, Wasip1HandlerSet::FULL).expect("fd filestat");
-        let VmEvent::PathMinimal(path) = guest.resume(test_budget()).expect("fd filestat trap")
-        else {
-            panic!("expected fd_filestat_get");
-        };
-        guest
-            .complete_fd_filestat_get(path, FileStat::new(WASIP1_FILETYPE_REGULAR_FILE, 42), 0)
-            .expect("complete fd filestat");
-        let mut filetype = [0u8; 1];
-        guest
-            .read_memory(160 + WASIP1_FILESTAT_FILETYPE_OFFSET, &mut filetype)
-            .expect("read filetype");
-        assert_eq!(filetype[0], WASIP1_FILETYPE_REGULAR_FILE);
-        let mut size = [0u8; 8];
-        guest
-            .read_memory(160 + WASIP1_FILESTAT_SIZE_OFFSET, &mut size)
-            .expect("read size");
-        assert_eq!(u64::from_le_bytes(size), 42);
-
-        let path_filestat_get = core_wasip1_single_import_module(
-            b"path_filestat_get",
-            &[
-                VALTYPE_I32,
-                VALTYPE_I32,
-                VALTYPE_I32,
-                VALTYPE_I32,
-                VALTYPE_I32,
-            ],
-            &[VALTYPE_I32],
-            &[
-                TestWasmArg::I32(3),
-                TestWasmArg::I32(0),
-                TestWasmArg::I32(192),
-                TestWasmArg::I32(3),
-                TestWasmArg::I32(224),
-            ],
-            true,
-        );
-        let mut guest = Vm::new(&path_filestat_get, Wasip1HandlerSet::FULL).expect("path filestat");
-        guest.write_memory(192, b"app").expect("path bytes");
-        let VmEvent::PathMinimal(path) = guest.resume(test_budget()).expect("path filestat trap")
-        else {
-            panic!("expected path_filestat_get");
-        };
-        assert_eq!(
-            guest.path_bytes(path).expect("path bytes").as_bytes(),
-            b"app"
-        );
-        guest
-            .complete_path_filestat_get(path, FileStat::new(WASIP1_FILETYPE_DIRECTORY, 0), 0)
-            .expect("complete path filestat");
-        let mut filetype = [0u8; 1];
-        guest
-            .read_memory(224 + WASIP1_FILESTAT_FILETYPE_OFFSET, &mut filetype)
-            .expect("read path filetype");
-        assert_eq!(filetype[0], WASIP1_FILETYPE_DIRECTORY);
-
-        let path_readlink = core_wasip1_single_import_module(
-            b"path_readlink",
-            &[
-                VALTYPE_I32,
-                VALTYPE_I32,
-                VALTYPE_I32,
-                VALTYPE_I32,
-                VALTYPE_I32,
-                VALTYPE_I32,
-            ],
-            &[VALTYPE_I32],
-            &[
-                TestWasmArg::I32(3),
-                TestWasmArg::I32(256),
-                TestWasmArg::I32(4),
-                TestWasmArg::I32(288),
-                TestWasmArg::I32(16),
-                TestWasmArg::I32(320),
-            ],
-            true,
-        );
-        let mut guest = Vm::new(&path_readlink, Wasip1HandlerSet::FULL).expect("readlink");
-        guest.write_memory(256, b"link").expect("link path bytes");
-        let VmEvent::PathMinimal(path) = guest.resume(test_budget()).expect("readlink trap") else {
-            panic!("expected path_readlink");
-        };
-        guest
-            .complete_path_readlink(path, b"target", 0)
-            .expect("complete readlink");
-        let mut target = [0u8; 6];
-        guest.read_memory(288, &mut target).expect("read target");
-        assert_eq!(&target, b"target");
-        assert_eq!(guest.read_memory_u32(320).expect("bufused"), 6);
-    }
-
-    #[test]
-    fn core_wasip1_path_full_helpers_write_offset_and_iovec_results() {
-        let fd_seek = core_wasip1_single_import_module(
-            b"fd_seek",
-            &[VALTYPE_I32, VALTYPE_I64, VALTYPE_I32, VALTYPE_I32],
-            &[VALTYPE_I32],
-            &[
-                TestWasmArg::I32(4),
-                TestWasmArg::I64(12),
-                TestWasmArg::I32(0),
-                TestWasmArg::I32(96),
-            ],
-            true,
-        );
-        let mut guest = Vm::new(&fd_seek, Wasip1HandlerSet::FULL).expect("fd_seek full");
-        let VmEvent::PathFull(path) = guest.resume(test_budget()).expect("fd_seek trap") else {
-            panic!("expected fd_seek trap");
-        };
-        guest
-            .complete_fd_seek(path, 12, 0)
-            .expect("complete fd_seek");
-        let mut offset = [0u8; 8];
-        guest
-            .read_memory(96, &mut offset)
-            .expect("read fd_seek offset");
-        assert_eq!(u64::from_le_bytes(offset), 12);
-
-        let fd_pread = core_wasip1_single_import_module(
-            b"fd_pread",
-            &[
-                VALTYPE_I32,
-                VALTYPE_I32,
-                VALTYPE_I32,
-                VALTYPE_I64,
-                VALTYPE_I32,
-            ],
-            &[VALTYPE_I32],
-            &[
-                TestWasmArg::I32(4),
-                TestWasmArg::I32(128),
-                TestWasmArg::I32(1),
-                TestWasmArg::I64(0),
-                TestWasmArg::I32(160),
-            ],
-            true,
-        );
-        let mut guest = Vm::new(&fd_pread, Wasip1HandlerSet::FULL).expect("fd_pread full");
-        guest
-            .write_memory(128, &192u32.to_le_bytes())
-            .expect("write iovec ptr");
-        guest
-            .write_memory(132, &8u32.to_le_bytes())
-            .expect("write iovec len");
-        let VmEvent::PathFull(path) = guest.resume(test_budget()).expect("fd_pread trap") else {
-            panic!("expected fd_pread trap");
-        };
-        guest
-            .complete_fd_pread(path, b"hello", 0)
-            .expect("complete fd_pread");
-        let mut bytes = [0u8; 5];
-        guest.read_memory(192, &mut bytes).expect("read fd_pread");
-        assert_eq!(&bytes, b"hello");
-        assert_eq!(guest.read_memory_u32(160).expect("nread"), 5);
-    }
-
-    #[test]
     fn core_wasip1_trampoline_maps_args_and_environment_imports() {
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(|| {
                 {
                     let args_sizes = core_wasip1_single_import_module(
-                        b"args_sizes_get",
+                        Wasip1ImportName::ArgsSizesGet,
                         &[VALTYPE_I32, VALTYPE_I32],
                         &[VALTYPE_I32],
                         &[TestWasmArg::I32(16), TestWasmArg::I32(20)],
                         true,
                     );
                     let mut guest =
-                        Vm::new(&args_sizes, Wasip1HandlerSet::FULL).expect("args sizes full");
+                        TestVm::new(&args_sizes, Wasip1HandlerSet::FULL).expect("args sizes full");
                     let VmEvent::ArgsSizesGet(call) =
                         guest.resume(test_budget()).expect("args sizes trap")
                     else {
                         panic!("expected args_sizes_get");
                     };
                     guest
-                        .complete_args_sizes_get(call, 2, 12, 0)
+                        .finish_args_sizes_get(call, 2, 12, 0)
                         .expect("complete args sizes");
                     assert_eq!(guest.read_memory_u32(16).expect("argc"), 2);
                     assert_eq!(guest.read_memory_u32(20).expect("argv size"), 12);
@@ -6931,21 +5532,21 @@ mod tests {
 
                 {
                     let args_get = core_wasip1_single_import_module(
-                        b"args_get",
+                        Wasip1ImportName::ArgsGet,
                         &[VALTYPE_I32, VALTYPE_I32],
                         &[VALTYPE_I32],
                         &[TestWasmArg::I32(32), TestWasmArg::I32(64)],
                         true,
                     );
                     let mut guest =
-                        Vm::new(&args_get, Wasip1HandlerSet::FULL).expect("args get full");
+                        TestVm::new(&args_get, Wasip1HandlerSet::FULL).expect("args get full");
                     let VmEvent::ArgsGet(call) =
                         guest.resume(test_budget()).expect("args get trap")
                     else {
                         panic!("expected args_get");
                     };
                     guest
-                        .complete_args_get(call, &[b"hibana", b"pico"], 0)
+                        .finish_args_get(call, &[b"hibana", b"pico"], 0)
                         .expect("complete args get");
                     assert_eq!(guest.read_memory_u32(32).expect("argv0 ptr"), 64);
                     assert_eq!(guest.read_memory_u32(36).expect("argv1 ptr"), 71);
@@ -6958,21 +5559,21 @@ mod tests {
 
                 {
                     let env_sizes = core_wasip1_single_import_module(
-                        b"environ_sizes_get",
+                        Wasip1ImportName::EnvironSizesGet,
                         &[VALTYPE_I32, VALTYPE_I32],
                         &[VALTYPE_I32],
                         &[TestWasmArg::I32(128), TestWasmArg::I32(132)],
                         true,
                     );
                     let mut guest =
-                        Vm::new(&env_sizes, Wasip1HandlerSet::FULL).expect("env sizes full");
+                        TestVm::new(&env_sizes, Wasip1HandlerSet::FULL).expect("env sizes full");
                     let VmEvent::EnvironSizesGet(call) =
                         guest.resume(test_budget()).expect("env sizes trap")
                     else {
                         panic!("expected environ_sizes_get");
                     };
                     guest
-                        .complete_environ_sizes_get(call, 1, 10, 0)
+                        .finish_environ_sizes_get(call, 1, 10, 0)
                         .expect("complete env sizes");
                     assert_eq!(guest.read_memory_u32(128).expect("env count"), 1);
                     assert_eq!(guest.read_memory_u32(132).expect("env size"), 10);
@@ -6980,21 +5581,21 @@ mod tests {
 
                 {
                     let env_get = core_wasip1_single_import_module(
-                        b"environ_get",
+                        Wasip1ImportName::EnvironGet,
                         &[VALTYPE_I32, VALTYPE_I32],
                         &[VALTYPE_I32],
                         &[TestWasmArg::I32(140), TestWasmArg::I32(160)],
                         true,
                     );
                     let mut guest =
-                        Vm::new(&env_get, Wasip1HandlerSet::FULL).expect("env get full");
+                        TestVm::new(&env_get, Wasip1HandlerSet::FULL).expect("env get full");
                     let VmEvent::EnvironGet(call) =
                         guest.resume(test_budget()).expect("env get trap")
                     else {
                         panic!("expected environ_get");
                     };
                     guest
-                        .complete_environ_get(call, &[(b"MODE", b"test")], 0)
+                        .finish_environ_get(call, &[(b"MODE", b"test")], 0)
                         .expect("complete env get");
                     assert_eq!(guest.read_memory_u32(140).expect("env ptr"), 160);
                     let mut env_bytes = [0u8; 10];
@@ -7019,7 +5620,7 @@ mod tests {
             0x03, 0x02, 0x01, 0x01, 0x07, 0x0a, 0x01, 0x06, b'_', b's', b't', b'a', b'r', b't',
             0x00, 0x01, 0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x07, 0x10, 0x00, 0x0b,
         ];
-        let mut guest = Vm::new(CORE_WASIP1_PROC_EXIT_GUEST, Wasip1HandlerSet::PICO_MIN)
+        let mut guest = TestVm::new(CORE_WASIP1_PROC_EXIT_GUEST, Wasip1HandlerSet::PICO_MIN)
             .expect("instantiate core wasip1 proc_exit guest");
 
         assert_eq!(
@@ -7033,168 +5634,6 @@ mod tests {
                 .resume(test_budget())
                 .expect("proc_exit terminates app"),
             VmEvent::Done
-        );
-    }
-
-    #[test]
-    fn test_wasm_emits_expected_host_calls() {
-        let mut guest =
-            TestWasmInstance::new(TEST_LOG_YIELD_WASM_GUEST).expect("instantiate guest");
-
-        assert_eq!(
-            guest.resume().expect("resume to log"),
-            TestVmEvent::HostCall(EngineReq::LogU32(0x4849_4241))
-        );
-        guest
-            .complete_host_call(EngineRet::Logged(0x4849_4241))
-            .expect("complete log call");
-
-        assert_eq!(
-            guest.resume().expect("resume to yield"),
-            TestVmEvent::HostCall(EngineReq::Yield)
-        );
-        guest
-            .complete_host_call(EngineRet::Yielded)
-            .expect("complete yield call");
-
-        assert_eq!(guest.resume().expect("resume to done"), TestVmEvent::Done);
-        assert_eq!(
-            guest.resume().expect("resume after done"),
-            TestVmEvent::Done
-        );
-    }
-
-    #[test]
-    fn guest_rejects_unexpected_reply() {
-        let mut guest =
-            TestWasmInstance::new(TEST_LOG_YIELD_WASM_GUEST).expect("instantiate guest");
-        let trap = guest.resume().expect("resume to first call");
-        assert_eq!(trap, TestVmEvent::HostCall(EngineReq::LogU32(0x4849_4241)));
-        assert_eq!(
-            guest.complete_host_call(EngineRet::Yielded),
-            Err(WasmError::PendingMismatch)
-        );
-    }
-
-    #[test]
-    fn route_wasm_guest_emits_two_samples_then_yield() {
-        let mut guest = TestWasmInstance::new(ROUTE_WASM_GUEST).expect("instantiate route guest");
-
-        assert_eq!(
-            guest.resume().expect("resume to normal sample"),
-            TestVmEvent::HostCall(EngineReq::LogU32(ROUTE_WASM_NORMAL_VALUE))
-        );
-        guest
-            .complete_host_call(EngineRet::Logged(ROUTE_WASM_NORMAL_VALUE))
-            .expect("complete normal sample");
-
-        assert_eq!(
-            guest.resume().expect("resume to alert sample"),
-            TestVmEvent::HostCall(EngineReq::LogU32(ROUTE_WASM_ALERT_VALUE))
-        );
-        guest
-            .complete_host_call(EngineRet::Logged(ROUTE_WASM_ALERT_VALUE))
-            .expect("complete alert sample");
-
-        assert_eq!(
-            guest.resume().expect("resume to yield"),
-            TestVmEvent::HostCall(EngineReq::Yield)
-        );
-        guest
-            .complete_host_call(EngineRet::Yielded)
-            .expect("complete yield");
-
-        assert_eq!(guest.resume().expect("resume to done"), TestVmEvent::Done);
-    }
-
-    #[test]
-    fn normal_wasm_guest_emits_normal_sample_then_yield() {
-        let mut guest = TestWasmInstance::new(NORMAL_WASM_GUEST).expect("instantiate normal guest");
-
-        assert_eq!(
-            guest.resume().expect("resume to normal sample"),
-            TestVmEvent::HostCall(EngineReq::LogU32(ROUTE_WASM_NORMAL_VALUE))
-        );
-        guest
-            .complete_host_call(EngineRet::Logged(ROUTE_WASM_NORMAL_VALUE))
-            .expect("complete normal sample");
-
-        assert_eq!(
-            guest.resume().expect("resume to yield"),
-            TestVmEvent::HostCall(EngineReq::Yield)
-        );
-        guest
-            .complete_host_call(EngineRet::Yielded)
-            .expect("complete yield");
-
-        assert_eq!(guest.resume().expect("resume to done"), TestVmEvent::Done);
-    }
-
-    #[test]
-    fn bad_route_guest_emits_yield_before_any_sample() {
-        let mut guest =
-            TestWasmInstance::new(BAD_ROUTE_EARLY_YIELD_WASM_GUEST).expect("instantiate bad guest");
-
-        assert_eq!(
-            guest.resume().expect("resume to early yield"),
-            TestVmEvent::HostCall(EngineReq::Yield)
-        );
-        guest
-            .complete_host_call(EngineRet::Yielded)
-            .expect("complete early yield");
-
-        assert_eq!(guest.resume().expect("resume to done"), TestVmEvent::Done);
-    }
-
-    #[test]
-    fn trap_guest_rejects_and_next_guest_can_run() {
-        let mut trapped = TestWasmInstance::new(TRAP_WASM_GUEST).expect("instantiate trap guest");
-        assert_eq!(trapped.resume(), Err(WasmError::Trap));
-
-        let mut next = TestWasmInstance::new(NORMAL_WASM_GUEST).expect("instantiate next guest");
-        assert_eq!(
-            next.resume().expect("resume next guest"),
-            TestVmEvent::HostCall(EngineReq::LogU32(ROUTE_WASM_NORMAL_VALUE))
-        );
-        next.complete_host_call(EngineRet::Logged(ROUTE_WASM_NORMAL_VALUE))
-            .expect("complete next log");
-        assert_eq!(
-            next.resume().expect("resume next yield"),
-            TestVmEvent::HostCall(EngineReq::Yield)
-        );
-    }
-
-    #[test]
-    fn fuel_exhaustion_guest_is_bounded() {
-        let mut guest =
-            TestWasmInstance::new(FUEL_EXHAUSTION_WASM_GUEST).expect("instantiate fuel guest");
-        assert_eq!(guest.resume_for_test_fuel(8), Err(WasmError::FuelExhausted));
-    }
-
-    #[test]
-    fn fuel_exhaustion_becomes_budget_expired_event() {
-        let mut guest =
-            TestWasmInstance::new(FUEL_EXHAUSTION_WASM_GUEST).expect("instantiate fuel guest");
-        let run = BudgetRun::new(11, 4, 8, 100);
-
-        assert_eq!(
-            guest.resume_for_test_budget(run),
-            Ok(TestBudgetedVmEvent::BudgetExpired(BudgetExpired::new(
-                11, 4
-            )))
-        );
-    }
-
-    #[test]
-    fn budgeted_resume_preserves_normal_guest_host_calls() {
-        let mut guest = TestWasmInstance::new(NORMAL_WASM_GUEST).expect("instantiate normal guest");
-        let run = BudgetRun::new(12, 1, 32, 100);
-
-        assert_eq!(
-            guest.resume_for_test_budget(run),
-            Ok(TestBudgetedVmEvent::Guest(TestVmEvent::HostCall(
-                EngineReq::LogU32(ROUTE_WASM_NORMAL_VALUE)
-            )))
         );
     }
 }

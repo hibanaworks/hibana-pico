@@ -26,14 +26,14 @@ use crate::choreography::protocol::{
     LABEL_WASI_CLOCK_TIME_GET, LABEL_WASI_CLOCK_TIME_GET_RET, LABEL_WASI_ENVIRON_GET,
     LABEL_WASI_ENVIRON_GET_RET, LABEL_WASI_ENVIRON_SIZES_GET, LABEL_WASI_ENVIRON_SIZES_GET_RET,
     LABEL_WASI_FD_CLOSE, LABEL_WASI_FD_CLOSE_RET, LABEL_WASI_FD_FDSTAT_GET,
-    LABEL_WASI_FD_FDSTAT_GET_RET, LABEL_WASI_FD_READ, LABEL_WASI_FD_READ_RET, LABEL_WASI_FD_WRITE,
-    LABEL_WASI_FD_WRITE_RET, LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET,
-    LABEL_WASI_POLL_ONEOFF, LABEL_WASI_POLL_ONEOFF_RET, LABEL_WASI_PROC_EXIT,
-    LABEL_WASI_RANDOM_GET, LABEL_WASI_RANDOM_GET_RET, LABEL_WASIP1_CLOCK_NOW,
-    LABEL_WASIP1_CLOCK_NOW_RET, LABEL_WASIP1_EXIT, LABEL_WASIP1_RANDOM_SEED,
-    LABEL_WASIP1_RANDOM_SEED_RET, LABEL_WASIP1_STDERR, LABEL_WASIP1_STDERR_RET, LABEL_WASIP1_STDIN,
-    LABEL_WASIP1_STDIN_RET, LABEL_WASIP1_STDOUT, LABEL_WASIP1_STDOUT_RET, WasiImportLoopBreak,
-    WasiImportLoopContinue,
+    LABEL_WASI_FD_FDSTAT_GET_RET, LABEL_WASI_FD_READ, LABEL_WASI_FD_READ_RET,
+    LABEL_WASI_FD_READDIR, LABEL_WASI_FD_READDIR_RET, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET,
+    LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF,
+    LABEL_WASI_POLL_ONEOFF_RET, LABEL_WASI_PROC_EXIT, LABEL_WASI_RANDOM_GET,
+    LABEL_WASI_RANDOM_GET_RET, LABEL_WASIP1_CLOCK_NOW, LABEL_WASIP1_CLOCK_NOW_RET,
+    LABEL_WASIP1_EXIT, LABEL_WASIP1_RANDOM_SEED, LABEL_WASIP1_RANDOM_SEED_RET, LABEL_WASIP1_STDERR,
+    LABEL_WASIP1_STDERR_RET, LABEL_WASIP1_STDIN, LABEL_WASIP1_STDIN_RET, LABEL_WASIP1_STDOUT,
+    LABEL_WASIP1_STDOUT_RET,
 };
 
 pub use crate::choreography::protocol::BuiltInLabelUniverse as BuiltInUniverse;
@@ -41,8 +41,9 @@ pub use crate::choreography::protocol::BuiltInLabelUniverse as BuiltInUniverse;
 #[cfg(feature = "wasm-engine-core")]
 use crate::choreography::protocol::{
     ArgsGet, ArgsSizesGet, BudgetExpired, BudgetRun, ClockResGet, ClockTimeGet, EnvironGet,
-    EnvironSizesGet, FdRead, FdRequest, FdWrite, MemRights, PathOpen, PollOneoff, ProcExitStatus,
-    RandomGet,
+    EnvironSizesGet, FdRead, FdReaddir, FdRequest, FdWrite, LABEL_MEM_FENCE, MemFence,
+    MemFenceReason, MemRights, PathOpen, PollOneoff, ProcExitStatus, RandomGet,
+    WasiImportLoopBreak, WasiImportLoopContinue,
 };
 
 #[cfg(any(test, not(target_os = "none")))]
@@ -644,6 +645,7 @@ impl WasiImports {
     pub const ENVIRON_SIZES_GET: Self = Self { bits: 1 << 11 };
     pub const ENVIRON_GET: Self = Self { bits: 1 << 12 };
     pub const PATH_OPEN: Self = Self { bits: 1 << 13 };
+    pub const FD_READDIR: Self = Self { bits: 1 << 14 };
 
     pub const fn is_empty(self) -> bool {
         self.bits == 0
@@ -1075,6 +1077,7 @@ fn wasi_import_for_engine_req_label(label: u8) -> Option<WasiImports> {
         LABEL_WASI_ENVIRON_SIZES_GET => Some(WasiImports::ENVIRON_SIZES_GET),
         LABEL_WASI_ENVIRON_GET => Some(WasiImports::ENVIRON_GET),
         LABEL_WASI_PATH_OPEN => Some(WasiImports::PATH_OPEN),
+        LABEL_WASI_FD_READDIR => Some(WasiImports::FD_READDIR),
         _ => None,
     }
 }
@@ -1099,6 +1102,7 @@ fn wasi_completion_label_for_engine_req_label(label: u8) -> Option<u8> {
         LABEL_WASI_ENVIRON_SIZES_GET => Some(LABEL_WASI_ENVIRON_SIZES_GET_RET),
         LABEL_WASI_ENVIRON_GET => Some(LABEL_WASI_ENVIRON_GET_RET),
         LABEL_WASI_PATH_OPEN => Some(LABEL_WASI_PATH_OPEN_RET),
+        LABEL_WASI_FD_READDIR => Some(LABEL_WASI_FD_READDIR_RET),
         LABEL_WASIP1_EXIT | LABEL_WASI_PROC_EXIT => None,
         _ => None,
     }
@@ -1120,6 +1124,7 @@ fn import_name_to_wasi(name: &[u8]) -> Option<WasiImports> {
         b"environ_sizes_get" => Some(WasiImports::ENVIRON_SIZES_GET),
         b"environ_get" => Some(WasiImports::ENVIRON_GET),
         b"path_open" => Some(WasiImports::PATH_OPEN),
+        b"fd_readdir" => Some(WasiImports::FD_READDIR),
         _ => None,
     }
 }
@@ -2802,11 +2807,14 @@ impl Drop for WasiGuestSlot<'_> {
 pub struct EngineCtx<'endpoint, 'guest, C: Capsule, const ROLE: u8> {
     endpoint: RoleEndpointCtx<'endpoint, C, ROLE>,
     endpoint_carrier: EndpointCarrierFacts,
+    #[cfg(feature = "wasm-engine-core")]
     wasi_guest_bytes: Option<&'guest [u8]>,
     #[cfg(feature = "wasm-engine-core")]
     guest_storage: Option<WasiGuestStorage<'guest>>,
     #[cfg(feature = "wasm-engine-core")]
     guest_slot: Option<WasiGuestSlot<'guest>>,
+    #[cfg(not(feature = "wasm-engine-core"))]
+    _guest: core::marker::PhantomData<&'guest ()>,
 }
 
 impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest, C, ROLE> {
@@ -2816,14 +2824,19 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         wasi_guest_bytes: Option<&'guest [u8]>,
         #[cfg(feature = "wasm-engine-core")] guest_storage: WasiGuestStorage<'guest>,
     ) -> Self {
+        #[cfg(not(feature = "wasm-engine-core"))]
+        let _ = wasi_guest_bytes;
         Self {
             endpoint,
             endpoint_carrier,
+            #[cfg(feature = "wasm-engine-core")]
             wasi_guest_bytes,
             #[cfg(feature = "wasm-engine-core")]
             guest_storage: Some(guest_storage),
             #[cfg(feature = "wasm-engine-core")]
             guest_slot: None,
+            #[cfg(not(feature = "wasm-engine-core"))]
+            _guest: core::marker::PhantomData,
         }
     }
 
@@ -2946,6 +2959,11 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                         break Err(error);
                     }
                     if let Err(error) = self.drive_wasi_call(call).await {
+                        break Err(error);
+                    }
+                }
+                Ok(crate::kernel::engine::wasm::Event::MemoryFence(pending)) => {
+                    if let Err(error) = self.drive_memory_fence(pending).await {
                         break Err(error);
                     }
                 }
@@ -3111,12 +3129,32 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                     .complete(done.as_bytes(), 0)
                     .map_err(WasiGuestError::guest)
             }
-            crate::kernel::engine::wasm::Call::Path(pending) => {
-                if pending.kind() != crate::kernel::engine::wasm::PathKind::PathOpen {
-                    return Err(WasiGuestError::UnsupportedGuestEvent);
-                }
+            crate::kernel::engine::wasm::Call::FdReaddir(pending) => {
                 let fd = pending.fd().map_err(WasiGuestError::guest)?;
-                let rights = pending.arg_i64(5).map_err(WasiGuestError::guest)?;
+                let cookie = pending.cookie().map_err(WasiGuestError::guest)?;
+                let max_len = pending.max_len().map_err(WasiGuestError::guest)?;
+                if max_len > u8::MAX as usize {
+                    return Err(WasiGuestError::ProtocolRejected);
+                }
+                let request = EngineReq::FdReaddir(
+                    FdReaddir::new(fd, cookie, max_len as u8).map_err(WasiGuestError::protocol)?,
+                );
+                let reply = self
+                    .endpoint_call::<LABEL_WASI_FD_READDIR, LABEL_WASI_FD_READDIR_RET>(request)
+                    .await?;
+                let EngineRet::FdReaddirDone(done) = reply else {
+                    return Err(WasiGuestError::UnexpectedReply);
+                };
+                if done.fd() != fd {
+                    return Err(WasiGuestError::UnexpectedReply);
+                }
+                pending
+                    .complete(done.as_bytes(), done.errno() as u32)
+                    .map_err(WasiGuestError::guest)
+            }
+            crate::kernel::engine::wasm::Call::PathOpen(pending) => {
+                let fd = pending.fd().map_err(WasiGuestError::guest)?;
+                let rights = pending.rights_base().map_err(WasiGuestError::guest)?;
                 let path = pending.path_bytes().map_err(WasiGuestError::guest)?;
                 let request = EngineReq::PathOpen(
                     PathOpen::new(fd, 0, rights, path.as_bytes())
@@ -3129,7 +3167,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                     return Err(WasiGuestError::UnexpectedReply);
                 };
                 pending
-                    .complete_path_open(opened.fd() as u32, opened.errno() as u32)
+                    .complete(opened.fd() as u32, opened.errno() as u32)
                     .map_err(WasiGuestError::guest)
             }
             crate::kernel::engine::wasm::Call::ArgsSizesGet(pending) => {
@@ -3187,23 +3225,28 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                     .complete(&[(done.as_bytes(), &[][..])], 0)
                     .map_err(WasiGuestError::guest)
             }
-            crate::kernel::engine::wasm::Call::SchedYield(pending) => {
-                core::mem::drop(pending);
-                Err(WasiGuestError::UnsupportedGuestEvent)
-            }
-            crate::kernel::engine::wasm::Call::Socket(pending) => {
-                core::mem::drop(pending);
-                Err(WasiGuestError::UnsupportedGuestEvent)
-            }
-            crate::kernel::engine::wasm::Call::ProcRaise(pending) => {
-                core::mem::drop(pending);
-                Err(WasiGuestError::UnsupportedGuestEvent)
-            }
-            crate::kernel::engine::wasm::Call::MemoryGrow(pending) => {
-                core::mem::drop(pending);
-                Err(WasiGuestError::UnsupportedGuestEvent)
-            }
         }
+    }
+
+    #[cfg(feature = "wasm-engine-core")]
+    async fn drive_memory_fence(
+        &mut self,
+        pending: crate::kernel::engine::wasm::Pending<
+            '_,
+            'guest,
+            crate::kernel::engine::wasm::MemoryFence,
+        >,
+    ) -> Result<(), WasiGuestError> {
+        let fence = MemFence::new(MemFenceReason::MemoryGrow, pending.fence_epoch());
+        self.endpoint()
+            .flow::<hibana::g::Msg<LABEL_MEM_FENCE, MemFence>>()
+            .map_err(|error| WasiGuestError::endpoint(0x5745_1000 | LABEL_MEM_FENCE as u32, error))?
+            .send(&fence)
+            .await
+            .map_err(|error| {
+                WasiGuestError::endpoint(0x5745_2000 | LABEL_MEM_FENCE as u32, error)
+            })?;
+        pending.complete().map_err(WasiGuestError::guest)
     }
 
     pub async fn pending(self) -> core::convert::Infallible {
@@ -3514,6 +3557,7 @@ mod tests {
     const OPCODE_I32_CONST: u8 = 0x41;
     const OPCODE_CALL: u8 = 0x10;
     const OPCODE_DROP: u8 = 0x1a;
+    const OPCODE_MEMORY_GROW: u8 = 0x40;
     const OPCODE_END: u8 = 0x0b;
     const VALTYPE_I32: u8 = 0x7f;
 
@@ -3817,7 +3861,11 @@ mod tests {
     struct BridgePlacement;
     struct BridgeLocal;
     struct BridgeImage;
+    struct MemoryGrowCapsule;
+    struct MemoryGrowLocal;
+    struct MemoryGrowPlacement;
     static BRIDGE_WASI_GUEST_ARENA: WasiGuestArena = WasiGuestArena::empty();
+    static MEMORY_GROW_WASI_GUEST_ARENA: WasiGuestArena = WasiGuestArena::empty();
 
     static RUN_BRIDGE_ENGINE_DONE: AtomicU8 = AtomicU8::new(0);
     static RUN_BRIDGE_DRIVER_DONE: AtomicU8 = AtomicU8::new(0);
@@ -3890,6 +3938,59 @@ mod tests {
 
         fn supervisor<'a, const ROLE: u8>(
             ctx: SupervisorCtx<'a, BridgeCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = core::convert::Infallible> {
+            ctx.pending()
+        }
+    }
+
+    impl Capsule for MemoryGrowCapsule {
+        type Universe = DefaultLabelUniverse;
+        type Placement = MemoryGrowPlacement;
+        type Local = MemoryGrowLocal;
+        type Report = ();
+
+        fn choreography() -> impl hibana::substrate::program::Projectable<Self::Universe> {
+            g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_MEM_FENCE, MemFence>, 0>()
+        }
+    }
+
+    impl Placement<MemoryGrowCapsule> for MemoryGrowPlacement {
+        fn role_kind(role: u8) -> RoleKind {
+            match role {
+                0 => RoleKind::Engine,
+                1 => RoleKind::Driver,
+                _ => RoleKind::Boundary,
+            }
+        }
+    }
+
+    impl Localside<MemoryGrowCapsule> for MemoryGrowLocal {
+        fn engine<'endpoint, 'guest, const ROLE: u8>(
+            ctx: EngineCtx<'endpoint, 'guest, MemoryGrowCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = core::convert::Infallible> {
+            ctx.pending()
+        }
+
+        fn driver<'a, const ROLE: u8>(
+            ctx: DriverCtx<'a, MemoryGrowCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = core::convert::Infallible> {
+            ctx.pending()
+        }
+
+        fn boundary<'a, const ROLE: u8>(
+            ctx: BoundaryCtx<'a, MemoryGrowCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = core::convert::Infallible> {
+            ctx.pending()
+        }
+
+        fn link<'a, const ROLE: u8>(
+            ctx: LinkCtx<'a, MemoryGrowCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = core::convert::Infallible> {
+            ctx.pending()
+        }
+
+        fn supervisor<'a, const ROLE: u8>(
+            ctx: SupervisorCtx<'a, MemoryGrowCapsule, ROLE>,
         ) -> impl core::future::Future<Output = core::convert::Infallible> {
             ctx.pending()
         }
@@ -4023,6 +4124,50 @@ mod tests {
         module
     }
 
+    fn memory_grow_guest_module() -> Vec<u8> {
+        let mut module = Vec::new();
+        module.extend_from_slice(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+
+        let mut types = Vec::new();
+        push_leb_u32(&mut types, 1);
+        types.push(0x60);
+        push_leb_u32(&mut types, 0);
+        push_leb_u32(&mut types, 0);
+        push_section(&mut module, SECTION_TYPE, &types);
+
+        let mut functions = Vec::new();
+        push_leb_u32(&mut functions, 1);
+        push_leb_u32(&mut functions, 0);
+        push_section(&mut module, SECTION_FUNCTION, &functions);
+
+        push_section(&mut module, SECTION_MEMORY, &[0x01, 0x00, 0x01]);
+
+        let mut exports = Vec::new();
+        push_leb_u32(&mut exports, 1);
+        push_name(&mut exports, b"_start");
+        exports.push(EXTERNAL_KIND_FUNC);
+        push_leb_u32(&mut exports, 0);
+        push_section(&mut module, SECTION_EXPORT, &exports);
+
+        let mut body = Vec::new();
+        push_leb_u32(&mut body, 0);
+        body.extend_from_slice(&[
+            OPCODE_I32_CONST,
+            1,
+            OPCODE_MEMORY_GROW,
+            0,
+            OPCODE_DROP,
+            OPCODE_END,
+        ]);
+        let mut code = Vec::new();
+        push_leb_u32(&mut code, 1);
+        push_leb_u32(&mut code, body.len() as u32);
+        code.extend_from_slice(&body);
+        push_section(&mut module, SECTION_CODE, &code);
+
+        module
+    }
+
     fn noop_waker() -> Waker {
         unsafe fn clone(_: *const ()) -> RawWaker {
             RawWaker::new(core::ptr::null(), &VTABLE)
@@ -4084,6 +4229,18 @@ mod tests {
             .send(&reply)
             .await
             .expect("driver sends fd_write reply through endpoint");
+    }
+
+    async fn receive_memory_grow_fence<const ROLE: u8>(
+        mut ctx: DriverCtx<'_, MemoryGrowCapsule, ROLE>,
+    ) {
+        let fence = ctx
+            .endpoint()
+            .recv::<g::Msg<LABEL_MEM_FENCE, MemFence>>()
+            .await
+            .expect("driver receives memory.grow fence through endpoint");
+        assert_eq!(fence.reason(), MemFenceReason::MemoryGrow);
+        assert_eq!(fence.new_epoch(), 1);
     }
 
     const TEST_LOOP_CONTINUE_LABEL: u8 = 120;
@@ -4487,7 +4644,90 @@ mod tests {
             }
             poll_round += 1;
         }
-        assert!(driver_done);
+        assert!(
+            driver_done,
+            "driver did not receive fd_write request; engine_result={engine_result:?}"
+        );
+        assert_eq!(engine_result, Some(Ok(WasiGuestStatus::Done)));
+    }
+
+    #[test]
+    fn drive_wasi_guest_completes_memory_grow_after_mem_fence_endpoint_carrier() {
+        let module = memory_grow_guest_module();
+        let program = <MemoryGrowCapsule as Capsule>::choreography();
+        let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
+        let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
+        let mut tap_buf = [hibana::substrate::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
+        let clock = CounterClock::new();
+        let carrier = AttachedQueueTestCarrier::new();
+        let kit = hibana::substrate::SessionKit::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            2,
+        >::new(&clock);
+        let rendezvous = kit
+            .add_rendezvous_from_config(
+                Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new()),
+                carrier,
+            )
+            .expect("register appkit carrier rendezvous");
+        let session = SessionId::new(0x55);
+        let engine_endpoint = kit
+            .enter::<0, _>(rendezvous, session, &role0, NoBinding)
+            .expect("enter memory grow engine role");
+        let driver_endpoint = kit
+            .enter::<1, _>(rendezvous, session, &role1, NoBinding)
+            .expect("enter memory grow driver role");
+        let projection = derive_projection_caps_from_program::<MemoryGrowCapsule>(&program);
+        let endpoint_carrier = EndpointCarrierFacts::new(
+            ImageId(2),
+            SiteId(1),
+            RoleSet::from_bits(0b11),
+            TEST_ATTACHED_QUEUE_CARRIER,
+            projection,
+        );
+        let mut engine_ctx: EngineCtx<'_, '_, MemoryGrowCapsule, 0> = EngineCtx::new(
+            RoleEndpointCtx::new(engine_endpoint),
+            endpoint_carrier,
+            Some(module.as_slice()),
+            MEMORY_GROW_WASI_GUEST_ARENA.storage(),
+        );
+        let driver_ctx: DriverCtx<'_, MemoryGrowCapsule, 1> = DriverCtx::new(
+            RoleEndpointCtx::new(driver_endpoint),
+            endpoint_carrier,
+            DriverFacts::EMPTY,
+        );
+        let engine = engine_ctx.drive_wasi_guest(BudgetRun::new(1, 0, 128, 0));
+        let driver = receive_memory_grow_fence(driver_ctx);
+        let waker = noop_waker();
+        let mut task_context = Context::from_waker(&waker);
+        let mut engine = core::pin::pin!(engine);
+        let mut driver = core::pin::pin!(driver);
+        let mut engine_result = None;
+        let mut driver_done = false;
+        let mut poll_round = 0u8;
+        while poll_round < 16 {
+            if engine_result.is_none() {
+                if let Poll::Ready(result) = engine.as_mut().poll(&mut task_context) {
+                    engine_result = Some(result);
+                }
+            }
+            if !driver_done {
+                if let Poll::Ready(()) = driver.as_mut().poll(&mut task_context) {
+                    driver_done = true;
+                }
+            }
+            if engine_result.is_some() && driver_done {
+                break;
+            }
+            poll_round += 1;
+        }
+        assert!(
+            driver_done,
+            "driver did not receive memory.grow fence; engine_result={engine_result:?}"
+        );
         assert_eq!(engine_result, Some(Ok(WasiGuestStatus::Done)));
     }
 

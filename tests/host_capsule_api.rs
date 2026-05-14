@@ -43,6 +43,7 @@ use std::{
 const WASM_FD_WRITE: &[u8] = b"\0asm\x01\0\0\0\
     \x01\x04\x01\x60\x00\x00\
     \x02\x23\x01\x16wasi_snapshot_preview1\x08fd_write\x00\x00";
+#[cfg(feature = "wasm-engine-core")]
 const WASM_FD_READ: &[u8] = b"\0asm\x01\0\0\0\
     \x01\x04\x01\x60\x00\x00\
     \x02\x22\x01\x16wasi_snapshot_preview1\x07fd_read\x00\x00";
@@ -53,22 +54,38 @@ const TEST_CARRIER_ROLES: usize = appkit::HIBANA_TYPED_ROLE_DOMAIN_SIZE as usize
 const TEST_CARRIER_QUEUE_DEPTH: usize = 16;
 const TEST_CARRIER_FRAME_BYTES: usize = 256;
 
+#[cfg(feature = "wasm-engine-core")]
 const SECTION_TYPE: u8 = 1;
+#[cfg(feature = "wasm-engine-core")]
 const SECTION_IMPORT: u8 = 2;
+#[cfg(feature = "wasm-engine-core")]
 const SECTION_FUNCTION: u8 = 3;
+#[cfg(feature = "wasm-engine-core")]
 const SECTION_MEMORY: u8 = 5;
+#[cfg(feature = "wasm-engine-core")]
 const SECTION_EXPORT: u8 = 7;
+#[cfg(feature = "wasm-engine-core")]
 const SECTION_CODE: u8 = 10;
+#[cfg(feature = "wasm-engine-core")]
 const SECTION_DATA: u8 = 11;
+#[cfg(feature = "wasm-engine-core")]
 const EXTERNAL_KIND_FUNC: u8 = 0;
+#[cfg(feature = "wasm-engine-core")]
 const VALTYPE_I32: u8 = 0x7f;
+#[cfg(feature = "wasm-engine-core")]
 const VALTYPE_I64: u8 = 0x7e;
+#[cfg(feature = "wasm-engine-core")]
 const OPCODE_I32_CONST: u8 = 0x41;
+#[cfg(feature = "wasm-engine-core")]
 const OPCODE_I64_CONST: u8 = 0x42;
+#[cfg(feature = "wasm-engine-core")]
 const OPCODE_CALL: u8 = 0x10;
+#[cfg(feature = "wasm-engine-core")]
 const OPCODE_DROP: u8 = 0x1a;
+#[cfg(feature = "wasm-engine-core")]
 const OPCODE_END: u8 = 0x0b;
 
+#[cfg(feature = "wasm-engine-core")]
 fn push_leb_u32(out: &mut Vec<u8>, mut value: u32) {
     loop {
         let mut byte = (value & 0x7f) as u8;
@@ -83,6 +100,7 @@ fn push_leb_u32(out: &mut Vec<u8>, mut value: u32) {
     }
 }
 
+#[cfg(feature = "wasm-engine-core")]
 fn push_leb_i64(out: &mut Vec<u8>, value: i64) {
     let mut value = value as u64;
     loop {
@@ -99,6 +117,7 @@ fn push_leb_i64(out: &mut Vec<u8>, value: i64) {
     }
 }
 
+#[cfg(feature = "wasm-engine-core")]
 fn push_leb_i32(out: &mut Vec<u8>, value: i32) {
     let mut value = value;
     loop {
@@ -112,27 +131,32 @@ fn push_leb_i32(out: &mut Vec<u8>, value: i32) {
     }
 }
 
+#[cfg(feature = "wasm-engine-core")]
 fn push_i32_const(out: &mut Vec<u8>, value: i32) {
     out.push(OPCODE_I32_CONST);
     push_leb_i32(out, value);
 }
 
+#[cfg(feature = "wasm-engine-core")]
 fn push_i64_const(out: &mut Vec<u8>, value: i64) {
     out.push(OPCODE_I64_CONST);
     push_leb_i64(out, value);
 }
 
+#[cfg(feature = "wasm-engine-core")]
 fn push_name(out: &mut Vec<u8>, name: &[u8]) {
     push_leb_u32(out, name.len() as u32);
     out.extend_from_slice(name);
 }
 
+#[cfg(feature = "wasm-engine-core")]
 fn push_section(module: &mut Vec<u8>, section: u8, bytes: &[u8]) {
     module.push(section);
     push_leb_u32(module, bytes.len() as u32);
     module.extend_from_slice(bytes);
 }
 
+#[cfg(feature = "wasm-engine-core")]
 fn fd_write_guest_module() -> Vec<u8> {
     let mut module = Vec::new();
     module.extend_from_slice(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
@@ -204,6 +228,7 @@ fn fd_write_guest_module() -> Vec<u8> {
     module
 }
 
+#[cfg(feature = "wasm-engine-core")]
 fn path_open_fd_write_guest_module() -> Vec<u8> {
     let mut module = Vec::new();
     module.extend_from_slice(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
@@ -307,6 +332,7 @@ fn path_open_fd_write_guest_module() -> Vec<u8> {
     module
 }
 
+#[cfg(feature = "wasm-engine-core")]
 fn leak_wasm(mut module: Vec<u8>) -> &'static [u8] {
     module.shrink_to_fit();
     Box::leak(module.into_boxed_slice())
@@ -639,12 +665,25 @@ static CHOREOFS_RUNTIME_FACTS: appkit::ChoreoFsObjectSet<1> =
     appkit::ChoreoFsObjectSet::new([CHOREOFS_RUNTIME_OBJECT]);
 
 struct WrappedRunExit<R, I> {
+    #[cfg(feature = "wasm-engine-core")]
     report: appkit::RunReport<R, I>,
+    #[cfg(not(feature = "wasm-engine-core"))]
+    _marker: core::marker::PhantomData<(R, I)>,
 }
 
 impl<R, I> appkit::FromRunReport<R, I> for WrappedRunExit<R, I> {
     fn from_run_report(report: appkit::RunReport<R, I>) -> Self {
-        Self { report }
+        #[cfg(feature = "wasm-engine-core")]
+        {
+            Self { report }
+        }
+        #[cfg(not(feature = "wasm-engine-core"))]
+        {
+            core::hint::black_box(report);
+            Self {
+                _marker: core::marker::PhantomData,
+            }
+        }
     }
 }
 
@@ -1974,6 +2013,7 @@ fn run_polls_localside_for_attached_role_kinds() {
 }
 
 #[test]
+#[cfg(feature = "wasm-engine-core")]
 fn choreofs_facts_are_consumed_by_driver_ctx_during_endpoint_progress() {
     let before = CHOREOFS_RUNTIME_COMPLETIONS.load(Ordering::SeqCst);
     let wasm = leak_wasm(path_open_fd_write_guest_module());
@@ -1995,6 +2035,7 @@ fn choreofs_facts_are_consumed_by_driver_ctx_during_endpoint_progress() {
 }
 
 #[test]
+#[cfg(feature = "wasm-engine-core")]
 fn run_takes_artifact_as_dynamic_input() {
     let wasm = leak_wasm(fd_write_guest_module());
     let artifacts = RichArtifacts {
@@ -2059,6 +2100,7 @@ fn run_takes_artifact_as_dynamic_input() {
 }
 
 #[test]
+#[cfg(feature = "wasm-engine-core")]
 fn image_manifest_peer_attach_requires_mutual_identity_and_matching_shape() {
     let wasm = leak_wasm(fd_write_guest_module());
     let artifacts = RichArtifacts {
@@ -2088,6 +2130,7 @@ fn image_manifest_peer_attach_requires_mutual_identity_and_matching_shape() {
 }
 
 #[test]
+#[cfg(feature = "wasm-engine-core")]
 fn run_returns_logical_image_exit_type() {
     let wasm = leak_wasm(fd_write_guest_module());
     let artifacts = RichArtifacts {
@@ -2180,6 +2223,7 @@ fn hibana_substrate_surfaces_remain_available_to_capsules() {
 }
 
 #[test]
+#[cfg(feature = "wasm-engine-core")]
 fn driver_facts_are_separate_from_progress_authority() {
     const LED_DEVICE: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
         b"device/led/green",
@@ -2213,6 +2257,7 @@ fn driver_facts_are_separate_from_progress_authority() {
 }
 
 #[test]
+#[cfg(feature = "wasm-engine-core")]
 fn wasi_image_rejects_non_p1_artifacts() {
     let p1 = leak_wasm(fd_write_guest_module());
     let report = appkit::run::<site::Local<image::Composite>, RichCapsule>(

@@ -3,6 +3,7 @@ pub(crate) enum Wasip1Syscall {
     ArgsEnv,
     FdWrite,
     FdRead,
+    FdReaddir,
     FdFdstatGet,
     FdClose,
     ClockResGet,
@@ -10,11 +11,7 @@ pub(crate) enum Wasip1Syscall {
     PollOneoff,
     RandomGet,
     ProcExit,
-    ProcRaise,
-    SchedYield,
-    PathMinimal,
-    PathFull,
-    NetworkObject,
+    PathOpen,
 }
 
 pub(crate) const WASIP1_PREVIEW1_MODULE: &str = "wasi_snapshot_preview1";
@@ -121,29 +118,32 @@ impl Wasip1ImportName {
         }
     }
 
-    pub(crate) const fn syscall(self) -> Wasip1Syscall {
+    pub(crate) const fn supported_syscall(self) -> Option<Wasip1Syscall> {
         match self {
             Self::ArgsGet | Self::ArgsSizesGet | Self::EnvironGet | Self::EnvironSizesGet => {
-                Wasip1Syscall::ArgsEnv
+                Some(Wasip1Syscall::ArgsEnv)
             }
-            Self::ClockResGet => Wasip1Syscall::ClockResGet,
-            Self::ClockTimeGet => Wasip1Syscall::ClockTimeGet,
-            Self::FdClose => Wasip1Syscall::FdClose,
-            Self::FdFdstatGet => Wasip1Syscall::FdFdstatGet,
-            Self::FdRead => Wasip1Syscall::FdRead,
-            Self::FdWrite => Wasip1Syscall::FdWrite,
+            Self::ClockResGet => Some(Wasip1Syscall::ClockResGet),
+            Self::ClockTimeGet => Some(Wasip1Syscall::ClockTimeGet),
+            Self::FdClose => Some(Wasip1Syscall::FdClose),
+            Self::FdFdstatGet => Some(Wasip1Syscall::FdFdstatGet),
+            Self::FdRead => Some(Wasip1Syscall::FdRead),
+            Self::FdReaddir => Some(Wasip1Syscall::FdReaddir),
+            Self::FdWrite => Some(Wasip1Syscall::FdWrite),
+            Self::PathOpen => Some(Wasip1Syscall::PathOpen),
+            Self::PollOneoff => Some(Wasip1Syscall::PollOneoff),
+            Self::ProcExit => Some(Wasip1Syscall::ProcExit),
+            Self::RandomGet => Some(Wasip1Syscall::RandomGet),
             Self::FdPrestatGet
             | Self::FdPrestatDirName
             | Self::FdFilestatGet
-            | Self::FdReaddir
             | Self::PathCreateDirectory
             | Self::PathFilestatGet
-            | Self::PathOpen
             | Self::PathReadlink
             | Self::PathRemoveDirectory
             | Self::PathRename
-            | Self::PathUnlinkFile => Wasip1Syscall::PathMinimal,
-            Self::FdAdvise
+            | Self::PathUnlinkFile
+            | Self::FdAdvise
             | Self::FdAllocate
             | Self::FdDatasync
             | Self::FdFdstatSetFlags
@@ -158,15 +158,13 @@ impl Wasip1ImportName {
             | Self::FdTell
             | Self::PathFilestatSetTimes
             | Self::PathLink
-            | Self::PathSymlink => Wasip1Syscall::PathFull,
-            Self::PollOneoff => Wasip1Syscall::PollOneoff,
-            Self::ProcExit => Wasip1Syscall::ProcExit,
-            Self::ProcRaise => Wasip1Syscall::ProcRaise,
-            Self::RandomGet => Wasip1Syscall::RandomGet,
-            Self::SchedYield => Wasip1Syscall::SchedYield,
-            Self::SockAccept | Self::SockRecv | Self::SockSend | Self::SockShutdown => {
-                Wasip1Syscall::NetworkObject
-            }
+            | Self::PathSymlink
+            | Self::ProcRaise
+            | Self::SchedYield
+            | Self::SockAccept
+            | Self::SockRecv
+            | Self::SockSend
+            | Self::SockShutdown => None,
         }
     }
 
@@ -232,6 +230,7 @@ pub(crate) struct Wasip1HandlerSet {
     pub(crate) args_env: bool,
     pub(crate) fd_write: bool,
     pub(crate) fd_read: bool,
+    pub(crate) fd_readdir: bool,
     pub(crate) fd_fdstat_get: bool,
     pub(crate) fd_close: bool,
     pub(crate) clock_res_get: bool,
@@ -239,11 +238,7 @@ pub(crate) struct Wasip1HandlerSet {
     pub(crate) poll_oneoff: bool,
     pub(crate) random_get: bool,
     pub(crate) proc_exit: bool,
-    pub(crate) proc_raise: bool,
-    pub(crate) sched_yield: bool,
-    pub(crate) path_minimal: bool,
-    pub(crate) path_full: bool,
-    pub(crate) network_object: bool,
+    pub(crate) path_open: bool,
 }
 
 impl Wasip1HandlerSet {
@@ -252,6 +247,7 @@ impl Wasip1HandlerSet {
         args_env: false,
         fd_write: false,
         fd_read: false,
+        fd_readdir: false,
         fd_fdstat_get: false,
         fd_close: false,
         clock_res_get: false,
@@ -259,11 +255,7 @@ impl Wasip1HandlerSet {
         poll_oneoff: false,
         random_get: false,
         proc_exit: false,
-        proc_raise: false,
-        sched_yield: false,
-        path_minimal: false,
-        path_full: false,
-        network_object: false,
+        path_open: false,
     };
 
     #[cfg(test)]
@@ -271,6 +263,7 @@ impl Wasip1HandlerSet {
         args_env: false,
         fd_write: true,
         fd_read: false,
+        fd_readdir: false,
         fd_fdstat_get: false,
         fd_close: false,
         clock_res_get: false,
@@ -278,11 +271,7 @@ impl Wasip1HandlerSet {
         poll_oneoff: true,
         random_get: false,
         proc_exit: true,
-        proc_raise: false,
-        sched_yield: false,
-        path_minimal: false,
-        path_full: false,
-        network_object: false,
+        path_open: false,
     };
 
     #[cfg(test)]
@@ -290,6 +279,7 @@ impl Wasip1HandlerSet {
         args_env: true,
         fd_write: true,
         fd_read: true,
+        fd_readdir: true,
         fd_fdstat_get: true,
         fd_close: true,
         clock_res_get: true,
@@ -297,11 +287,7 @@ impl Wasip1HandlerSet {
         poll_oneoff: true,
         random_get: true,
         proc_exit: true,
-        proc_raise: true,
-        sched_yield: true,
-        path_minimal: true,
-        path_full: true,
-        network_object: true,
+        path_open: true,
     };
 
     pub(crate) const fn active() -> Self {
@@ -309,6 +295,7 @@ impl Wasip1HandlerSet {
             args_env: cfg!(feature = "wasip1-sys-args-env"),
             fd_write: cfg!(feature = "wasip1-sys-fd-write"),
             fd_read: cfg!(feature = "wasip1-sys-fd-read"),
+            fd_readdir: cfg!(feature = "wasip1-sys-fd-readdir"),
             fd_fdstat_get: cfg!(feature = "wasip1-sys-fd-fdstat-get"),
             fd_close: cfg!(feature = "wasip1-sys-fd-close"),
             clock_res_get: cfg!(feature = "wasip1-sys-clock-res-get"),
@@ -316,11 +303,7 @@ impl Wasip1HandlerSet {
             poll_oneoff: cfg!(feature = "wasip1-sys-poll-oneoff"),
             random_get: cfg!(feature = "wasip1-sys-random-get"),
             proc_exit: cfg!(feature = "wasip1-sys-proc-exit"),
-            proc_raise: cfg!(feature = "wasip1-sys-proc-raise"),
-            sched_yield: cfg!(feature = "wasip1-sys-sched-yield"),
-            path_minimal: cfg!(feature = "wasip1-sys-path-open"),
-            path_full: false,
-            network_object: cfg!(feature = "wasip1-sys-sock"),
+            path_open: cfg!(feature = "wasip1-sys-path-open"),
         }
     }
 
@@ -329,6 +312,7 @@ impl Wasip1HandlerSet {
             Wasip1Syscall::ArgsEnv => self.args_env,
             Wasip1Syscall::FdWrite => self.fd_write,
             Wasip1Syscall::FdRead => self.fd_read,
+            Wasip1Syscall::FdReaddir => self.fd_readdir,
             Wasip1Syscall::FdFdstatGet => self.fd_fdstat_get,
             Wasip1Syscall::FdClose => self.fd_close,
             Wasip1Syscall::ClockResGet => self.clock_res_get,
@@ -336,11 +320,7 @@ impl Wasip1HandlerSet {
             Wasip1Syscall::PollOneoff => self.poll_oneoff,
             Wasip1Syscall::RandomGet => self.random_get,
             Wasip1Syscall::ProcExit => self.proc_exit,
-            Wasip1Syscall::ProcRaise => self.proc_raise,
-            Wasip1Syscall::SchedYield => self.sched_yield,
-            Wasip1Syscall::PathMinimal => self.path_minimal,
-            Wasip1Syscall::PathFull => self.path_full,
-            Wasip1Syscall::NetworkObject => self.network_object,
+            Wasip1Syscall::PathOpen => self.path_open,
         }
     }
 }
@@ -356,8 +336,8 @@ mod tests {
         assert!(handlers.supports(Wasip1Syscall::FdWrite));
         assert!(handlers.supports(Wasip1Syscall::PollOneoff));
         assert!(handlers.supports(Wasip1Syscall::ProcExit));
-        assert!(!handlers.supports(Wasip1Syscall::ProcRaise));
         assert!(!handlers.supports(Wasip1Syscall::FdRead));
+        assert!(!handlers.supports(Wasip1Syscall::FdReaddir));
         assert!(!handlers.supports(Wasip1Syscall::RandomGet));
     }
 }

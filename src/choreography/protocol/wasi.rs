@@ -569,7 +569,6 @@ pub type BudgetRestart = BudgetRun;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineReq {
     LogU32(u32),
-    Yield,
     Wasip1Stdout(StdoutChunk),
     Wasip1Stderr(StderrChunk),
     Wasip1Stdin(StdinRequest),
@@ -578,6 +577,7 @@ pub enum EngineReq {
     Wasip1Exit(Wasip1ExitStatus),
     FdWrite(FdWrite),
     FdRead(FdRead),
+    FdReaddir(FdReaddir),
     FdFdstatGet(FdRequest),
     FdClose(FdRequest),
     ClockResGet(ClockResGet),
@@ -596,7 +596,6 @@ impl WireEncode for EngineReq {
     fn encoded_len(&self) -> Option<usize> {
         Some(match self {
             Self::LogU32(_) => 5,
-            Self::Yield => 1,
             Self::Wasip1Stdout(chunk) => 3 + chunk.len(),
             Self::Wasip1Stderr(chunk) => 3 + chunk.len(),
             Self::Wasip1Stdin(_) => 3,
@@ -605,6 +604,7 @@ impl WireEncode for EngineReq {
             Self::Wasip1Exit(_) => 2,
             Self::FdWrite(write) => 4 + write.len(),
             Self::FdRead(_) => 4,
+            Self::FdReaddir(_) => 12,
             Self::FdFdstatGet(_) => 2,
             Self::FdClose(_) => 2,
             Self::ClockResGet(_) => 2,
@@ -629,13 +629,6 @@ impl WireEncode for EngineReq {
                 out[0] = TAG_REQ_LOG_U32;
                 out[1..5].copy_from_slice(&value.to_be_bytes());
                 Ok(5)
-            }
-            Self::Yield => {
-                if out.is_empty() {
-                    return Err(CodecError::Truncated);
-                }
-                out[0] = TAG_REQ_YIELD;
-                Ok(1)
             }
             Self::Wasip1Stdout(chunk) => {
                 let len = chunk.len();
@@ -711,6 +704,17 @@ impl WireEncode for EngineReq {
                 out[2] = read.lease_id();
                 out[3] = read.max_len();
                 Ok(4)
+            }
+            Self::FdReaddir(read) => {
+                if out.len() < 12 {
+                    return Err(CodecError::Truncated);
+                }
+                out[0] = TAG_REQ_WASI_FD_READDIR;
+                out[1] = read.fd();
+                out[2] = read.lease_id();
+                out[3..11].copy_from_slice(&read.cookie().to_be_bytes());
+                out[11] = read.max_len();
+                Ok(12)
             }
             Self::FdFdstatGet(request) => {
                 if out.len() < 2 {
@@ -829,12 +833,6 @@ impl WirePayload for EngineReq {
         };
         match tag {
             TAG_REQ_LOG_U32 => Ok(Self::LogU32(decode_u32_payload(rest)?)),
-            TAG_REQ_YIELD => {
-                if !rest.is_empty() {
-                    return Err(CodecError::Invalid("yield request carries no payload"));
-                }
-                Ok(Self::Yield)
-            }
             TAG_REQ_WASIP1_STDOUT => Ok(Self::Wasip1Stdout(StdoutChunk::decode(rest)?)),
             TAG_REQ_WASIP1_STDERR => Ok(Self::Wasip1Stderr(StderrChunk::decode(rest)?)),
             TAG_REQ_WASIP1_STDIN => Ok(Self::Wasip1Stdin(StdinRequest::decode(rest)?)),
@@ -853,6 +851,7 @@ impl WirePayload for EngineReq {
             TAG_REQ_WASIP1_EXIT => Ok(Self::Wasip1Exit(Wasip1ExitStatus::decode(rest)?)),
             TAG_REQ_WASI_FD_WRITE => Ok(Self::FdWrite(FdWrite::decode(rest)?)),
             TAG_REQ_WASI_FD_READ => Ok(Self::FdRead(FdRead::decode(rest)?)),
+            TAG_REQ_WASI_FD_READDIR => Ok(Self::FdReaddir(FdReaddir::decode(rest)?)),
             TAG_REQ_WASI_FD_FDSTAT_GET => Ok(Self::FdFdstatGet(FdRequest::decode(rest)?)),
             TAG_REQ_WASI_FD_CLOSE => Ok(Self::FdClose(FdRequest::decode(rest)?)),
             TAG_REQ_WASI_CLOCK_RES_GET => Ok(Self::ClockResGet(ClockResGet::decode(rest)?)),
@@ -875,7 +874,6 @@ impl WirePayload for EngineReq {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EngineRet {
     Logged(u32),
-    Yielded,
     Wasip1StdoutWritten(u8),
     Wasip1StderrWritten(u8),
     Wasip1StdinRead(StdinChunk),
@@ -883,6 +881,7 @@ pub enum EngineRet {
     Wasip1RandomSeed(RandomSeed),
     FdWriteDone(FdWriteDone),
     FdReadDone(FdReadDone),
+    FdReaddirDone(FdReaddirDone),
     FdStat(FdStat),
     FdClosed(FdClosed),
     ClockResolution(ClockResolution),
@@ -900,7 +899,6 @@ impl WireEncode for EngineRet {
     fn encoded_len(&self) -> Option<usize> {
         Some(match self {
             Self::Logged(_) => 5,
-            Self::Yielded => 1,
             Self::Wasip1StdoutWritten(_) => 2,
             Self::Wasip1StderrWritten(_) => 2,
             Self::Wasip1StdinRead(chunk) => 3 + chunk.len(),
@@ -908,6 +906,7 @@ impl WireEncode for EngineRet {
             Self::Wasip1RandomSeed(_) => 17,
             Self::FdWriteDone(_) => 5,
             Self::FdReadDone(done) => 4 + done.len(),
+            Self::FdReaddirDone(done) => 6 + done.len(),
             Self::FdStat(_) => 3,
             Self::FdClosed(_) => 2,
             Self::ClockResolution(_) => 9,
@@ -931,13 +930,6 @@ impl WireEncode for EngineRet {
                 out[0] = TAG_RET_LOGGED;
                 out[1..5].copy_from_slice(&value.to_be_bytes());
                 Ok(5)
-            }
-            Self::Yielded => {
-                if out.is_empty() {
-                    return Err(CodecError::Truncated);
-                }
-                out[0] = TAG_RET_YIELDED;
-                Ok(1)
             }
             Self::Wasip1StdoutWritten(written) => {
                 if out.len() < 2 {
@@ -1004,6 +996,19 @@ impl WireEncode for EngineRet {
                 out[3] = len as u8;
                 out[4..4 + len].copy_from_slice(done.as_bytes());
                 Ok(4 + len)
+            }
+            Self::FdReaddirDone(done) => {
+                let len = done.len();
+                if out.len() < 6 + len {
+                    return Err(CodecError::Truncated);
+                }
+                out[0] = TAG_RET_WASI_FD_READDIR_DONE;
+                out[1] = done.fd();
+                out[2] = done.lease_id();
+                out[3..5].copy_from_slice(&done.errno().to_be_bytes());
+                out[5] = len as u8;
+                out[6..6 + len].copy_from_slice(done.as_bytes());
+                Ok(6 + len)
             }
             Self::FdStat(stat) => {
                 if out.len() < 3 {
@@ -1120,12 +1125,6 @@ impl WirePayload for EngineRet {
         };
         match tag {
             TAG_RET_LOGGED => Ok(Self::Logged(decode_u32_payload(rest)?)),
-            TAG_RET_YIELDED => {
-                if !rest.is_empty() {
-                    return Err(CodecError::Invalid("yield reply carries no payload"));
-                }
-                Ok(Self::Yielded)
-            }
             TAG_RET_WASIP1_STDOUT_WRITTEN => {
                 if rest.len() != 1 {
                     return Err(CodecError::Invalid("stdout reply carries one byte"));
@@ -1143,6 +1142,7 @@ impl WirePayload for EngineRet {
             TAG_RET_WASIP1_RANDOM_SEED => Ok(Self::Wasip1RandomSeed(RandomSeed::decode(rest)?)),
             TAG_RET_WASI_FD_WRITE_DONE => Ok(Self::FdWriteDone(FdWriteDone::decode(rest)?)),
             TAG_RET_WASI_FD_READ_DONE => Ok(Self::FdReadDone(FdReadDone::decode(rest)?)),
+            TAG_RET_WASI_FD_READDIR_DONE => Ok(Self::FdReaddirDone(FdReaddirDone::decode(rest)?)),
             TAG_RET_WASI_FD_FDSTAT => Ok(Self::FdStat(FdStat::decode(rest)?)),
             TAG_RET_WASI_FD_CLOSED => Ok(Self::FdClosed(FdClosed::decode(rest)?)),
             TAG_RET_WASI_CLOCK_RESOLUTION => {
@@ -1434,6 +1434,66 @@ impl FdRead {
             return Err(CodecError::Invalid("fd_read request carries three bytes"));
         }
         Self::new_with_lease(bytes[0], bytes[1], bytes[2])
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FdReaddir {
+    fd: u8,
+    lease_id: u8,
+    cookie: u64,
+    max_len: u8,
+}
+
+impl FdReaddir {
+    pub fn new(fd: u8, cookie: u64, max_len: u8) -> Result<Self, CodecError> {
+        Self::new_with_lease(fd, MEM_LEASE_NONE, cookie, max_len)
+    }
+
+    pub fn new_with_lease(
+        fd: u8,
+        lease_id: u8,
+        cookie: u64,
+        max_len: u8,
+    ) -> Result<Self, CodecError> {
+        if max_len as usize > WASIP1_STREAM_CHUNK_CAPACITY {
+            return Err(CodecError::Invalid(
+                "fd_readdir request exceeds fixed capacity",
+            ));
+        }
+        Ok(Self {
+            fd,
+            lease_id,
+            cookie,
+            max_len,
+        })
+    }
+
+    pub const fn fd(&self) -> u8 {
+        self.fd
+    }
+
+    pub const fn lease_id(&self) -> u8 {
+        self.lease_id
+    }
+
+    pub const fn cookie(&self) -> u64 {
+        self.cookie
+    }
+
+    pub const fn max_len(&self) -> u8 {
+        self.max_len
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+        if bytes.len() != 11 {
+            return Err(CodecError::Invalid(
+                "fd_readdir request carries eleven bytes",
+            ));
+        }
+        let mut cookie = [0u8; 8];
+        cookie.copy_from_slice(&bytes[2..10]);
+        Self::new_with_lease(bytes[0], bytes[1], u64::from_be_bytes(cookie), bytes[10])
     }
 }
 
@@ -1955,6 +2015,63 @@ impl FdReadDone {
             }
             Ok(read)
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FdReaddirDone {
+    fd: u8,
+    chunk: Wasip1StreamChunk,
+    errno: u16,
+}
+
+impl FdReaddirDone {
+    pub fn new_with_lease(
+        fd: u8,
+        lease_id: u8,
+        bytes: &[u8],
+        errno: u16,
+    ) -> Result<Self, CodecError> {
+        Ok(Self {
+            fd,
+            chunk: Wasip1StreamChunk::new_with_lease(lease_id, bytes)?,
+            errno,
+        })
+    }
+
+    pub const fn fd(&self) -> u8 {
+        self.fd
+    }
+
+    pub const fn lease_id(&self) -> u8 {
+        self.chunk.lease_id()
+    }
+
+    pub const fn len(&self) -> usize {
+        self.chunk.len()
+    }
+
+    pub const fn errno(&self) -> u16 {
+        self.errno
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        self.chunk.as_bytes()
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, CodecError> {
+        if bytes.len() < 5 {
+            return Err(CodecError::Truncated);
+        }
+        let fd = bytes[0];
+        let lease_id = bytes[1];
+        let errno = u16::from_be_bytes([bytes[2], bytes[3]]);
+        let len = bytes[4] as usize;
+        let payload = &bytes[5..];
+        if payload.len() != len {
+            return Err(CodecError::Invalid("fd_readdir reply length mismatch"));
+        }
+        Self::new_with_lease(fd, lease_id, payload, errno)
     }
 }
 

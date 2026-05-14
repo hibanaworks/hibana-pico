@@ -37,12 +37,12 @@ mod tests {
         ArgsDone, ArgsGet, ArgsSizes, ArgsSizesGet, BudgetExpired, BudgetRestart, BudgetRun,
         BudgetSuspend, ClockNow, ClockResGet, ClockResolution, ClockTimeGet, EngineAbort,
         EngineAbortReason, EngineReq, EngineRet, EnvironDone, EnvironGet, EnvironSizes,
-        EnvironSizesGet, FdClosed, FdRead, FdReadDone, FdRequest, FdStat, FdWrite, FdWriteDone,
-        MGMT_IMAGE_CHUNK_CAPACITY, MemBorrow, MemCommit, MemFence, MemFenceReason, MemGrant,
-        MemRelease, MemRights, MgmtImageActivate, MgmtImageBegin, MgmtImageChunk, MgmtImageEnd,
-        MgmtImageRollback, MgmtStatus, MgmtStatusCode, PathOpen, PathOpened, PollOneoff, PollReady,
-        ProcExitStatus, RandomDone, RandomGet, RandomSeed, StderrChunk, StdinChunk, StdinRequest,
-        StdoutChunk, Wasip1ExitStatus,
+        EnvironSizesGet, FdClosed, FdRead, FdReadDone, FdReaddir, FdReaddirDone, FdRequest, FdStat,
+        FdWrite, FdWriteDone, MGMT_IMAGE_CHUNK_CAPACITY, MemBorrow, MemCommit, MemFence,
+        MemFenceReason, MemGrant, MemRelease, MemRights, MgmtImageActivate, MgmtImageBegin,
+        MgmtImageChunk, MgmtImageEnd, MgmtImageRollback, MgmtStatus, MgmtStatusCode, PathOpen,
+        PathOpened, PollOneoff, PollReady, ProcExitStatus, RandomDone, RandomGet, RandomSeed,
+        StderrChunk, StdinChunk, StdinRequest, StdoutChunk, Wasip1ExitStatus,
     };
     use hibana::substrate::{
         cap::{
@@ -64,6 +64,8 @@ mod tests {
             super::LABEL_WASI_FD_WRITE_RET,
             super::LABEL_WASI_FD_READ,
             super::LABEL_WASI_FD_READ_RET,
+            super::LABEL_WASI_FD_READDIR,
+            super::LABEL_WASI_FD_READDIR_RET,
             super::LABEL_WASI_FD_FDSTAT_GET,
             super::LABEL_WASI_FD_FDSTAT_GET_RET,
             super::LABEL_WASI_FD_CLOSE,
@@ -343,15 +345,6 @@ mod tests {
     }
 
     #[test]
-    fn engine_req_round_trips_yield() {
-        let req = EngineReq::Yield;
-        let mut buf = [0u8; 1];
-        let len = encode(&req, &mut buf);
-        let decoded = EngineReq::decode_payload(Payload::new(&buf[..len])).expect("decode req");
-        assert_eq!(decoded, req);
-    }
-
-    #[test]
     fn engine_req_round_trips_wasip1_stdout() {
         let req = EngineReq::Wasip1Stdout(
             StdoutChunk::new_with_lease(1, b"hibana wasip1 stdout\n").expect("chunk"),
@@ -414,6 +407,7 @@ mod tests {
         let requests = [
             EngineReq::FdWrite(FdWrite::new_with_lease(1, 11, b"stdout").expect("fd_write")),
             EngineReq::FdRead(FdRead::new_with_lease(0, 12, 8).expect("fd_read")),
+            EngineReq::FdReaddir(FdReaddir::new_with_lease(3, 13, 0, 8).expect("fd_readdir")),
             EngineReq::FdFdstatGet(FdRequest::new(1)),
             EngineReq::FdClose(FdRequest::new(4)),
             EngineReq::ClockResGet(ClockResGet::new(0)),
@@ -447,18 +441,20 @@ mod tests {
     }
 
     #[test]
-    fn engine_ret_round_trips_logged() {
-        let ret = EngineRet::Logged(0x4849_4241);
-        let mut buf = [0u8; 5];
+    fn engine_ret_round_trips_fd_readdir_done() {
+        let ret = EngineRet::FdReaddirDone(
+            FdReaddirDone::new_with_lease(3, 14, b"cfg\nstate\n", 0).expect("fd_readdir done"),
+        );
+        let mut buf = [0u8; 32];
         let len = encode(&ret, &mut buf);
         let decoded = EngineRet::decode_payload(Payload::new(&buf[..len])).expect("decode ret");
         assert_eq!(decoded, ret);
     }
 
     #[test]
-    fn engine_ret_round_trips_yielded() {
-        let ret = EngineRet::Yielded;
-        let mut buf = [0u8; 1];
+    fn engine_ret_round_trips_logged() {
+        let ret = EngineRet::Logged(0x4849_4241);
+        let mut buf = [0u8; 5];
         let len = encode(&ret, &mut buf);
         let decoded = EngineRet::decode_payload(Payload::new(&buf[..len])).expect("decode ret");
         assert_eq!(decoded, ret);
@@ -519,6 +515,9 @@ mod tests {
         let replies = [
             EngineRet::FdWriteDone(FdWriteDone::new(1, 6)),
             EngineRet::FdReadDone(FdReadDone::new_with_lease(0, 12, b"stdin").expect("fd_read")),
+            EngineRet::FdReaddirDone(
+                FdReaddirDone::new_with_lease(3, 16, b"catalog", 0).expect("fd_readdir"),
+            ),
             EngineRet::FdStat(FdStat::new(1, MemRights::Write)),
             EngineRet::FdClosed(FdClosed::new(4)),
             EngineRet::ClockResolution(ClockResolution::new(1_000_000)),
