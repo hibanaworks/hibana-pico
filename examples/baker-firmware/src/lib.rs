@@ -22,7 +22,7 @@ use hibana_pico::{
         EngineAbortMsg, EngineAbortReason, EngineReq, EngineRet, FdWrite, FdWriteDone,
         LABEL_MEM_FENCE, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET, LABEL_WASI_PATH_OPEN,
         LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF, LABEL_WASI_POLL_ONEOFF_RET, MemFence,
-        MemFenceReason, PathOpened, PollReady,
+        MemFenceReason, PathOpen, PathOpened, PollReady,
     },
 };
 
@@ -568,7 +568,7 @@ const CHOREOFS_ENGINE_DRIVE_DONE: u32 = 0x5741_0207;
 const CHOREOFS_ENGINE_OK: u32 = 0x5741_4f4b;
 const CHOREOFS_ENGINE_ERROR: u32 = 0x5741_4641;
 const CHOREOFS_LED_GREEN: u32 = 1 << 0;
-const CHOREOFS_LED_ORANGE: u32 = 1 << 1;
+const CHOREOFS_LED_YELLOW: u32 = 1 << 1;
 const CHOREOFS_LED_RED: u32 = 1 << 2;
 
 #[unsafe(no_mangle)]
@@ -681,18 +681,19 @@ const GPIO_FUNC_SIO: u32 = 5;
 const GPIO_PAD_DEFAULT: u32 = 0x56;
 
 const GREEN_LED_PIN: u8 = 22;
-const ORANGE_LED_PIN: u8 = 21;
+const YELLOW_LED_PIN: u8 = 21;
 const RED_LED_PIN: u8 = 20;
 const BAKER_LED_PREOPEN_FD: u8 = 9;
 pub const FD_WRITE_RIGHT: u64 = 1 << 6;
 const CHOREOFS_REENTRY_CYCLES: u32 = 3;
-const CHOREOFS_WRITES_PER_CYCLE: u32 = 3;
-const CHOREOFS_EXPECTED_PATH_OPENS: u32 = 1;
+const CHOREOFS_WRITES_PER_CYCLE: u32 = 13;
+const CHOREOFS_EXPECTED_PATH_OPENS: u32 = 3;
+const CHOREOFS_EXPECTED_PATH_OPENS_U16: u16 = CHOREOFS_EXPECTED_PATH_OPENS as u16;
 const CHOREOFS_EXPECTED_FD_WRITES: u32 = CHOREOFS_REENTRY_CYCLES * CHOREOFS_WRITES_PER_CYCLE;
 const CHOREOFS_EXPECTED_POLLS: u32 = CHOREOFS_EXPECTED_FD_WRITES;
 const CHOREOFS_VISUAL_READY_CYCLES: u32 = 1;
 #[cfg(feature = "wasm-engine-core")]
-const BAKER_LINK_WASM_FUEL_PER_ACTIVATION: u32 = 250_000;
+const BAKER_LINK_WASM_FUEL_PER_ACTIVATION: u32 = 1_000_000;
 pub const LABEL_BAKER_CHOREOFS_ROUTE_CONTINUE: u8 = 120;
 pub const LABEL_BAKER_CHOREOFS_ROUTE_BREAK: u8 = 121;
 
@@ -960,11 +961,11 @@ where
     let status = ctx
         .drive_wasi_guest_imports(
             BudgetRun::new(1, 0, BAKER_LINK_WASM_FUEL_PER_ACTIVATION, 0),
-            1,
+            CHOREOFS_EXPECTED_PATH_OPENS as u16,
         )
         .await;
     match status {
-        Ok(appkit::WasiGuestStatus::ImportLimitReached(1)) => {}
+        Ok(appkit::WasiGuestStatus::ImportLimitReached(CHOREOFS_EXPECTED_PATH_OPENS_U16)) => {}
         Ok(other) => {
             core::hint::black_box(other);
             runtime_fail(STAGE_WASI_ENGINE_ERROR);
@@ -1053,11 +1054,23 @@ where
     init_baker_led_outputs();
     record_choreofs_engine_status(CHOREOFS_GPIO_READY);
 
-    baker_driver_path_open(&mut ctx).await;
+    baker_driver_path_open(&mut ctx, 3, appkit::ObjectId(1)).await;
+    baker_driver_path_open(&mut ctx, 4, appkit::ObjectId(2)).await;
+    baker_driver_path_open(&mut ctx, 5, appkit::ObjectId(3)).await;
     let expected = [
         (3u8, b"1".as_slice()),
-        (3u8, b"2".as_slice()),
-        (3u8, b"4".as_slice()),
+        (4u8, b"0".as_slice()),
+        (5u8, b"0".as_slice()),
+        (3u8, b"0".as_slice()),
+        (4u8, b"1".as_slice()),
+        (5u8, b"0".as_slice()),
+        (4u8, b"0".as_slice()),
+        (4u8, b"1".as_slice()),
+        (4u8, b"0".as_slice()),
+        (4u8, b"1".as_slice()),
+        (3u8, b"0".as_slice()),
+        (4u8, b"0".as_slice()),
+        (5u8, b"1".as_slice()),
     ];
     let visual_loop = C::CHOREOFS_VISUAL_LOOP;
     let mut cycle = 0u32;
@@ -1161,6 +1174,8 @@ async fn baker_send_engine_ret<C, const ROLE: u8, const LABEL: u8>(
 
 async fn baker_driver_path_open<C, const ROLE: u8>(
     ctx: &mut appkit::DriverCtx<'_, C, ROLE>,
+    expected_fd: u8,
+    expected_object: appkit::ObjectId,
 ) -> appkit::LedgerFdFact
 where
     C: BakerCapsuleFacts,
@@ -1172,6 +1187,18 @@ where
             runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
         }
     };
+    baker_driver_path_open_from_request(ctx, request, expected_fd, expected_object).await
+}
+
+async fn baker_driver_path_open_from_request<C, const ROLE: u8>(
+    ctx: &mut appkit::DriverCtx<'_, C, ROLE>,
+    request: PathOpen,
+    expected_fd: u8,
+    expected_object: appkit::ObjectId,
+) -> appkit::LedgerFdFact
+where
+    C: BakerCapsuleFacts,
+{
     if request.preopen_fd() != BAKER_LED_PREOPEN_FD || request.rights_base() != FD_WRITE_RIGHT {
         core::hint::black_box(request);
         runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
@@ -1190,7 +1217,7 @@ where
             runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
         }
     };
-    if fact.fd() > u8::MAX as u32 {
+    if fact.fd() != expected_fd as u32 || fact.object() != expected_object {
         core::hint::black_box(fact);
         runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
     }
@@ -1243,20 +1270,15 @@ async fn baker_handle_fd_write<C, const ROLE: u8>(
             runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
         }
     };
-    let mask = match request.as_bytes() {
-        b"1" => CHOREOFS_LED_GREEN,
-        b"2" => CHOREOFS_LED_ORANGE,
-        b"4" => CHOREOFS_LED_RED,
+    let high = match request.as_bytes() {
+        b"1" => true,
+        b"0" => false,
         other => {
             core::hint::black_box(other);
             runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
         }
     };
-    if fact.object() != appkit::ObjectId(1) {
-        core::hint::black_box(fact);
-        runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-    }
-    write_baker_traffic_mask(mask);
+    write_baker_led_object(fact.object(), high);
     record_choreofs_fd_write(fact.object());
     baker_send_engine_ret::<C, ROLE, LABEL_WASI_FD_WRITE_RET>(
         ctx,
@@ -1322,7 +1344,7 @@ fn baker_driver_assert_choreofs_counts() {
         || writes != CHOREOFS_EXPECTED_FD_WRITES
         || polls != CHOREOFS_EXPECTED_POLLS
         || led_mask != CHOREOFS_LED_RED
-        || seen_led_mask != (CHOREOFS_LED_GREEN | CHOREOFS_LED_ORANGE | CHOREOFS_LED_RED)
+        || seen_led_mask != (CHOREOFS_LED_GREEN | CHOREOFS_LED_YELLOW | CHOREOFS_LED_RED)
     {
         core::hint::black_box((path_opens, writes, polls, led_mask, seen_led_mask));
         runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
@@ -1565,7 +1587,7 @@ fn record_choreofs_poll() {
 fn record_choreofs_led_mask(object: appkit::ObjectId, high: bool) {
     let bit = match object.0 {
         1 => CHOREOFS_LED_GREEN,
-        2 => CHOREOFS_LED_ORANGE,
+        2 => CHOREOFS_LED_YELLOW,
         3 => CHOREOFS_LED_RED,
         other => {
             core::hint::black_box(other);
@@ -1576,6 +1598,10 @@ fn record_choreofs_led_mask(object: appkit::ObjectId, high: bool) {
     let current = read_marker(slot);
     let next = if high { current | bit } else { current & !bit };
     write_marker(slot, next);
+    if high {
+        let seen_slot = core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SEEN_LED_MASK);
+        write_marker(seen_slot, read_marker(seen_slot) | bit);
+    }
 }
 
 #[cold]
@@ -1630,7 +1656,7 @@ fn baker_gpio_init_output(pin: u8) {
 
 fn init_baker_led_outputs() {
     baker_gpio_init_output(GREEN_LED_PIN);
-    baker_gpio_init_output(ORANGE_LED_PIN);
+    baker_gpio_init_output(YELLOW_LED_PIN);
     baker_gpio_init_output(RED_LED_PIN);
 }
 
@@ -1654,7 +1680,7 @@ fn baker_gpio_write(pin: u8, high: bool) {
 fn write_baker_led_object(object: appkit::ObjectId, high: bool) {
     match object.0 {
         1 => baker_gpio_write(GREEN_LED_PIN, high),
-        2 => baker_gpio_write(ORANGE_LED_PIN, high),
+        2 => baker_gpio_write(YELLOW_LED_PIN, high),
         3 => baker_gpio_write(RED_LED_PIN, high),
         other => {
             core::hint::black_box(other);
@@ -1662,19 +1688,6 @@ fn write_baker_led_object(object: appkit::ObjectId, high: bool) {
         }
     }
     record_choreofs_led_mask(object, high);
-}
-
-fn write_baker_traffic_mask(mask: u32) {
-    if mask & !(CHOREOFS_LED_GREEN | CHOREOFS_LED_ORANGE | CHOREOFS_LED_RED) != 0 {
-        core::hint::black_box(mask);
-        runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-    }
-    baker_gpio_write(GREEN_LED_PIN, mask & CHOREOFS_LED_GREEN != 0);
-    baker_gpio_write(ORANGE_LED_PIN, mask & CHOREOFS_LED_ORANGE != 0);
-    baker_gpio_write(RED_LED_PIN, mask & CHOREOFS_LED_RED != 0);
-    write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LED_MASK), mask);
-    let seen_slot = core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SEEN_LED_MASK);
-    write_marker(seen_slot, read_marker(seen_slot) | mask);
 }
 
 fn mark_safe_state() {

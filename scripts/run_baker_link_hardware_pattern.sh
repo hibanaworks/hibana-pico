@@ -12,6 +12,7 @@ expected_result="48494f4b"
 expected_core1_stage="48490004"
 allow_core1_ready="1"
 bin_name="baker-traffic"
+timeout_seconds="${HIBANA_BAKER_TIMEOUT_SECONDS:-45}"
 
 case "$pattern" in
   traffic) ;;
@@ -19,11 +20,13 @@ case "$pattern" in
     bin_name="baker-choreofs-traffic"
     expected_core1_stage="4849000a"
     allow_core1_ready="0"
+    timeout_seconds="${HIBANA_BAKER_TIMEOUT_SECONDS:-90}"
     ;;
   choreofs-traffic-loop)
     bin_name="baker-choreofs-traffic-loop"
     expected_core1_stage="4849000a"
     allow_core1_ready="0"
+    timeout_seconds="${HIBANA_BAKER_TIMEOUT_SECONDS:-90}"
     ;;
   fail-safe)
     bin_name="baker-fail-safe"
@@ -106,7 +109,7 @@ choreofs_seen_led_mask_addr="$(symbol_addr HIBANA_CHOREOFS_SEEN_LED_MASK)"
 
 result=""
 stage=""
-deadline=$((SECONDS + ${HIBANA_BAKER_TIMEOUT_SECONDS:-45}))
+deadline=$((SECONDS + timeout_seconds))
 while :; do
   result="$(read_word "$result_addr")"
   stage="$(read_word "$stage_addr")"
@@ -196,19 +199,19 @@ if [[ "$pattern" == "choreofs-traffic" ]]; then
     echo "Baker hardware pattern $pattern failed: WASI engine did not complete through endpoint/carrier" >&2
     exit 1
   fi
-  if [[ "$choreofs_path_open_count" != "00000001" ]]; then
+  if [[ "$choreofs_path_open_count" != "00000003" ]]; then
     echo "Baker hardware pattern $pattern failed: path_open count mismatch" >&2
     exit 1
   fi
-  if [[ "$choreofs_fd_write_count" != "00000009" ]]; then
+  if [[ "$choreofs_fd_write_count" != "00000027" ]]; then
     echo "Baker hardware pattern $pattern failed: fd_write count mismatch" >&2
     exit 1
   fi
-  if [[ "$choreofs_poll_count" != "00000009" ]]; then
+  if [[ "$choreofs_poll_count" != "00000027" ]]; then
     echo "Baker hardware pattern $pattern failed: poll_oneoff count mismatch" >&2
     exit 1
   fi
-  if [[ "$choreofs_last_object" != "00000001" ]]; then
+  if [[ "$choreofs_last_object" != "00000003" ]]; then
     echo "Baker hardware pattern $pattern failed: final ChoreoFS object mismatch" >&2
     exit 1
   fi
@@ -227,22 +230,18 @@ if [[ "$pattern" == "choreofs-traffic-loop" ]]; then
     echo "Baker hardware pattern $pattern failed: WASI engine did not enter visual loop" >&2
     exit 1
   fi
-  if [[ "$choreofs_path_open_count" != "00000001" ]]; then
+  if [[ "$choreofs_path_open_count" != "00000003" ]]; then
     echo "Baker hardware pattern $pattern failed: path_open count mismatch" >&2
     exit 1
   fi
   choreofs_fd_write_count_dec="$((16#$choreofs_fd_write_count))"
   choreofs_poll_count_dec="$((16#$choreofs_poll_count))"
-  if (( choreofs_fd_write_count_dec < 3 )); then
+  if (( choreofs_fd_write_count_dec < 13 )); then
     echo "Baker hardware pattern $pattern failed: fd_write count did not reach one visual cycle" >&2
     exit 1
   fi
-  if (( choreofs_poll_count_dec < 3 )); then
+  if (( choreofs_poll_count_dec < 13 )); then
     echo "Baker hardware pattern $pattern failed: poll_oneoff count did not reach one visual cycle" >&2
-    exit 1
-  fi
-  if [[ "$choreofs_last_object" != "00000001" ]]; then
-    echo "Baker hardware pattern $pattern failed: final ChoreoFS object mismatch" >&2
     exit 1
   fi
   if [[ "$choreofs_seen_led_mask" != "00000007" ]]; then

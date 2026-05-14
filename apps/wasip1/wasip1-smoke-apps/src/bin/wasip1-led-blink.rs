@@ -20,7 +20,7 @@ unsafe extern "C" {
 }
 
 const GREEN_FD: u32 = 3;
-const ORANGE_FD: u32 = 4;
+const YELLOW_FD: u32 = 4;
 const RED_FD: u32 = 5;
 const EVENTTYPE_CLOCK: u8 = 0;
 const SUBSCRIPTION_EVENTTYPE_OFFSET: usize = 8;
@@ -64,15 +64,15 @@ pub extern "C" fn main_void() {
         fd_write(GREEN_FD, &ON_IOV, 1, &raw mut WRITTEN);
         sleep_ms(250);
 
-        fd_write(ORANGE_FD, &ON_IOV, 1, &raw mut WRITTEN);
+        fd_write(YELLOW_FD, &ON_IOV, 1, &raw mut WRITTEN);
         sleep_ms(50);
-        fd_write(ORANGE_FD, &OFF_IOV, 1, &raw mut WRITTEN);
+        fd_write(YELLOW_FD, &OFF_IOV, 1, &raw mut WRITTEN);
         sleep_ms(50);
-        fd_write(ORANGE_FD, &ON_IOV, 1, &raw mut WRITTEN);
+        fd_write(YELLOW_FD, &ON_IOV, 1, &raw mut WRITTEN);
         sleep_ms(50);
-        fd_write(ORANGE_FD, &OFF_IOV, 1, &raw mut WRITTEN);
+        fd_write(YELLOW_FD, &OFF_IOV, 1, &raw mut WRITTEN);
         sleep_ms(50);
-        fd_write(ORANGE_FD, &ON_IOV, 1, &raw mut WRITTEN);
+        fd_write(YELLOW_FD, &ON_IOV, 1, &raw mut WRITTEN);
         sleep_ms(50);
 
         fd_write(RED_FD, &ON_IOV, 1, &raw mut WRITTEN);

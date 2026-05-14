@@ -24,9 +24,12 @@ use hibana::{
 use hibana_pico::{
     appkit,
     choreography::protocol::{
-        EngineReq, EngineRet, FdWrite, FdWriteDone, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET,
-        LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF,
-        LABEL_WASI_POLL_ONEOFF_RET, PathOpen, PathOpened,
+        EngineReq, EngineRet, EnvironDone, EnvironGet, EnvironSizes, EnvironSizesGet, FdWrite,
+        FdWriteDone, LABEL_WASI_ENVIRON_GET, LABEL_WASI_ENVIRON_GET_RET,
+        LABEL_WASI_ENVIRON_SIZES_GET, LABEL_WASI_ENVIRON_SIZES_GET_RET, LABEL_WASI_FD_WRITE,
+        LABEL_WASI_FD_WRITE_RET, LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET,
+        LABEL_WASI_POLL_ONEOFF, LABEL_WASI_POLL_ONEOFF_RET, LABEL_WASI_PROC_EXIT, PathOpen,
+        PathOpened, RouteControl,
     },
     site,
 };
@@ -1004,7 +1007,7 @@ fn choreofs_traffic_program() -> impl Projectable<DefaultLabelUniverse> {
             ),
         ),
     );
-    let orange = g::seq(
+    let yellow = g::seq(
         g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 0>(),
         g::seq(
             g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 0>(),
@@ -1026,7 +1029,7 @@ fn choreofs_traffic_program() -> impl Projectable<DefaultLabelUniverse> {
             ),
         ),
     );
-    g::seq(path_open, g::seq(green, g::seq(orange, red)))
+    g::seq(path_open, g::seq(green, g::seq(yellow, red)))
 }
 
 fn single_exchange_program() -> impl Projectable<DefaultLabelUniverse> {
@@ -1034,6 +1037,200 @@ fn single_exchange_program() -> impl Projectable<DefaultLabelUniverse> {
         g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 0>(),
         g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 0>(),
     )
+}
+
+fn choreofs_std_wasi_prefix_program() -> impl Projectable<DefaultLabelUniverse> {
+    type WithEnv = g::Msg<147, GenericCapToken<RouteControl<147, 0>>, RouteControl<147, 0>>;
+    type Direct = g::Msg<148, GenericCapToken<RouteControl<148, 1>>, RouteControl<148, 1>>;
+
+    let environ_sizes_get = g::seq(
+        g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_ENVIRON_SIZES_GET, EngineReq>, 1>(),
+        g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_ENVIRON_SIZES_GET_RET, EngineRet>, 1>(),
+    );
+    let environ_get = g::seq(
+        g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_ENVIRON_GET, EngineReq>, 1>(),
+        g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_ENVIRON_GET_RET, EngineRet>, 1>(),
+    );
+    let path_open = || {
+        g::seq(
+            g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>, 1>(),
+            g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>, 1>(),
+        )
+    };
+    g::route(
+        g::seq(
+            g::send::<g::Role<1>, g::Role<1>, WithEnv, 1>(),
+            g::seq(environ_sizes_get, g::seq(environ_get, path_open())),
+        ),
+        g::seq(g::send::<g::Role<1>, g::Role<1>, Direct, 1>(), path_open()),
+    )
+}
+
+#[test]
+fn std_wasi_env_prefix_reaches_choreofs_path_open() {
+    let program = choreofs_std_wasi_prefix_program();
+    assert!(choreofs_traffic_attach_succeeds::<0>(&program, 262_144));
+    assert!(choreofs_traffic_attach_succeeds::<1>(&program, 262_144));
+    let role0: RoleProgram<0> = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
+    let role1: RoleProgram<1> = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
+    let mut tap_buf = [hibana::substrate::tap::TapEvent::zero(); 128];
+    let mut slab = [0u8; 262_144];
+    let clock = CounterClock::new();
+    let kit = hibana::substrate::SessionKit::<
+        MemoryTransport,
+        DefaultLabelUniverse,
+        CounterClock,
+        2,
+    >::new(&clock);
+    let rv = kit
+        .add_rendezvous_from_config(
+            Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new()),
+            MemoryTransport::new(),
+        )
+        .expect("register rendezvous");
+    let sid = SessionId::new(0x5745);
+    let mut driver = kit
+        .enter::<0, _>(rv, sid, &role0, NoBinding)
+        .expect("enter driver role");
+    let mut engine = kit
+        .enter::<1, _>(rv, sid, &role1, NoBinding)
+        .expect("enter engine role");
+
+    type WithEnv = g::Msg<147, GenericCapToken<RouteControl<147, 0>>, RouteControl<147, 0>>;
+    block_on(
+        engine
+            .flow::<WithEnv>()
+            .expect("engine selects env prefix route")
+            .send(()),
+    )
+    .expect("send env prefix route selection");
+
+    block_on(
+        engine
+            .flow::<g::Msg<LABEL_WASI_ENVIRON_SIZES_GET, EngineReq>>()
+            .expect("engine environ_sizes_get flow")
+            .send(&EngineReq::EnvironSizesGet(EnvironSizesGet::new())),
+    )
+    .expect("send environ_sizes_get");
+    let branch = block_on(driver.offer()).expect("driver offers optional env/path_open branch");
+    assert_eq!(branch.label(), LABEL_WASI_ENVIRON_SIZES_GET);
+    assert_eq!(
+        block_on(branch.decode::<g::Msg<LABEL_WASI_ENVIRON_SIZES_GET, EngineReq>>())
+            .expect("driver decodes environ_sizes_get branch"),
+        EngineReq::EnvironSizesGet(EnvironSizesGet::new())
+    );
+    block_on(
+        driver
+            .flow::<g::Msg<LABEL_WASI_ENVIRON_SIZES_GET_RET, EngineRet>>()
+            .expect("driver environ_sizes_get reply flow")
+            .send(&EngineRet::EnvironSizes(EnvironSizes::new(1, 8))),
+    )
+    .expect("send environ_sizes_get reply");
+    assert_eq!(
+        block_on(engine.recv::<g::Msg<LABEL_WASI_ENVIRON_SIZES_GET_RET, EngineRet>>())
+            .expect("engine receives environ_sizes_get reply"),
+        EngineRet::EnvironSizes(EnvironSizes::new(1, 8))
+    );
+
+    let environ_get = EngineReq::EnvironGet(EnvironGet::new(8).expect("environ_get"));
+    block_on(
+        engine
+            .flow::<g::Msg<LABEL_WASI_ENVIRON_GET, EngineReq>>()
+            .expect("engine environ_get flow")
+            .send(&environ_get),
+    )
+    .expect("send environ_get");
+    assert_eq!(
+        block_on(driver.recv::<g::Msg<LABEL_WASI_ENVIRON_GET, EngineReq>>())
+            .expect("driver receives environ_get"),
+        environ_get
+    );
+    let environ_done =
+        EngineRet::EnvironDone(EnvironDone::new_with_lease(0, b"HIBANA").expect("env done"));
+    block_on(
+        driver
+            .flow::<g::Msg<LABEL_WASI_ENVIRON_GET_RET, EngineRet>>()
+            .expect("driver environ_get reply flow")
+            .send(&environ_done),
+    )
+    .expect("send environ_get reply");
+    assert_eq!(
+        block_on(engine.recv::<g::Msg<LABEL_WASI_ENVIRON_GET_RET, EngineRet>>())
+            .expect("engine receives environ_get reply"),
+        environ_done
+    );
+
+    let path_open = EngineReq::PathOpen(
+        PathOpen::new(3, 0, 0x2, b"device/led/green").expect("path_open request"),
+    );
+    block_on(
+        engine
+            .flow::<g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>>()
+            .expect("engine path_open flow after env prefix")
+            .send(&path_open),
+    )
+    .expect("send path_open after env prefix");
+    assert_eq!(
+        block_on(driver.recv::<g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>>())
+            .expect("driver receives path_open after env prefix"),
+        path_open
+    );
+}
+
+#[test]
+fn std_wasi_optional_env_prefix_allows_direct_choreofs_path_open() {
+    let program = choreofs_std_wasi_prefix_program();
+    let role0: RoleProgram<0> = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
+    let role1: RoleProgram<1> = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
+    let mut tap_buf = [hibana::substrate::tap::TapEvent::zero(); 128];
+    let mut slab = [0u8; 262_144];
+    let clock = CounterClock::new();
+    let kit = hibana::substrate::SessionKit::<
+        MemoryTransport,
+        DefaultLabelUniverse,
+        CounterClock,
+        2,
+    >::new(&clock);
+    let rv = kit
+        .add_rendezvous_from_config(
+            Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new()),
+            MemoryTransport::new(),
+        )
+        .expect("register rendezvous");
+    let sid = SessionId::new(0x5746);
+    let mut driver = kit
+        .enter::<0, _>(rv, sid, &role0, NoBinding)
+        .expect("enter driver role");
+    let mut engine = kit
+        .enter::<1, _>(rv, sid, &role1, NoBinding)
+        .expect("enter engine role");
+
+    type Direct = g::Msg<148, GenericCapToken<RouteControl<148, 1>>, RouteControl<148, 1>>;
+    block_on(
+        engine
+            .flow::<Direct>()
+            .expect("engine selects direct path_open route")
+            .send(()),
+    )
+    .expect("send direct path_open route selection");
+
+    let path_open = EngineReq::PathOpen(
+        PathOpen::new(3, 0, 0x2, b"device/led/green").expect("path_open request"),
+    );
+    block_on(
+        engine
+            .flow::<g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>>()
+            .expect("engine path_open flow without env prefix")
+            .send(&path_open),
+    )
+    .expect("send path_open without env prefix");
+    let branch = block_on(driver.offer()).expect("driver offers optional env/path_open branch");
+    assert_eq!(branch.label(), LABEL_WASI_PATH_OPEN);
+    assert_eq!(
+        block_on(branch.decode::<g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>>())
+            .expect("driver decodes direct path_open branch"),
+        path_open
+    );
 }
 
 const TEST_LOOP_CONTINUE_LOGICAL: u8 = 0xA1;
@@ -1063,6 +1260,61 @@ fn choreofs_traffic_loop_program() -> impl Projectable<DefaultLabelUniverse> {
         g::route(
             g::seq(g::send::<g::Role<1>, g::Role<1>, Continue, 0>(), cycle),
             g::send::<g::Role<1>, g::Role<1>, Break, 0>(),
+        ),
+    )
+}
+
+fn choreofs_baker_wasi_traffic_program() -> impl Projectable<DefaultLabelUniverse> {
+    type OpenWithEnv = g::Msg<147, GenericCapToken<RouteControl<147, 0>>, RouteControl<147, 0>>;
+    type OpenDirect = g::Msg<148, GenericCapToken<RouteControl<148, 1>>, RouteControl<148, 1>>;
+    type Continue =
+        g::Msg<{ TEST_LOOP_CONTINUE_LOGICAL }, GenericCapToken<LoopContinueKind>, LoopContinueKind>;
+    type Break = g::Msg<{ TEST_LOOP_BREAK_LOGICAL }, GenericCapToken<LoopBreakKind>, LoopBreakKind>;
+
+    let environ_sizes_get = g::seq(
+        g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_ENVIRON_SIZES_GET, EngineReq>, 1>(),
+        g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_ENVIRON_SIZES_GET_RET, EngineRet>, 1>(),
+    );
+    let environ_get = g::seq(
+        g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_ENVIRON_GET, EngineReq>, 1>(),
+        g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_ENVIRON_GET_RET, EngineRet>, 1>(),
+    );
+    let path_open = || {
+        g::seq(
+            g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>, 1>(),
+            g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>, 1>(),
+        )
+    };
+    let open_leds = || g::seq(path_open(), g::seq(path_open(), path_open()));
+    let open_leds_with_optional_env = g::route(
+        g::seq(
+            g::send::<g::Role<1>, g::Role<1>, OpenWithEnv, 1>(),
+            g::seq(environ_sizes_get, g::seq(environ_get, open_leds())),
+        ),
+        g::seq(
+            g::send::<g::Role<1>, g::Role<1>, OpenDirect, 1>(),
+            open_leds(),
+        ),
+    );
+    let cycle = g::seq(
+        g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 1>(),
+        g::seq(
+            g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 1>(),
+            g::seq(
+                g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>, 1>(),
+                g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>, 1>(
+                ),
+            ),
+        ),
+    );
+    g::seq(
+        open_leds_with_optional_env,
+        g::route(
+            g::seq(g::send::<g::Role<1>, g::Role<1>, Continue, 1>(), cycle),
+            g::seq(
+                g::send::<g::Role<1>, g::Role<1>, Break, 1>(),
+                g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 1>(),
+            ),
         ),
     )
 }
@@ -1120,6 +1372,9 @@ fn choreofs_traffic_role_slices_attach_with_bounded_storage() {
     let single_program = single_exchange_program();
     let single_role0 = minimum_choreofs_traffic_attach_slab::<0>(&single_program);
     let single_role1 = minimum_choreofs_traffic_attach_slab::<1>(&single_program);
+    let baker_program = choreofs_baker_wasi_traffic_program();
+    let baker_role0 = minimum_choreofs_traffic_attach_slab::<0>(&baker_program);
+    let baker_role1 = minimum_choreofs_traffic_attach_slab::<1>(&baker_program);
 
     println!("single exchange role0 attach slab bytes: {single_role0}");
     println!("single exchange role1 attach slab bytes: {single_role1}");
@@ -1127,6 +1382,8 @@ fn choreofs_traffic_role_slices_attach_with_bounded_storage() {
     println!("choreofs traffic role1 attach slab bytes: {role1}");
     println!("choreofs loop traffic role0 attach slab bytes: {loop_role0}");
     println!("choreofs loop traffic role1 attach slab bytes: {loop_role1}");
+    println!("baker wasi choreofs traffic role0 attach slab bytes: {baker_role0}");
+    println!("baker wasi choreofs traffic role1 attach slab bytes: {baker_role1}");
     assert!(single_role0 <= role0);
     assert!(single_role1 <= role1);
 }
@@ -1746,10 +2003,7 @@ fn wasi_image_rejects_non_p1_artifacts() {
     );
 
     let extra = appkit::WasiImage::from_static(WASM_FD_WRITE_AND_READ);
-    assert_eq!(
-        extra.validate(appkit::WasiImports::FD_WRITE),
-        Err(appkit::ArtifactError::UnsupportedWasiImport)
-    );
+    assert_eq!(extra.validate(appkit::WasiImports::FD_WRITE), Ok(()));
 
     assert_eq!(
         appkit::NoWasi.validate(appkit::WasiImports::FD_WRITE),

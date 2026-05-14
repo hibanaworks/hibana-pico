@@ -265,6 +265,9 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
     let choreofs_bin = include_str!("../examples/baker-firmware/src/bin/choreofs_traffic.rs");
     let choreofs_loop_bin =
         include_str!("../examples/baker-firmware/src/bin/choreofs_traffic_loop.rs");
+    let choreofs_wasi_guest = include_str!(
+        "../apps/wasip1/wasip1-smoke-apps/src/bin/wasip1-led-choreofs-traffic-cycle.rs"
+    );
     let fail_safe_bin = include_str!("../examples/baker-firmware/src/bin/fail_safe.rs");
     let recovery_bin = include_str!("../examples/baker-firmware/src/bin/recovery.rs");
     let many_reentry_bin = include_str!("../examples/baker-firmware/src/bin/many_reentry.rs");
@@ -315,7 +318,9 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         "examples/baker-firmware/src/bin/choreofs_traffic.rs",
         choreofs_bin,
         &[
-            "const TRAFFIC_DEVICE: appkit::ObjectSpec",
+            "const GREEN_LED: appkit::ObjectSpec",
+            "const YELLOW_LED: appkit::ObjectSpec",
+            "const RED_LED: appkit::ObjectSpec",
             "impl appkit::Capsule for ChoreoFsTraffic",
             "fn choreography()",
             "impl appkit::Localside<ChoreoFsTraffic> for ChoreoFsTrafficLocal",
@@ -326,11 +331,39 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         "examples/baker-firmware/src/bin/choreofs_traffic_loop.rs",
         choreofs_loop_bin,
         &[
-            "const TRAFFIC_DEVICE: appkit::ObjectSpec",
+            "const GREEN_LED: appkit::ObjectSpec",
+            "const YELLOW_LED: appkit::ObjectSpec",
+            "const RED_LED: appkit::ObjectSpec",
             "impl appkit::Capsule for ChoreoFsTrafficLoop",
             "const CHOREOFS_VISUAL_LOOP: bool = true",
             "impl appkit::Localside<ChoreoFsTrafficLoop> for ChoreoFsTrafficLoopLocal",
             "baker_firmware::run::<ChoreoFsTrafficLoop>()",
+        ],
+    );
+    assert_present(
+        "apps/wasip1/wasip1-smoke-apps/src/bin/wasip1-led-choreofs-traffic-cycle.rs",
+        choreofs_wasi_guest,
+        &[
+            "use hibana_wasi_guest::baker::{Led, sleep_ms};",
+            "fn main()",
+            "Led::open(\"/device/led/green\")",
+            "Led::open(\"/device/led/yellow\")",
+            "Led::open(\"/device/led/red\")",
+            "set_and_wait(&green, true)",
+            "set_and_wait(&yellow, true)",
+            "set_and_wait(&red, true)",
+        ],
+    );
+    assert_absent(
+        "apps/wasip1/wasip1-smoke-apps/src/bin/wasip1-led-choreofs-traffic-cycle.rs",
+        choreofs_wasi_guest,
+        &[
+            "#![no_std]",
+            "unsafe extern",
+            "wasi_snapshot_preview1",
+            "fn path_open",
+            "fn fd_write",
+            "fn poll_oneoff",
         ],
     );
     assert_present(

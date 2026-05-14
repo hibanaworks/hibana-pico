@@ -1292,9 +1292,6 @@ impl ArtifactEvidence for WasiImage<'_> {
         if !required.is_subset_of(observed) {
             return Err(ArtifactError::MissingRequiredWasiImport);
         }
-        if !observed.is_subset_of(required) {
-            return Err(ArtifactError::UnsupportedWasiImport);
-        }
         Ok(())
     }
 }

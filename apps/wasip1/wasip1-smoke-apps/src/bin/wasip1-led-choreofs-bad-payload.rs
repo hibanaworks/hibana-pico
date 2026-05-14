@@ -28,7 +28,7 @@ unsafe extern "C" {
 }
 
 static GREEN_PATH: &[u8] = b"device/led/green";
-static ORANGE_PATH: &[u8] = b"device/led/orange";
+static YELLOW_PATH: &[u8] = b"device/led/yellow";
 static RED_PATH: &[u8] = b"device/led/red";
 static BAD: [u8; 2] = *b"on";
 static BAD_IOV: Ciovec = Ciovec {
@@ -36,7 +36,7 @@ static BAD_IOV: Ciovec = Ciovec {
     buf_len: BAD.len(),
 };
 static mut GREEN_FD: u32 = 0;
-static mut ORANGE_FD: u32 = 0;
+static mut YELLOW_FD: u32 = 0;
 static mut RED_FD: u32 = 0;
 static mut WRITTEN: usize = 0;
 
@@ -60,7 +60,7 @@ fn open_path(path: &[u8], fd: *mut u32) {
 #[unsafe(export_name = "__main_void")]
 pub extern "C" fn main_void() {
     open_path(GREEN_PATH, &raw mut GREEN_FD);
-    open_path(ORANGE_PATH, &raw mut ORANGE_FD);
+    open_path(YELLOW_PATH, &raw mut YELLOW_FD);
     open_path(RED_PATH, &raw mut RED_FD);
     unsafe {
         let errno = fd_write(GREEN_FD, &BAD_IOV, 1, &raw mut WRITTEN);

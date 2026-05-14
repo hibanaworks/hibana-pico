@@ -7,5 +7,5 @@
 pub mod device;
 pub mod time;
 
-pub use device::{Led, TrafficLight};
+pub use device::Led;
 pub use time::sleep_ms;

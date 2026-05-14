@@ -13,15 +13,27 @@ use hibana_pico::{
     choreography::protocol::{
         EngineReq, EngineRet, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET, LABEL_WASI_PATH_OPEN,
         LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF, LABEL_WASI_POLL_ONEOFF_RET,
+        LABEL_WASI_PROC_EXIT,
     },
 };
 
-const TRAFFIC_DEVICE: appkit::ObjectSpec = appkit::ObjectSpec::new(
-    b"device/traffic",
+const GREEN_LED: appkit::ObjectSpec = appkit::ObjectSpec::new(
+    b"device/led/green",
     appkit::ObjectId(1),
     appkit::FdSpec::new(3, FD_WRITE_RIGHT, 1),
 );
-static OBJECT_FACTS: appkit::ObjectSpecSet<1> = appkit::ObjectSpecSet::new([TRAFFIC_DEVICE]);
+const YELLOW_LED: appkit::ObjectSpec = appkit::ObjectSpec::new(
+    b"device/led/yellow",
+    appkit::ObjectId(2),
+    appkit::FdSpec::new(4, FD_WRITE_RIGHT, 1),
+);
+const RED_LED: appkit::ObjectSpec = appkit::ObjectSpec::new(
+    b"device/led/red",
+    appkit::ObjectId(3),
+    appkit::FdSpec::new(5, FD_WRITE_RIGHT, 1),
+);
+static OBJECT_FACTS: appkit::ObjectSpecSet<3> =
+    appkit::ObjectSpecSet::new([GREEN_LED, YELLOW_LED, RED_LED]);
 
 pub struct ChoreoFsTrafficLoop;
 pub struct ChoreoFsTrafficLoopLocal;
@@ -33,10 +45,13 @@ impl appkit::Capsule for ChoreoFsTrafficLoop {
     type Report = Infallible;
 
     fn choreography() -> impl hibana::substrate::program::Projectable<Self::Universe> {
-        let path_open = g::seq(
-            g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>, 1>(),
-            g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>, 1>(),
-        );
+        let path_open = || {
+            g::seq(
+                g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>, 1>(),
+                g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>, 1>(),
+            )
+        };
+        let open_leds = || g::seq(path_open(), g::seq(path_open(), path_open()));
         let write_wait = || {
             g::seq(
                 g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 1>(),
@@ -66,10 +81,13 @@ impl appkit::Capsule for ChoreoFsTrafficLoop {
                     g::send::<g::Role<1>, g::Role<1>, BakerChoreoFsRouteContinue, 1>(),
                     write_wait(),
                 ),
-                g::send::<g::Role<1>, g::Role<1>, BakerChoreoFsRouteBreak, 1>(),
+                g::seq(
+                    g::send::<g::Role<1>, g::Role<1>, BakerChoreoFsRouteBreak, 1>(),
+                    g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 1>(),
+                ),
             )
         };
-        g::seq(path_open, admitted_cycle())
+        g::seq(open_leds(), admitted_cycle())
     }
 }
 

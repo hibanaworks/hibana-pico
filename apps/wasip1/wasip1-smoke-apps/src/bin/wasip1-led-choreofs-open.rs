@@ -8,30 +8,30 @@ fn main() {
 
 fn run() -> hibana_wasi_guest::Result<()> {
     let green = must(Led::open("/device/led/green"));
-    let orange = must(Led::open("/device/led/orange"));
+    let yellow = must(Led::open("/device/led/yellow"));
     let red = must(Led::open("/device/led/red"));
 
     loop {
         must(green.set(true));
-        must(orange.set(false));
+        must(yellow.set(false));
         must(red.set(false));
         must(sleep_ms(180));
 
         must(green.set(false));
-        must(orange.set(true));
+        must(yellow.set(true));
         must(red.set(false));
         must(sleep_ms(40));
-        must(orange.set(false));
+        must(yellow.set(false));
         must(sleep_ms(40));
-        must(orange.set(true));
+        must(yellow.set(true));
         must(sleep_ms(40));
-        must(orange.set(false));
+        must(yellow.set(false));
         must(sleep_ms(40));
-        must(orange.set(true));
+        must(yellow.set(true));
         must(sleep_ms(40));
 
         must(green.set(false));
-        must(orange.set(false));
+        must(yellow.set(false));
         must(red.set(true));
         must(sleep_ms(180));
     }

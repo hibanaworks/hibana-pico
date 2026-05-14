@@ -72,11 +72,14 @@ Core1 runs the WASI P1 engine and Core0 runs the driver/kernel side. The guest
 itself is an infinite WASI P1 loop:
 
 ```text
-path_open("device/traffic")
+path_open("device/led/green")
+path_open("device/led/yellow")
+path_open("device/led/red")
 loop {
-  fd_write("1"); poll_oneoff(...)
-  fd_write("2"); poll_oneoff(...)
-  fd_write("4"); poll_oneoff(...)
+  fd_write(green, "1"); poll_oneoff(...)
+  fd_write(yellow, "0"); poll_oneoff(...)
+  fd_write(red, "0"); poll_oneoff(...)
+  ...
 }
 ```
 
@@ -117,32 +120,31 @@ Choreography:
   RouteDecision / legal order / phase authority
 ```
 
-The `choreofs-traffic` pattern opens the configured LED object path, mints the
-fd through the driver-side materialization path, then performs three
-green/orange/red cycles through the projected choreography. That is nine
-`fd_write` completions and nine `poll_oneoff` completions. The hardware proof
-checks:
+The `choreofs-traffic` pattern opens the three configured LED object paths,
+mints their fds through the driver-side materialization path, then performs
+three green/yellow/red cycles through the projected choreography. Each cycle is
+thirteen `fd_write` completions and thirteen `poll_oneoff` completions. The
+hardware proof checks:
 
 ```text
 choreofs_engine_status = 0x57414f4b
-choreofs_path_open_count = 1
-choreofs_fd_write_count = 9
-choreofs_poll_count = 9
-choreofs_last_object = 1
+choreofs_path_open_count = 3
+choreofs_fd_write_count = 39
+choreofs_poll_count = 39
+choreofs_last_object = 3
 choreofs_led_mask = 4
 choreofs_seen_led_mask = 7
 ```
 
 The `choreofs-traffic-loop` pattern uses the same WASI artifact and
 choreography, but leaves the guest and driver in the visual loop. The runner
-does not require a fixed final LED mask for that mode; it checks that at least
-one full green/orange/red cycle was observed:
+does not require a fixed final LED mask or final object for that mode; it
+checks that at least one full green/yellow/red cycle was observed:
 
 ```text
-choreofs_path_open_count = 1
-choreofs_fd_write_count >= 3
-choreofs_poll_count >= 3
-choreofs_last_object = 1
+choreofs_path_open_count = 3
+choreofs_fd_write_count >= 13
+choreofs_poll_count >= 13
 choreofs_seen_led_mask = 7
 ```
 
@@ -179,9 +181,9 @@ hardfault pc/lr == 0
 core0 and core1 stack high-water marks are non-zero and <= 8 KiB
 ```
 
-## Known Hardware Evidence
+## Hardware Evidence Shape
 
-The current proof run passed these patterns on Baker Link hardware:
+The hardware runner verifies these marker shapes on Baker Link hardware:
 
 ```text
 traffic:
@@ -197,10 +199,10 @@ choreofs-traffic:
   hardfault pc/lr=0
   choreofs_engine_status=0x57414f4b
   choreofs_engine_error_code=0
-  choreofs_path_open_count=1
-  choreofs_fd_write_count=9
-  choreofs_poll_count=9
-  choreofs_last_object=1
+  choreofs_path_open_count=3
+  choreofs_fd_write_count=39
+  choreofs_poll_count=39
+  choreofs_last_object=3
   choreofs_led_mask=4
   choreofs_seen_led_mask=7
 
@@ -210,10 +212,9 @@ choreofs-traffic-loop:
   core1_stage=0x4849000a
   hardfault pc/lr=0
   choreofs_engine_error_code=0
-  choreofs_path_open_count=1
-  choreofs_fd_write_count>=3
-  choreofs_poll_count>=3
-  choreofs_last_object=1
+  choreofs_path_open_count=3
+  choreofs_fd_write_count>=13
+  choreofs_poll_count>=13
   choreofs_seen_led_mask=7
 
 fail-safe:

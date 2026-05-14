@@ -48,8 +48,8 @@ mod tests {
             Ok("device/led/green")
         );
         assert_eq!(
-            normalize_choreofs_path("device/led/orange"),
-            Ok("device/led/orange")
+            normalize_choreofs_path("device/led/yellow"),
+            Ok("device/led/yellow")
         );
     }
 

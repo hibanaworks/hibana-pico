@@ -27,7 +27,7 @@ unsafe extern "C" {
     fn fd_write(fd: u32, iovs: *const Ciovec, iovs_len: usize, nwritten: *mut usize) -> u16;
 }
 
-static ORANGE_PATH: &[u8] = b"device/led/orange";
+static YELLOW_PATH: &[u8] = b"device/led/yellow";
 static RED_PATH: &[u8] = b"device/led/red";
 static NOT_GPIO_PATH: &[u8] = b"device/not-gpio";
 static ONE: [u8; 1] = *b"1";
@@ -35,7 +35,7 @@ static ONE_IOV: Ciovec = Ciovec {
     buf: ONE.as_ptr(),
     buf_len: ONE.len(),
 };
-static mut ORANGE_FD: u32 = 0;
+static mut YELLOW_FD: u32 = 0;
 static mut RED_FD: u32 = 0;
 static mut NOT_GPIO_FD: u32 = 0;
 static mut WRITTEN: usize = 0;
@@ -59,7 +59,7 @@ fn open_path(path: &[u8], fd: *mut u32) {
 
 #[unsafe(export_name = "__main_void")]
 pub extern "C" fn main_void() {
-    open_path(ORANGE_PATH, &raw mut ORANGE_FD);
+    open_path(YELLOW_PATH, &raw mut YELLOW_FD);
     open_path(RED_PATH, &raw mut RED_FD);
     open_path(NOT_GPIO_PATH, &raw mut NOT_GPIO_FD);
     unsafe {
