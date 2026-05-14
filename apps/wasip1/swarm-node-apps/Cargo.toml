@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[workspace]
+
 [[bin]]
 name = "swarm-coordinator"
 path = "src/bin/swarm-coordinator.rs"

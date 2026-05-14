@@ -118,7 +118,8 @@ impl ControlResourceKind for EngineAbortBeginKind {
     const OP: ControlOp = ControlOp::AbortBegin;
     const AUTO_MINT_WIRE: bool = true;
 
-    fn mint_handle(sid: SessionId, lane: Lane, _scope: ScopeId) -> <Self as ResourceKind>::Handle {
+    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+        core::hint::black_box(scope.raw());
         (sid.raw(), lane.raw() as u16)
     }
 }
@@ -152,7 +153,8 @@ impl ControlResourceKind for EngineAbortFenceKind {
     const OP: ControlOp = ControlOp::Fence;
     const AUTO_MINT_WIRE: bool = true;
 
-    fn mint_handle(sid: SessionId, lane: Lane, _scope: ScopeId) -> <Self as ResourceKind>::Handle {
+    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+        core::hint::black_box(scope.raw());
         (sid.raw(), lane.raw() as u16)
     }
 }
@@ -186,7 +188,8 @@ impl ControlResourceKind for EngineAbortAckKind {
     const OP: ControlOp = ControlOp::AbortAck;
     const AUTO_MINT_WIRE: bool = true;
 
-    fn mint_handle(sid: SessionId, lane: Lane, _scope: ScopeId) -> <Self as ResourceKind>::Handle {
+    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+        core::hint::black_box(scope.raw());
         (sid.raw(), lane.raw() as u16)
     }
 }
@@ -220,7 +223,9 @@ impl ControlResourceKind for ActivationAuthorityKind {
     const OP: ControlOp = ControlOp::CapDelegate;
     const AUTO_MINT_WIRE: bool = false;
 
-    fn mint_handle(_sid: SessionId, _lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+        core::hint::black_box(sid.raw());
+        core::hint::black_box(lane.raw());
         (0, scope.raw())
     }
 }
@@ -254,7 +259,9 @@ impl ControlResourceKind for ActivationKind {
     const OP: ControlOp = ControlOp::CapDelegate;
     const AUTO_MINT_WIRE: bool = false;
 
-    fn mint_handle(_sid: SessionId, _lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+        core::hint::black_box(sid.raw());
+        core::hint::black_box(lane.raw());
         (1, scope.raw())
     }
 }
@@ -262,143 +269,257 @@ impl ControlResourceKind for ActivationKind {
 pub type ReentryPermitKind = ActivationAuthorityKind;
 pub type ActivationPermitKind = ActivationKind;
 
-macro_rules! define_control_kind {
-    (
-        $kind:ident,
-        $handle:ty,
-        $tag:expr,
-        $name:expr,
-        $scope:expr,
-        $tap_id:expr,
-        $shot:expr,
-        $path:expr,
-        $op:expr,
-        $arm:expr
-    ) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        pub struct $kind;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TopologyBeginKind;
 
-        impl ResourceKind for $kind {
-            type Handle = $handle;
-            const TAG: u8 = $tag;
-            const NAME: &'static str = $name;
+impl ResourceKind for TopologyBeginKind {
+    type Handle = TopologyControlWireHandle;
+    const TAG: u8 = 0x46;
+    const NAME: &'static str = "TopologyBegin";
 
-            fn encode_handle(handle: &Self::Handle) -> [u8; CAP_HANDLE_LEN] {
-                encode_control_handle(*handle)
-            }
+    fn encode_handle(handle: &Self::Handle) -> [u8; CAP_HANDLE_LEN] {
+        encode_control_handle(*handle)
+    }
 
-            fn decode_handle(data: [u8; CAP_HANDLE_LEN]) -> Result<Self::Handle, CapError> {
-                decode_control_handle(data)
-            }
+    fn decode_handle(data: [u8; CAP_HANDLE_LEN]) -> Result<Self::Handle, CapError> {
+        decode_control_handle(data)
+    }
 
-            fn zeroize(handle: &mut Self::Handle) {
-                *handle = (0, 0);
-            }
-        }
-
-        impl ControlResourceKind for $kind {
-            const SCOPE: ControlScopeKind = $scope;
-            const TAP_ID: u16 = $tap_id;
-            const SHOT: CapShot = $shot;
-            const PATH: ControlPath = $path;
-            const OP: ControlOp = $op;
-            const AUTO_MINT_WIRE: bool = true;
-
-            fn mint_handle(
-                _sid: SessionId,
-                _lane: Lane,
-                scope: ScopeId,
-            ) -> <Self as ResourceKind>::Handle {
-                ($arm, scope.raw())
-            }
-        }
-    };
+    fn zeroize(handle: &mut Self::Handle) {
+        *handle = (0, 0);
+    }
 }
 
-define_control_kind!(
-    TopologyBeginKind,
-    TopologyControlWireHandle,
-    0x46,
-    "TopologyBegin",
-    ControlScopeKind::Topology,
-    0x0520,
-    CapShot::One,
-    ControlPath::Wire,
-    ControlOp::TopologyBegin,
-    0
-);
-define_control_kind!(
-    TopologyAckKind,
-    TopologyControlWireHandle,
-    0x47,
-    "TopologyAck",
-    ControlScopeKind::Topology,
-    0x0521,
-    CapShot::One,
-    ControlPath::Wire,
-    ControlOp::TopologyAck,
-    1
-);
-define_control_kind!(
-    TopologyCommitKind,
-    TopologyControlWireHandle,
-    0x48,
-    "TopologyCommit",
-    ControlScopeKind::Topology,
-    0x0522,
-    CapShot::One,
-    ControlPath::Wire,
-    ControlOp::TopologyCommit,
-    2
-);
-define_control_kind!(
-    TxCommitKind,
-    TransactionControlWireHandle,
-    0x49,
-    "TxCommit",
-    ControlScopeKind::Policy,
-    0x0530,
-    CapShot::One,
-    ControlPath::Wire,
-    ControlOp::TxCommit,
-    0
-);
-define_control_kind!(
-    TxAbortKind,
-    TransactionControlWireHandle,
-    0x4a,
-    "TxAbort",
-    ControlScopeKind::Policy,
-    0x0531,
-    CapShot::One,
-    ControlPath::Wire,
-    ControlOp::TxAbort,
-    1
-);
-define_control_kind!(
-    StateSnapshotKind,
-    StateControlWireHandle,
-    0x4b,
-    "StateSnapshot",
-    ControlScopeKind::State,
-    0x0540,
-    CapShot::One,
-    ControlPath::Wire,
-    ControlOp::StateSnapshot,
-    0
-);
-define_control_kind!(
-    StateRestoreKind,
-    StateControlWireHandle,
-    0x4c,
-    "StateRestore",
-    ControlScopeKind::State,
-    0x0541,
-    CapShot::One,
-    ControlPath::Wire,
-    ControlOp::StateRestore,
-    1
-);
+impl ControlResourceKind for TopologyBeginKind {
+    const SCOPE: ControlScopeKind = ControlScopeKind::Topology;
+    const TAP_ID: u16 = 0x0520;
+    const SHOT: CapShot = CapShot::One;
+    const PATH: ControlPath = ControlPath::Wire;
+    const OP: ControlOp = ControlOp::TopologyBegin;
+    const AUTO_MINT_WIRE: bool = true;
+
+    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+        core::hint::black_box(sid.raw());
+        core::hint::black_box(lane.raw());
+        (0, scope.raw())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TopologyAckKind;
+
+impl ResourceKind for TopologyAckKind {
+    type Handle = TopologyControlWireHandle;
+    const TAG: u8 = 0x47;
+    const NAME: &'static str = "TopologyAck";
+
+    fn encode_handle(handle: &Self::Handle) -> [u8; CAP_HANDLE_LEN] {
+        encode_control_handle(*handle)
+    }
+
+    fn decode_handle(data: [u8; CAP_HANDLE_LEN]) -> Result<Self::Handle, CapError> {
+        decode_control_handle(data)
+    }
+
+    fn zeroize(handle: &mut Self::Handle) {
+        *handle = (0, 0);
+    }
+}
+
+impl ControlResourceKind for TopologyAckKind {
+    const SCOPE: ControlScopeKind = ControlScopeKind::Topology;
+    const TAP_ID: u16 = 0x0521;
+    const SHOT: CapShot = CapShot::One;
+    const PATH: ControlPath = ControlPath::Wire;
+    const OP: ControlOp = ControlOp::TopologyAck;
+    const AUTO_MINT_WIRE: bool = true;
+
+    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+        core::hint::black_box(sid.raw());
+        core::hint::black_box(lane.raw());
+        (1, scope.raw())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TopologyCommitKind;
+
+impl ResourceKind for TopologyCommitKind {
+    type Handle = TopologyControlWireHandle;
+    const TAG: u8 = 0x48;
+    const NAME: &'static str = "TopologyCommit";
+
+    fn encode_handle(handle: &Self::Handle) -> [u8; CAP_HANDLE_LEN] {
+        encode_control_handle(*handle)
+    }
+
+    fn decode_handle(data: [u8; CAP_HANDLE_LEN]) -> Result<Self::Handle, CapError> {
+        decode_control_handle(data)
+    }
+
+    fn zeroize(handle: &mut Self::Handle) {
+        *handle = (0, 0);
+    }
+}
+
+impl ControlResourceKind for TopologyCommitKind {
+    const SCOPE: ControlScopeKind = ControlScopeKind::Topology;
+    const TAP_ID: u16 = 0x0522;
+    const SHOT: CapShot = CapShot::One;
+    const PATH: ControlPath = ControlPath::Wire;
+    const OP: ControlOp = ControlOp::TopologyCommit;
+    const AUTO_MINT_WIRE: bool = true;
+
+    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+        core::hint::black_box(sid.raw());
+        core::hint::black_box(lane.raw());
+        (2, scope.raw())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TxCommitKind;
+
+impl ResourceKind for TxCommitKind {
+    type Handle = TransactionControlWireHandle;
+    const TAG: u8 = 0x49;
+    const NAME: &'static str = "TxCommit";
+
+    fn encode_handle(handle: &Self::Handle) -> [u8; CAP_HANDLE_LEN] {
+        encode_control_handle(*handle)
+    }
+
+    fn decode_handle(data: [u8; CAP_HANDLE_LEN]) -> Result<Self::Handle, CapError> {
+        decode_control_handle(data)
+    }
+
+    fn zeroize(handle: &mut Self::Handle) {
+        *handle = (0, 0);
+    }
+}
+
+impl ControlResourceKind for TxCommitKind {
+    const SCOPE: ControlScopeKind = ControlScopeKind::Policy;
+    const TAP_ID: u16 = 0x0530;
+    const SHOT: CapShot = CapShot::One;
+    const PATH: ControlPath = ControlPath::Wire;
+    const OP: ControlOp = ControlOp::TxCommit;
+    const AUTO_MINT_WIRE: bool = true;
+
+    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+        core::hint::black_box(sid.raw());
+        core::hint::black_box(lane.raw());
+        (0, scope.raw())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TxAbortKind;
+
+impl ResourceKind for TxAbortKind {
+    type Handle = TransactionControlWireHandle;
+    const TAG: u8 = 0x4a;
+    const NAME: &'static str = "TxAbort";
+
+    fn encode_handle(handle: &Self::Handle) -> [u8; CAP_HANDLE_LEN] {
+        encode_control_handle(*handle)
+    }
+
+    fn decode_handle(data: [u8; CAP_HANDLE_LEN]) -> Result<Self::Handle, CapError> {
+        decode_control_handle(data)
+    }
+
+    fn zeroize(handle: &mut Self::Handle) {
+        *handle = (0, 0);
+    }
+}
+
+impl ControlResourceKind for TxAbortKind {
+    const SCOPE: ControlScopeKind = ControlScopeKind::Policy;
+    const TAP_ID: u16 = 0x0531;
+    const SHOT: CapShot = CapShot::One;
+    const PATH: ControlPath = ControlPath::Wire;
+    const OP: ControlOp = ControlOp::TxAbort;
+    const AUTO_MINT_WIRE: bool = true;
+
+    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+        core::hint::black_box(sid.raw());
+        core::hint::black_box(lane.raw());
+        (1, scope.raw())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StateSnapshotKind;
+
+impl ResourceKind for StateSnapshotKind {
+    type Handle = StateControlWireHandle;
+    const TAG: u8 = 0x4b;
+    const NAME: &'static str = "StateSnapshot";
+
+    fn encode_handle(handle: &Self::Handle) -> [u8; CAP_HANDLE_LEN] {
+        encode_control_handle(*handle)
+    }
+
+    fn decode_handle(data: [u8; CAP_HANDLE_LEN]) -> Result<Self::Handle, CapError> {
+        decode_control_handle(data)
+    }
+
+    fn zeroize(handle: &mut Self::Handle) {
+        *handle = (0, 0);
+    }
+}
+
+impl ControlResourceKind for StateSnapshotKind {
+    const SCOPE: ControlScopeKind = ControlScopeKind::State;
+    const TAP_ID: u16 = 0x0540;
+    const SHOT: CapShot = CapShot::One;
+    const PATH: ControlPath = ControlPath::Wire;
+    const OP: ControlOp = ControlOp::StateSnapshot;
+    const AUTO_MINT_WIRE: bool = true;
+
+    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+        core::hint::black_box(sid.raw());
+        core::hint::black_box(lane.raw());
+        (0, scope.raw())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StateRestoreKind;
+
+impl ResourceKind for StateRestoreKind {
+    type Handle = StateControlWireHandle;
+    const TAG: u8 = 0x4c;
+    const NAME: &'static str = "StateRestore";
+
+    fn encode_handle(handle: &Self::Handle) -> [u8; CAP_HANDLE_LEN] {
+        encode_control_handle(*handle)
+    }
+
+    fn decode_handle(data: [u8; CAP_HANDLE_LEN]) -> Result<Self::Handle, CapError> {
+        decode_control_handle(data)
+    }
+
+    fn zeroize(handle: &mut Self::Handle) {
+        *handle = (0, 0);
+    }
+}
+
+impl ControlResourceKind for StateRestoreKind {
+    const SCOPE: ControlScopeKind = ControlScopeKind::State;
+    const TAP_ID: u16 = 0x0541;
+    const SHOT: CapShot = CapShot::One;
+    const PATH: ControlPath = ControlPath::Wire;
+    const OP: ControlOp = ControlOp::StateRestore;
+    const AUTO_MINT_WIRE: bool = true;
+
+    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+        core::hint::black_box(sid.raw());
+        core::hint::black_box(lane.raw());
+        (1, scope.raw())
+    }
+}
 
 pub type EngineAbortBeginControl = Msg<
     LABEL_ENGINE_ABORT_BEGIN_CONTROL,
@@ -440,19 +561,6 @@ pub type StateSnapshotControl =
     Msg<LABEL_STATE_SNAPSHOT_CONTROL, GenericCapToken<StateSnapshotKind>, StateSnapshotKind>;
 pub type StateRestoreControl =
     Msg<LABEL_STATE_RESTORE_CONTROL, GenericCapToken<StateRestoreKind>, StateRestoreKind>;
-pub type EngineAbortRouteKind = RouteControl<LABEL_ENGINE_ABORT_ROUTE_CONTROL, 0>;
-pub type EngineNormalRouteKind = RouteControl<LABEL_ENGINE_NORMAL_ROUTE_CONTROL, 1>;
-pub type EngineAbortRouteControl = Msg<
-    LABEL_ENGINE_ABORT_ROUTE_CONTROL,
-    GenericCapToken<EngineAbortRouteKind>,
-    EngineAbortRouteKind,
->;
-pub type EngineNormalRouteControl = Msg<
-    LABEL_ENGINE_NORMAL_ROUTE_CONTROL,
-    GenericCapToken<EngineNormalRouteKind>,
-    EngineNormalRouteKind,
->;
-
 fn encode_control_handle(handle: (u8, u64)) -> [u8; CAP_HANDLE_LEN] {
     let mut buf = [0u8; CAP_HANDLE_LEN];
     buf[0] = handle.0;

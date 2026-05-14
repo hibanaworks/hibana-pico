@@ -10,5 +10,6 @@ fn main() {
     let mut led = unsafe { File::from_raw_fd(LED_FD) };
     led.write_all(b"1").expect("led on");
     led.write_all(b"0").expect("led off");
-    let _ = led.into_raw_fd();
+    let raw_fd = led.into_raw_fd();
+    core::hint::black_box(raw_fd);
 }

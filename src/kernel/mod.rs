@@ -1,18 +1,8 @@
-pub mod app;
-pub mod budget;
-pub mod choreofs;
-pub mod device;
-pub mod engine;
-pub mod fd_object;
-pub mod features;
-pub mod guest_ledger;
-pub mod metrics;
-pub mod mgmt;
-pub mod network;
-pub mod policy;
-pub mod remote;
-pub mod resolver;
-pub mod state;
-pub mod swarm;
-pub mod transaction;
-pub mod wasi;
+//! Private appkit kernel-service namespace.
+//!
+//! Public callers reach kernel services only through sealed `appkit` contexts.
+
+#[cfg(feature = "wasm-engine-core")]
+pub(crate) mod engine;
+#[cfg(feature = "wasm-engine-core")]
+pub(crate) mod features;

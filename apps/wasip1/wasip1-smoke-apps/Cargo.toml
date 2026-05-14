@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[workspace]
+
 [dependencies]
 hibana-wasi-guest = { path = "../hibana-wasi-guest" }
 
@@ -74,6 +76,10 @@ path = "src/bin/wasip1-led-ordinary-std-chaser.rs"
 [[bin]]
 name = "wasip1-led-choreofs-open"
 path = "src/bin/wasip1-led-choreofs-open.rs"
+
+[[bin]]
+name = "wasip1-led-choreofs-traffic-cycle"
+path = "src/bin/wasip1-led-choreofs-traffic-cycle.rs"
 
 [[bin]]
 name = "wasip1-led-choreofs-bad-path"

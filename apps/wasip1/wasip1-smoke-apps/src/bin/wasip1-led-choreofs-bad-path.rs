@@ -24,7 +24,7 @@ static mut FD: u32 = 0;
 #[unsafe(export_name = "__main_void")]
 pub extern "C" fn main_void() {
     unsafe {
-        let _ = path_open(
+        let errno = path_open(
             PREOPEN_FD,
             0,
             BAD_PATH.as_ptr(),
@@ -35,5 +35,6 @@ pub extern "C" fn main_void() {
             0,
             &raw mut FD,
         );
+        core::hint::black_box(errno);
     }
 }

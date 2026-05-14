@@ -15,19 +15,12 @@ use hibana::{
 
 mod labels;
 pub use labels::*;
-mod fragments;
-pub(crate) use fragments::*;
 mod route;
 pub use route::*;
 mod control;
 pub use control::*;
 mod management;
 pub use management::*;
-mod device;
-pub use device::*;
-mod network;
-mod remote;
-mod swarm;
 mod wasi;
 pub use wasi::*;
 #[cfg(test)]
@@ -37,12 +30,11 @@ mod tests {
         BudgetSuspend, ClockNow, ClockResGet, ClockResolution, ClockTimeGet, EngineAbort,
         EngineAbortReason, EngineReq, EngineRet, EnvironDone, EnvironGet, EnvironSizes,
         EnvironSizesGet, FdClosed, FdRead, FdReadDone, FdRequest, FdStat, FdWrite, FdWriteDone,
-        GpioEdge, GpioSet, GpioWait, MGMT_IMAGE_CHUNK_CAPACITY, MemBorrow, MemCommit, MemFence,
-        MemFenceReason, MemGrant, MemRelease, MemRights, MgmtImageActivate, MgmtImageBegin,
-        MgmtImageChunk, MgmtImageEnd, MgmtImageRollback, MgmtStatus, MgmtStatusCode, PathOpen,
-        PathOpened, PollOneoff, PollReady, ProcExitStatus, RandomDone, RandomGet, RandomSeed,
-        StderrChunk, StdinChunk, StdinRequest, StdoutChunk, TimerSleepDone, TimerSleepUntil,
-        UartWrite, UartWriteDone, Wasip1ExitStatus,
+        MGMT_IMAGE_CHUNK_CAPACITY, MemBorrow, MemCommit, MemFence, MemFenceReason, MemGrant,
+        MemRelease, MemRights, MgmtImageActivate, MgmtImageBegin, MgmtImageChunk, MgmtImageEnd,
+        MgmtImageRollback, MgmtStatus, MgmtStatusCode, PathOpen, PathOpened, PollOneoff, PollReady,
+        ProcExitStatus, RandomDone, RandomGet, RandomSeed, StderrChunk, StdinChunk, StdinRequest,
+        StdoutChunk, Wasip1ExitStatus,
     };
     use hibana::substrate::{
         cap::{
@@ -91,12 +83,6 @@ mod tests {
             super::LABEL_ENGINE_BUDGET_EXPIRED,
             super::LABEL_ENGINE_SUSPEND,
             super::LABEL_ENGINE_RESTART,
-            super::LABEL_GPIO_WAIT,
-            super::LABEL_GPIO_SUBSCRIBE,
-            super::LABEL_GPIO_EDGE,
-            super::LABEL_GPIO_WAIT_RET,
-            super::LABEL_UART_WRITE,
-            super::LABEL_UART_WRITE_RET,
             super::LABEL_NET_STREAM_WRITE,
             super::LABEL_NET_STREAM_ACK,
             super::LABEL_NET_STREAM_READ,
@@ -108,7 +94,7 @@ mod tests {
             assert_ne!(label, 57);
             assert!(
                 label
-                    <= <super::EngineLabelUniverse as hibana::substrate::runtime::LabelUniverse>::MAX_LABEL
+                    <= <super::BuiltInLabelUniverse as hibana::substrate::runtime::LabelUniverse>::MAX_LABEL
             );
         }
     }
@@ -432,7 +418,7 @@ mod tests {
             EngineReq::EnvironSizesGet(EnvironSizesGet::new()),
             EngineReq::EnvironGet(EnvironGet::new_with_lease(15, 16).expect("environ_get")),
             EngineReq::PathOpen(
-                PathOpen::new(9, 16, 1 << 6, b"device/led/green").expect("path_open"),
+                PathOpen::new(9, 16, 1 << 6, b"object/traffic").expect("path_open"),
             ),
         ];
         let mut buf = [0u8; 80];
@@ -441,24 +427,6 @@ mod tests {
             let decoded = EngineReq::decode_payload(Payload::new(&buf[..len])).expect("decode req");
             assert_eq!(decoded, req);
         }
-    }
-
-    #[test]
-    fn engine_req_round_trips_timer_sleep_until() {
-        let req = EngineReq::TimerSleepUntil(TimerSleepUntil::new(42));
-        let mut buf = [0u8; 9];
-        let len = encode(&req, &mut buf);
-        let decoded = EngineReq::decode_payload(Payload::new(&buf[..len])).expect("decode req");
-        assert_eq!(decoded, req);
-    }
-
-    #[test]
-    fn engine_req_round_trips_gpio_set() {
-        let req = EngineReq::GpioSet(GpioSet::new(25, true));
-        let mut buf = [0u8; 3];
-        let len = encode(&req, &mut buf);
-        let decoded = EngineReq::decode_payload(Payload::new(&buf[..len])).expect("decode req");
-        assert_eq!(decoded, req);
     }
 
     #[test]
@@ -560,66 +528,6 @@ mod tests {
             let decoded = EngineRet::decode_payload(Payload::new(&buf[..len])).expect("decode ret");
             assert_eq!(decoded, ret);
         }
-    }
-
-    #[test]
-    fn engine_ret_round_trips_timer_sleep_done() {
-        let ret = EngineRet::TimerSleepDone(TimerSleepDone::new(42));
-        let mut buf = [0u8; 9];
-        let len = encode(&ret, &mut buf);
-        let decoded = EngineRet::decode_payload(Payload::new(&buf[..len])).expect("decode ret");
-        assert_eq!(decoded, ret);
-    }
-
-    #[test]
-    fn engine_ret_round_trips_gpio_set_done() {
-        let ret = EngineRet::GpioSetDone(GpioSet::new(25, true));
-        let mut buf = [0u8; 3];
-        let len = encode(&ret, &mut buf);
-        let decoded = EngineRet::decode_payload(Payload::new(&buf[..len])).expect("decode ret");
-        assert_eq!(decoded, ret);
-    }
-
-    #[test]
-    fn uart_payloads_round_trip() {
-        let write = UartWrite::new(b"hibana uart role").expect("uart write");
-        let mut write_buf = [0u8; 80];
-        let write_len = encode(&write, &mut write_buf);
-        assert_eq!(
-            UartWrite::decode_payload(Payload::new(&write_buf[..write_len]))
-                .expect("decode uart write"),
-            write
-        );
-
-        let done = UartWriteDone::new(write.len() as u8);
-        let mut done_buf = [0u8; 1];
-        let done_len = encode(&done, &mut done_buf);
-        assert_eq!(
-            UartWriteDone::decode_payload(Payload::new(&done_buf[..done_len]))
-                .expect("decode uart done"),
-            done
-        );
-
-        assert!(UartWrite::new(&[0u8; super::UART_WRITE_CHUNK_CAPACITY + 1]).is_err());
-    }
-
-    #[test]
-    fn gpio_wait_payloads_round_trip() {
-        let wait = GpioWait::new(60, 7, 4, 2);
-        let mut wait_buf = [0u8; 6];
-        let wait_len = encode(&wait, &mut wait_buf);
-        assert_eq!(
-            GpioWait::decode_payload(Payload::new(&wait_buf[..wait_len])).expect("decode wait"),
-            wait
-        );
-
-        let edge = GpioEdge::new(wait.wait_id(), wait.pin(), true, wait.generation());
-        let mut edge_buf = [0u8; 6];
-        let edge_len = encode(&edge, &mut edge_buf);
-        assert_eq!(
-            GpioEdge::decode_payload(Payload::new(&edge_buf[..edge_len])).expect("decode edge"),
-            edge
-        );
     }
 
     #[test]
@@ -792,34 +700,5 @@ mod tests {
             MgmtImageChunk::decode_payload(Payload::new(&[1, 0, 0, 0, 0, 4, 1])),
             Err(CodecError::Invalid(_))
         ));
-    }
-
-    #[test]
-    fn timer_sleep_payloads_round_trip() {
-        let request = TimerSleepUntil::new(1234);
-        let mut request_buf = [0u8; 8];
-        let request_len = encode(&request, &mut request_buf);
-        assert_eq!(
-            TimerSleepUntil::decode_payload(Payload::new(&request_buf[..request_len]))
-                .expect("decode sleep request"),
-            request
-        );
-
-        let reply = TimerSleepDone::new(request.tick());
-        let mut reply_buf = [0u8; 8];
-        let reply_len = encode(&reply, &mut reply_buf);
-        assert_eq!(
-            TimerSleepDone::decode_payload(Payload::new(&reply_buf[..reply_len]))
-                .expect("decode sleep reply"),
-            reply
-        );
-    }
-
-    #[test]
-    fn gpio_payload_rejects_on_invalid_level() {
-        assert_eq!(
-            GpioSet::decode_payload(Payload::new(&[25, 2])),
-            Err(CodecError::Invalid("gpio level must be 0 or 1"))
-        );
     }
 }

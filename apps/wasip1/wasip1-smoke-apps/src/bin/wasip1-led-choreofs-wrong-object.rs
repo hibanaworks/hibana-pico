@@ -42,7 +42,7 @@ static mut WRITTEN: usize = 0;
 
 fn open_path(path: &[u8], fd: *mut u32) {
     unsafe {
-        let _ = path_open(
+        let errno = path_open(
             PREOPEN_FD,
             0,
             path.as_ptr(),
@@ -53,6 +53,7 @@ fn open_path(path: &[u8], fd: *mut u32) {
             0,
             fd,
         );
+        core::hint::black_box(errno);
     }
 }
 
@@ -62,6 +63,7 @@ pub extern "C" fn main_void() {
     open_path(RED_PATH, &raw mut RED_FD);
     open_path(NOT_GPIO_PATH, &raw mut NOT_GPIO_FD);
     unsafe {
-        let _ = fd_write(NOT_GPIO_FD, &ONE_IOV, 1, &raw mut WRITTEN);
+        let errno = fd_write(NOT_GPIO_FD, &ONE_IOV, 1, &raw mut WRITTEN);
+        core::hint::black_box(errno);
     }
 }

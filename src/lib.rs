@@ -4,16 +4,11 @@
 #[cfg(test)]
 extern crate std;
 
-#[cfg(all(
-    not(test),
-    any(feature = "platform-host-linux", feature = "wasm-engine-wasip1-full")
-))]
+#[cfg(all(not(test), not(target_os = "none")))]
 extern crate std;
 
+pub mod appkit;
 pub mod choreography;
-pub mod kernel;
-pub mod machine;
-pub mod port;
-pub mod proof;
+pub mod site;
 
-mod projects;
+mod kernel;

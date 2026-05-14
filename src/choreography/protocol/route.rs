@@ -1,6 +1,127 @@
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PolicySlot(u8);
+
+impl PolicySlot {
+    pub const ZERO: Self = Self(0);
+
+    pub const fn new(raw: u8) -> Self {
+        Self(raw)
+    }
+
+    pub const fn raw(self) -> u8 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NodeTarget<Node> {
+    node: Node,
+}
+
+impl<Node: Copy> NodeTarget<Node> {
+    pub const fn new(node: Node) -> Self {
+        Self { node }
+    }
+
+    pub const fn node(self) -> Node {
+        self.node
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoleTarget<Node, Role = u16> {
+    node: Node,
+    role: Role,
+}
+
+impl<Node: Copy, Role: Copy> RoleTarget<Node, Role> {
+    pub const fn new(node: Node, role: Role) -> Self {
+        Self { node, role }
+    }
+
+    pub const fn node(self) -> Node {
+        self.node
+    }
+
+    pub const fn role(self) -> Role {
+        self.role
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RouteKey<Target> {
+    target: Target,
+    lane: u8,
+    label: u8,
+    session_generation: u16,
+    policy: PolicySlot,
+}
+
+impl<Target: Copy> RouteKey<Target> {
+    pub const fn new(
+        target: Target,
+        lane: u8,
+        label: u8,
+        session_generation: u16,
+        policy: PolicySlot,
+    ) -> Self {
+        Self {
+            target,
+            lane,
+            label,
+            session_generation,
+            policy,
+        }
+    }
+
+    pub const fn target(self) -> Target {
+        self.target
+    }
+
+    pub const fn lane(self) -> u8 {
+        self.lane
+    }
+
+    pub const fn route(self) -> u8 {
+        self.label
+    }
+
+    pub const fn route_label(self) -> u8 {
+        self.label
+    }
+
+    pub const fn session_generation(self) -> u16 {
+        self.session_generation
+    }
+
+    pub const fn policy_slot(self) -> u8 {
+        self.policy.raw()
+    }
+
+    pub const fn policy(self) -> PolicySlot {
+        self.policy
+    }
+}
+
+impl<Node: Copy> RouteKey<NodeTarget<Node>> {
+    pub const fn target_node(self) -> Node {
+        self.target.node()
+    }
+}
+
+impl<Node: Copy, Role: Copy> RouteKey<RoleTarget<Node, Role>> {
+    pub const fn target_node(self) -> Node {
+        self.target.node()
+    }
+
+    pub const fn target_role(self) -> Role {
+        self.target.role()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RouteControl<const KIND_LABEL: u8, const ARM: u8>;
 
 impl<const KIND_LABEL: u8, const ARM: u8> ResourceKind for RouteControl<KIND_LABEL, ARM> {
@@ -34,7 +155,9 @@ impl<const KIND_LABEL: u8, const ARM: u8> ControlResourceKind for RouteControl<K
     const OP: ControlOp = ControlOp::RouteDecision;
     const AUTO_MINT_WIRE: bool = false;
 
-    fn mint_handle(_sid: SessionId, _lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+        core::hint::black_box(sid.raw());
+        core::hint::black_box(lane.raw());
         (ARM, scope.raw())
     }
 }
@@ -116,7 +239,8 @@ impl WireEncode for ChoreoFsOpenAdmitRoute {
         Some(0)
     }
 
-    fn encode_into(&self, _out: &mut [u8]) -> Result<usize, CodecError> {
+    fn encode_into(&self, out: &mut [u8]) -> Result<usize, CodecError> {
+        core::hint::black_box(out.len());
         Ok(0)
     }
 }
@@ -138,7 +262,8 @@ impl WireEncode for ChoreoFsOpenRejectRoute {
         Some(0)
     }
 
-    fn encode_into(&self, _out: &mut [u8]) -> Result<usize, CodecError> {
+    fn encode_into(&self, out: &mut [u8]) -> Result<usize, CodecError> {
+        core::hint::black_box(out.len());
         Ok(0)
     }
 }

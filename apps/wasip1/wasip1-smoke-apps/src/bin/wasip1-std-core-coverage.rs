@@ -68,11 +68,12 @@ fn main() {
         "hibana std core coverage\n{MEMORY_GROW_MARKER}\n"
     )
     .expect("format coverage marker");
-    let _ = (branch, class, acc, float, before, after, MEMORY_GROW_MARKER);
+    core::hint::black_box((branch, class, acc, float, before, after, MEMORY_GROW_MARKER));
 
     let mut stdout = unsafe { File::from_raw_fd(STDOUT_FD) };
     stdout
         .write_all(message.as_bytes())
         .expect("write coverage marker");
-    let _ = stdout.into_raw_fd();
+    let raw_fd = stdout.into_raw_fd();
+    core::hint::black_box(raw_fd);
 }

@@ -11,23 +11,30 @@ fn run() -> hibana_wasi_guest::Result<()> {
     let orange = must(Led::open("/device/led/orange"));
     let red = must(Led::open("/device/led/red"));
 
-    must(green.set(true));
-    must(sleep_ms(180));
+    loop {
+        must(green.set(true));
+        must(orange.set(false));
+        must(red.set(false));
+        must(sleep_ms(180));
 
-    must(orange.set(true));
-    must(sleep_ms(40));
-    must(orange.set(false));
-    must(sleep_ms(40));
-    must(orange.set(true));
-    must(sleep_ms(40));
-    must(orange.set(false));
-    must(sleep_ms(40));
-    must(orange.set(true));
-    must(sleep_ms(40));
+        must(green.set(false));
+        must(orange.set(true));
+        must(red.set(false));
+        must(sleep_ms(40));
+        must(orange.set(false));
+        must(sleep_ms(40));
+        must(orange.set(true));
+        must(sleep_ms(40));
+        must(orange.set(false));
+        must(sleep_ms(40));
+        must(orange.set(true));
+        must(sleep_ms(40));
 
-    must(red.set(true));
-    must(sleep_ms(180));
-    Ok(())
+        must(green.set(false));
+        must(orange.set(false));
+        must(red.set(true));
+        must(sleep_ms(180));
+    }
 }
 
 fn must<T>(result: hibana_wasi_guest::Result<T>) -> T {

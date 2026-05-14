@@ -6,15 +6,8 @@ use crate::{
 #[cfg(test)]
 use crate::choreography::protocol::EngineReq;
 #[cfg(test)]
-use crate::choreography::protocol::{EngineRet, GpioSet, TimerSleepUntil};
-#[cfg(all(
-    test,
-    any(
-        feature = "wasip1-sys-sock",
-        feature = "wasm-engine-wasip1-std-profile",
-        feature = "wasm-engine-wasip1-full"
-    )
-))]
+use crate::choreography::protocol::EngineRet;
+#[cfg(all(test, any(feature = "wasip1-sys-sock", feature = "wasm-engine-core")))]
 use crate::choreography::protocol::{FdRead, FdRequest, FdWrite};
 
 const WASM_MAGIC: [u8; 4] = [0x00, 0x61, 0x73, 0x6d];
@@ -231,11 +224,9 @@ const LOG_IMPORT_INDEX: u32 = 0;
 #[cfg(test)]
 const YIELD_IMPORT_INDEX: u32 = 1;
 #[cfg(test)]
-const SLEEP_IMPORT_INDEX: u32 = 2;
-#[cfg(test)]
 const MIN_IMPORT_COUNT: u32 = 2;
 #[cfg(test)]
-const MAX_IMPORT_COUNT: u32 = 3;
+const MAX_IMPORT_COUNT: u32 = 2;
 
 const SECTION_MEMORY: u8 = 5;
 const SECTION_GLOBAL: u8 = 6;
@@ -298,92 +289,30 @@ const WASM_MAX_DATA_SEGMENTS: usize = 8;
 #[cfg(test)]
 const TEST_RESUME_FUEL: u32 = 1024;
 const WASM_BLOCKTYPE_EMPTY: u8 = 0x40;
-const CORE_WASM_MAX_TYPES: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
-    32
-} else if cfg!(feature = "wasm-engine-wasip1-std-profile") {
-    13
-} else {
-    16
-};
-const CORE_WASM_MAX_IMPORTS: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
-    64
-} else if cfg!(feature = "wasm-engine-wasip1-std-profile") {
-    6
-} else {
-    16
-};
-const CORE_WASM_MAX_FUNCTIONS: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
-    192
-} else if cfg!(feature = "wasm-engine-wasip1-std-profile") {
-    112
-} else {
-    32
-};
-const CORE_WASM_MAX_GLOBALS: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
-    32
-} else if cfg!(feature = "wasm-engine-wasip1-std-profile") {
-    2
-} else {
-    16
-};
+const CORE_WASM_MAX_TYPES: usize = 16;
+const CORE_WASM_MAX_IMPORTS: usize = 16;
+const CORE_WASM_MAX_FUNCTIONS: usize = 112;
+const CORE_WASM_MAX_GLOBALS: usize = 16;
 const CORE_WASM_MAX_PARAMS: usize = if cfg!(any(
-    feature = "wasm-engine-wasip1-std-profile",
-    feature = "wasm-engine-wasip1-full"
+    feature = "wasip1-sys-path-open",
+    feature = "wasm-engine-core"
 )) {
-    12
-} else if cfg!(feature = "wasip1-sys-path-minimal") {
     12
 } else {
     8
 };
 const CORE_WASM_MAX_RESULTS: usize = 1;
-const CORE_WASM_VALUE_STACK_CAPACITY: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
-    512
-} else {
-    64
-};
-const CORE_WASM_LOCAL_CAPACITY: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
-    256
-} else if cfg!(feature = "wasm-engine-wasip1-std-profile") {
-    14
-} else {
-    32
-};
-const CORE_WASM_CALL_STACK_CAPACITY: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
-    64
-} else {
-    8
-};
-const CORE_WASM_CONTROL_STACK_CAPACITY: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
-    64
-} else if cfg!(feature = "wasm-engine-wasip1-std-profile") {
-    16
-} else {
-    16
-};
-const CORE_WASM_CONTROL_TARGET_CAPACITY: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
-    1024
-} else if cfg!(feature = "wasm-engine-wasip1-std-profile") {
-    56
-} else {
-    56
-};
+const CORE_WASM_VALUE_STACK_CAPACITY: usize = 64;
+const CORE_WASM_LOCAL_CAPACITY: usize = 32;
+const CORE_WASM_CALL_STACK_CAPACITY: usize = 8;
+const CORE_WASM_CONTROL_STACK_CAPACITY: usize = 16;
+const CORE_WASM_CONTROL_TARGET_CAPACITY: usize = 56;
 const CORE_WASM_BR_TABLE_CAPACITY: usize = 8;
 const CORE_WASIP1_PATH_CAPACITY: usize = 64;
-const CORE_WASM_TABLE_CAPACITY: usize = if cfg!(feature = "wasm-engine-wasip1-full") {
-    96
-} else if cfg!(feature = "wasm-engine-wasip1-std-profile") {
-    35
-} else {
-    16
-};
+const CORE_WASM_TABLE_CAPACITY: usize = 40;
 const CORE_WASM_MAX_ELEMENT_SEGMENTS: usize = 8;
 const CORE_WASM_PAGE_SIZE: usize = 64 * 1024;
-const CORE_WASM_MAX_MEMORY_PAGES: u32 = if cfg!(feature = "wasm-engine-wasip1-full") {
-    32
-} else {
-    1
-};
+const CORE_WASM_MAX_MEMORY_PAGES: u32 = 1;
 const CORE_WASM_MEMORY_SIZE: usize = CORE_WASM_PAGE_SIZE * CORE_WASM_MAX_MEMORY_PAGES as usize;
 const WASIP1_EVENTTYPE_CLOCK: u8 = 0;
 const WASIP1_SUBSCRIPTION_USERDATA_OFFSET: u32 = 0;
@@ -392,24 +321,30 @@ const WASIP1_SUBSCRIPTION_CLOCK_TIMEOUT_OFFSET: u32 = 24;
 const WASIP1_EVENT_ERROR_OFFSET: u32 = 8;
 const WASIP1_EVENT_TYPE_OFFSET: u32 = 10;
 const WASIP1_EVENT_SIZE: usize = 32;
+#[cfg(test)]
 pub const WASIP1_FILETYPE_DIRECTORY: u8 = 3;
+#[cfg(test)]
 pub const WASIP1_FILETYPE_REGULAR_FILE: u8 = 4;
 pub const WASIP1_FDSTAT_SIZE: usize = 24;
 pub const WASIP1_FDSTAT_FILETYPE_OFFSET: u32 = 0;
 pub const WASIP1_FDSTAT_FLAGS_OFFSET: u32 = 2;
 pub const WASIP1_FDSTAT_RIGHTS_BASE_OFFSET: u32 = 8;
 pub const WASIP1_FDSTAT_RIGHTS_INHERITING_OFFSET: u32 = 16;
+#[cfg(test)]
 pub const WASIP1_PRESTAT_SIZE: usize = 8;
+#[cfg(test)]
 pub const WASIP1_PRESTAT_TAG_DIR: u8 = 0;
+#[cfg(test)]
 pub const WASIP1_PRESTAT_TAG_OFFSET: u32 = 0;
+#[cfg(test)]
 pub const WASIP1_PRESTAT_DIR_NAME_LEN_OFFSET: u32 = 4;
+#[cfg(test)]
 pub const WASIP1_FILESTAT_SIZE: usize = 64;
+#[cfg(test)]
 pub const WASIP1_FILESTAT_FILETYPE_OFFSET: u32 = 16;
+#[cfg(test)]
 pub const WASIP1_FILESTAT_SIZE_OFFSET: u32 = 32;
 
-#[cfg(feature = "wasm-engine-wasip1-full")]
-type LinearMemory = std::boxed::Box<[u8; CORE_WASM_MEMORY_SIZE]>;
-#[cfg(not(feature = "wasm-engine-wasip1-full"))]
 type LinearMemory = [u8; CORE_WASM_MEMORY_SIZE];
 
 #[cfg(test)]
@@ -435,28 +370,6 @@ const BAD_ROUTE_EARLY_YIELD_WASM_GUEST: &[u8] = &[
     0x65, 0x6c, 0x64, 0x5f, 0x6e, 0x6f, 0x77, 0x00, 0x01, 0x03, 0x02, 0x01, 0x01, 0x07, 0x0a, 0x01,
     0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x02, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x01,
     0x0b,
-];
-
-#[cfg(test)]
-const SLEEP_WASM_GUEST: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60,
-    0x00, 0x00, 0x02, 0x3a, 0x03, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61, 0x07, 0x6c, 0x6f, 0x67,
-    0x5f, 0x75, 0x33, 0x32, 0x00, 0x00, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61, 0x09, 0x79, 0x69,
-    0x65, 0x6c, 0x64, 0x5f, 0x6e, 0x6f, 0x77, 0x00, 0x01, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61,
-    0x0b, 0x73, 0x6c, 0x65, 0x65, 0x70, 0x5f, 0x75, 0x6e, 0x74, 0x69, 0x6c, 0x00, 0x00, 0x03, 0x02,
-    0x01, 0x01, 0x07, 0x0a, 0x01, 0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x03, 0x0a, 0x0a,
-    0x01, 0x08, 0x00, 0x41, 0x2a, 0x10, 0x02, 0x10, 0x01, 0x0b,
-];
-
-#[cfg(test)]
-const GPIO_WASM_GUEST: &[u8] = &[
-    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60,
-    0x00, 0x00, 0x02, 0x37, 0x03, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61, 0x07, 0x6c, 0x6f, 0x67,
-    0x5f, 0x75, 0x33, 0x32, 0x00, 0x00, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61, 0x09, 0x79, 0x69,
-    0x65, 0x6c, 0x64, 0x5f, 0x6e, 0x6f, 0x77, 0x00, 0x01, 0x06, 0x68, 0x69, 0x62, 0x61, 0x6e, 0x61,
-    0x08, 0x67, 0x70, 0x69, 0x6f, 0x5f, 0x73, 0x65, 0x74, 0x00, 0x00, 0x03, 0x02, 0x01, 0x01, 0x07,
-    0x0a, 0x01, 0x06, 0x5f, 0x73, 0x74, 0x61, 0x72, 0x74, 0x00, 0x03, 0x0a, 0x0b, 0x01, 0x09, 0x00,
-    0x41, 0x99, 0x02, 0x10, 0x02, 0x10, 0x01, 0x0b,
 ];
 
 #[cfg(test)]
@@ -525,6 +438,36 @@ pub enum WasmError {
     PendingMismatch,
     Trap,
     FuelExhausted,
+}
+
+impl WasmError {
+    pub const fn diagnostic_code(self) -> u32 {
+        match self {
+            Self::Truncated => 0x5700_0001,
+            Self::Invalid(message) => 0x5701_0000 | diagnostic_message_code(message),
+            Self::Unsupported(message) => 0x5702_0000 | diagnostic_message_code(message),
+            Self::UnsupportedOpcode(opcode) => 0x5703_0000 | opcode as u32,
+            Self::StackOverflow => 0x5700_0002,
+            Self::StackUnderflow => 0x5700_0003,
+            Self::PendingHostCall => 0x5700_0004,
+            Self::PendingRequired => 0x5700_0005,
+            Self::PendingMismatch => 0x5700_0006,
+            Self::Trap => 0x5700_0007,
+            Self::FuelExhausted => 0x5700_0008,
+        }
+    }
+}
+
+const fn diagnostic_message_code(message: &'static str) -> u32 {
+    let bytes = message.as_bytes();
+    let mut code = 0x811c_u32;
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        code ^= bytes[idx] as u32;
+        code = code.wrapping_mul(0x0101);
+        idx += 1;
+    }
+    code & 0x0000_ffff
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -747,22 +690,17 @@ pub(super) struct SocketCall {
 }
 
 impl SocketCall {
+    #[cfg(test)]
     pub(super) const fn kind(self) -> SocketOp {
         self.kind
     }
 
-    #[cfg(all(
-        test,
-        any(
-            feature = "wasip1-sys-sock",
-            feature = "wasm-engine-wasip1-std-profile",
-            feature = "wasm-engine-wasip1-full"
-        )
-    ))]
+    #[cfg(all(test, any(feature = "wasip1-sys-sock", feature = "wasm-engine-core")))]
     fn args(&self) -> &[Value] {
         &self.args[..self.arg_count]
     }
 
+    #[cfg(test)]
     fn arg_i32(&self, index: usize) -> Result<u32, WasmError> {
         self.args
             .get(index)
@@ -771,6 +709,7 @@ impl SocketCall {
             .as_i32()
     }
 
+    #[cfg(test)]
     pub(super) fn fd(&self) -> Result<u8, WasmError> {
         let fd = self.arg_i32(0)?;
         if fd > u8::MAX as u32 {
@@ -794,11 +733,7 @@ impl PathCall {
 
     #[cfg(all(
         test,
-        any(
-            feature = "wasip1-sys-path-minimal",
-            feature = "wasm-engine-wasip1-std-profile",
-            feature = "wasm-engine-wasip1-full"
-        )
+        any(feature = "wasip1-sys-path-open", feature = "wasm-engine-core")
     ))]
     fn args(&self) -> &[Value] {
         &self.args[..self.arg_count]
@@ -839,10 +774,6 @@ impl PathBytes {
     pub fn as_bytes(&self) -> &[u8] {
         self.bytes.split_at(self.len).0
     }
-
-    pub const fn len(&self) -> usize {
-        self.len
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -881,11 +812,13 @@ impl FdStat {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct FileStat {
     filetype: u8,
     size: u64,
 }
 
+#[cfg(test)]
 impl FileStat {
     pub const fn new(filetype: u8, size: u64) -> Self {
         Self { filetype, size }
@@ -913,35 +846,17 @@ impl FdReadCall {
         self.fd
     }
 
-    #[cfg(all(
-        test,
-        any(
-            feature = "wasm-engine-wasip1-std-profile",
-            feature = "wasm-engine-wasip1-full"
-        )
-    ))]
+    #[cfg(all(test, feature = "wasm-engine-core"))]
     const fn iovs(self) -> u32 {
         self.iovs
     }
 
-    #[cfg(all(
-        test,
-        any(
-            feature = "wasm-engine-wasip1-std-profile",
-            feature = "wasm-engine-wasip1-full"
-        )
-    ))]
+    #[cfg(all(test, feature = "wasm-engine-core"))]
     const fn iovs_len(self) -> u32 {
         self.iovs_len
     }
 
-    #[cfg(all(
-        test,
-        any(
-            feature = "wasm-engine-wasip1-std-profile",
-            feature = "wasm-engine-wasip1-full"
-        )
-    ))]
+    #[cfg(all(test, feature = "wasm-engine-core"))]
     const fn nread(self) -> u32 {
         self.nread
     }
@@ -958,13 +873,7 @@ impl FdRequestCall {
         self.fd
     }
 
-    #[cfg(all(
-        test,
-        any(
-            feature = "wasm-engine-wasip1-std-profile",
-            feature = "wasm-engine-wasip1-full"
-        )
-    ))]
+    #[cfg(all(test, feature = "wasm-engine-core"))]
     const fn out_ptr(self) -> u32 {
         self.out_ptr
     }
@@ -981,13 +890,7 @@ impl ClockResGetCall {
         self.clock_id
     }
 
-    #[cfg(all(
-        test,
-        any(
-            feature = "wasm-engine-wasip1-std-profile",
-            feature = "wasm-engine-wasip1-full"
-        )
-    ))]
+    #[cfg(all(test, feature = "wasm-engine-core"))]
     const fn resolution_ptr(self) -> u32 {
         self.resolution_ptr
     }
@@ -1005,24 +908,11 @@ impl ClockTimeGetCall {
         self.clock_id
     }
 
-    #[cfg(all(
-        test,
-        any(
-            feature = "wasm-engine-wasip1-std-profile",
-            feature = "wasm-engine-wasip1-full"
-        )
-    ))]
-    const fn precision(self) -> u64 {
+    pub(super) const fn precision(self) -> u64 {
         self.precision
     }
 
-    #[cfg(all(
-        test,
-        any(
-            feature = "wasm-engine-wasip1-std-profile",
-            feature = "wasm-engine-wasip1-full"
-        )
-    ))]
+    #[cfg(all(test, feature = "wasm-engine-core"))]
     const fn time_ptr(self) -> u32 {
         self.time_ptr
     }
@@ -1035,13 +925,7 @@ pub(super) struct RandomGetCall {
 }
 
 impl RandomGetCall {
-    #[cfg(all(
-        test,
-        any(
-            feature = "wasm-engine-wasip1-std-profile",
-            feature = "wasm-engine-wasip1-full"
-        )
-    ))]
+    #[cfg(all(test, feature = "wasm-engine-core"))]
     const fn buf(self) -> u32 {
         self.buf
     }
@@ -1188,9 +1072,6 @@ impl<'a> Frame<'a> {
     }
 }
 
-#[cfg(feature = "wasm-engine-wasip1-full")]
-type Frames<'a> = std::boxed::Box<[Frame<'a>; CORE_WASM_CALL_STACK_CAPACITY]>;
-#[cfg(not(feature = "wasm-engine-wasip1-full"))]
 type Frames<'a> = [Frame<'a>; CORE_WASM_CALL_STACK_CAPACITY];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1249,6 +1130,8 @@ pub(super) struct Vm<'a> {
     done: bool,
 }
 
+static EMPTY_MODULE: Module<'static> = Module::empty();
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[cfg(test)]
 enum FuncSig {
@@ -1263,22 +1146,12 @@ enum FuncSig {
 enum PendingHostCall {
     LogU32(u32),
     Yield,
-    SleepUntil(u64),
-    GpioSet(GpioSet),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(test)]
-enum OptionalImport {
-    SleepUntil,
-    GpioSet,
 }
 
 #[derive(Clone, Copy)]
 #[cfg(test)]
 struct TestWasmModule<'a> {
     start_body: &'a [u8],
-    optional_import: Option<OptionalImport>,
 }
 
 #[cfg(test)]
@@ -1289,7 +1162,6 @@ struct TestWasmInstance<'a> {
     stack_len: usize,
     pending: Option<PendingHostCall>,
     done: bool,
-    optional_import: Option<OptionalImport>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1471,10 +1343,23 @@ impl<'a> Module<'a> {
         }
     }
 
+    #[cfg(test)]
     fn parse(bytes: &'a [u8]) -> Result<Self, WasmError> {
         let mut module = Self::empty();
         module.parse_from(bytes)?;
         Ok(module)
+    }
+
+    unsafe fn parse_in_place(dst: *mut Self, bytes: &'a [u8]) -> Result<(), WasmError> {
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                core::ptr::addr_of!(EMPTY_MODULE).cast::<Self>(),
+                dst,
+                1,
+            );
+            (&mut *dst).parse_from(bytes)?;
+        }
+        Ok(())
     }
 
     fn parse_from(&mut self, bytes: &'a [u8]) -> Result<(), WasmError> {
@@ -1508,7 +1393,9 @@ impl<'a> Module<'a> {
                 SECTION_CODE => self.parse_core_code_section(&mut section)?,
                 SECTION_DATA => self.parse_core_data_section(&mut section)?,
                 SECTION_CUSTOM => {
-                    let _ = section.read_bytes(section.bytes.len().saturating_sub(section.pos))?;
+                    let custom_section =
+                        section.read_bytes(section.bytes.len().saturating_sub(section.pos))?;
+                    core::hint::black_box(custom_section);
                 }
                 _ => return Err(WasmError::Unsupported("unsupported core wasm section")),
             }
@@ -1530,112 +1417,14 @@ impl<'a> Module<'a> {
         Ok(())
     }
 
+    #[cfg(test)]
     fn instantiate(self) -> Result<Interpreter<'a>, WasmError> {
-        if self.memory_min_pages > CORE_WASM_MAX_MEMORY_PAGES {
-            return Err(WasmError::Unsupported("core wasm memory too large"));
-        }
-        let mut instance = Interpreter {
-            memory_pages: self.memory_min_pages,
-            module: self,
-            frames: core_wasm_frames_empty()?,
-            frame_len: 0,
-            values: [Value::I32(0); CORE_WASM_VALUE_STACK_CAPACITY],
-            value_len: 0,
-            globals: [Value::I32(0); CORE_WASM_MAX_GLOBALS],
-            global_kinds: [ValueKind::I32; CORE_WASM_MAX_GLOBALS],
-            global_mutable: [false; CORE_WASM_MAX_GLOBALS],
-            global_count: self.global_count,
-            memory: core_wasm_memory_zeroed()?,
-            data_dropped: [false; WASM_MAX_DATA_SEGMENTS],
-            element_dropped: [false; CORE_WASM_MAX_ELEMENT_SEGMENTS],
-            table_functions: [u32::MAX; CORE_WASM_TABLE_CAPACITY],
-            table_size: self.table_min.max(self.table_function_count),
-            control_targets: [CoreControlTarget::EMPTY; CORE_WASM_CONTROL_TARGET_CAPACITY],
-            control_target_count: 0,
-            pending: None,
-            done: false,
-        };
-        instance.table_functions = self.table_functions;
-        for (index, global) in self
-            .globals
-            .iter()
-            .copied()
-            .flatten()
-            .take(self.global_count)
-            .enumerate()
-        {
-            instance.globals[index] = global.initial;
-            instance.global_kinds[index] = global.kind;
-            instance.global_mutable[index] = global.mutable;
-        }
-        instance.init_core_data_segments()?;
-        instance.push_frame(instance.module.start_function_index)?;
-        Ok(instance)
-    }
-
-    #[cfg(all(
-        target_arch = "arm",
-        target_os = "none",
-        not(feature = "wasm-engine-wasip1-full"),
-        feature = "wasm-engine-static-placement"
-    ))]
-    fn instantiate_into<'slot>(
-        self,
-        slot: &'slot mut core::mem::MaybeUninit<Interpreter<'a>>,
-    ) -> Result<&'slot mut Interpreter<'a>, WasmError> {
-        if self.memory_min_pages > CORE_WASM_MAX_MEMORY_PAGES {
-            return Err(WasmError::Unsupported("core wasm memory too large"));
-        }
-        let ptr = slot.as_mut_ptr();
+        let mut interpreter = core::mem::MaybeUninit::<Interpreter<'a>>::uninit();
         unsafe {
-            core::ptr::addr_of_mut!((*ptr).module).write(self);
-            write_core_wasm_frames_empty(core::ptr::addr_of_mut!((*ptr).frames));
-            core::ptr::addr_of_mut!((*ptr).frame_len).write(0);
-            core::ptr::addr_of_mut!((*ptr).values)
-                .write([Value::I32(0); CORE_WASM_VALUE_STACK_CAPACITY]);
-            core::ptr::addr_of_mut!((*ptr).value_len).write(0);
-            core::ptr::addr_of_mut!((*ptr).globals).write([Value::I32(0); CORE_WASM_MAX_GLOBALS]);
-            core::ptr::addr_of_mut!((*ptr).global_kinds)
-                .write([ValueKind::I32; CORE_WASM_MAX_GLOBALS]);
-            core::ptr::addr_of_mut!((*ptr).global_mutable).write([false; CORE_WASM_MAX_GLOBALS]);
-            core::ptr::addr_of_mut!((*ptr).global_count).write((*ptr).module.global_count);
-            write_core_wasm_memory_zeroed(core::ptr::addr_of_mut!((*ptr).memory));
-            core::ptr::addr_of_mut!((*ptr).memory_pages).write((*ptr).module.memory_min_pages);
-            core::ptr::addr_of_mut!((*ptr).data_dropped).write([false; WASM_MAX_DATA_SEGMENTS]);
-            core::ptr::addr_of_mut!((*ptr).element_dropped)
-                .write([false; CORE_WASM_MAX_ELEMENT_SEGMENTS]);
-            core::ptr::addr_of_mut!((*ptr).table_functions)
-                .write([u32::MAX; CORE_WASM_TABLE_CAPACITY]);
-            core::ptr::addr_of_mut!((*ptr).table_size).write(
-                (*ptr)
-                    .module
-                    .table_min
-                    .max((*ptr).module.table_function_count),
-            );
-            core::ptr::addr_of_mut!((*ptr).control_targets)
-                .write([CoreControlTarget::EMPTY; CORE_WASM_CONTROL_TARGET_CAPACITY]);
-            core::ptr::addr_of_mut!((*ptr).control_target_count).write(0);
-            core::ptr::addr_of_mut!((*ptr).pending).write(None);
-            core::ptr::addr_of_mut!((*ptr).done).write(false);
+            core::ptr::addr_of_mut!((*interpreter.as_mut_ptr()).module).write(self);
+            Interpreter::init_from_parsed_module_in_place(interpreter.as_mut_ptr())?;
+            Ok(interpreter.assume_init())
         }
-        let instance = unsafe { &mut *ptr };
-        instance.table_functions = instance.module.table_functions;
-        for (index, global) in instance
-            .module
-            .globals
-            .iter()
-            .copied()
-            .flatten()
-            .take(instance.module.global_count)
-            .enumerate()
-        {
-            instance.globals[index] = global.initial;
-            instance.global_kinds[index] = global.kind;
-            instance.global_mutable[index] = global.mutable;
-        }
-        instance.init_core_data_segments()?;
-        instance.push_frame(instance.module.start_function_index)?;
-        Ok(instance)
     }
 
     fn parse_core_type_section(&mut self, section: &mut Reader<'a>) -> Result<(), WasmError> {
@@ -1716,7 +1505,8 @@ impl<'a> Module<'a> {
         if count > 1 {
             return Err(WasmError::Unsupported("too many core wasm tables"));
         }
-        for _ in 0..count {
+        for table_index in 0..count {
+            core::hint::black_box(table_index);
             if section.read_u8()? != VALTYPE_FUNCREF {
                 return Err(WasmError::Unsupported("only funcref tables are supported"));
             }
@@ -1909,7 +1699,8 @@ impl<'a> Module<'a> {
 
     fn parse_core_export_section(&mut self, section: &mut Reader<'a>) -> Result<(), WasmError> {
         let count = section.read_var_u32()?;
-        for _ in 0..count {
+        for export_index in 0..count {
+            core::hint::black_box(export_index);
             let name = section.read_name()?;
             let kind = section.read_u8()?;
             let index = section.read_var_u32()?;
@@ -1949,7 +1740,8 @@ impl<'a> Module<'a> {
             local_count += function_type.param_count;
 
             let local_decl_count = body_reader.read_var_u32()?;
-            for _ in 0..local_decl_count {
+            for local_decl_index in 0..local_decl_count {
+                core::hint::black_box(local_decl_index);
                 let count = body_reader.read_var_u32()? as usize;
                 let kind = ValueKind::decode(body_reader.read_u8()?)?;
                 let end = local_count
@@ -2046,57 +1838,68 @@ impl<'a> Module<'a> {
     }
 }
 
-#[cfg(feature = "wasm-engine-wasip1-full")]
-fn core_wasm_memory_zeroed() -> Result<LinearMemory, WasmError> {
-    let boxed = std::vec![0u8; CORE_WASM_MEMORY_SIZE].into_boxed_slice();
-    boxed
-        .try_into()
-        .map_err(|_| WasmError::Invalid("core wasm heap memory size mismatch"))
-}
-
-#[cfg(not(feature = "wasm-engine-wasip1-full"))]
-fn core_wasm_memory_zeroed() -> Result<LinearMemory, WasmError> {
-    Ok([0; CORE_WASM_MEMORY_SIZE])
-}
-
-#[cfg(not(feature = "wasm-engine-wasip1-full"))]
-#[cfg(all(
-    target_arch = "arm",
-    target_os = "none",
-    not(feature = "wasm-engine-wasip1-full"),
-    feature = "wasm-engine-static-placement"
-))]
-unsafe fn write_core_wasm_memory_zeroed(dst: *mut LinearMemory) {
-    unsafe {
-        core::ptr::write_bytes(dst.cast::<u8>(), 0, CORE_WASM_MEMORY_SIZE);
+impl<'a> Interpreter<'a> {
+    unsafe fn init_from_parsed_module_in_place(dst: *mut Interpreter<'a>) -> Result<(), WasmError> {
+        let module = unsafe { &*core::ptr::addr_of!((*dst).module) };
+        if module.memory_min_pages > CORE_WASM_MAX_MEMORY_PAGES {
+            return Err(WasmError::Unsupported("core wasm memory too large"));
+        }
+        let memory_min_pages = module.memory_min_pages;
+        let global_count = module.global_count;
+        let table_size = module.table_min.max(module.table_function_count);
+        let start_function_index = module.start_function_index;
+        unsafe {
+            core::ptr::addr_of_mut!((*dst).memory_pages).write(memory_min_pages);
+            write_empty_frames(core::ptr::addr_of_mut!((*dst).frames));
+            core::ptr::addr_of_mut!((*dst).frame_len).write(0);
+            core::ptr::addr_of_mut!((*dst).values)
+                .write([Value::I32(0); CORE_WASM_VALUE_STACK_CAPACITY]);
+            core::ptr::addr_of_mut!((*dst).value_len).write(0);
+            core::ptr::addr_of_mut!((*dst).globals).write([Value::I32(0); CORE_WASM_MAX_GLOBALS]);
+            core::ptr::addr_of_mut!((*dst).global_kinds)
+                .write([ValueKind::I32; CORE_WASM_MAX_GLOBALS]);
+            core::ptr::addr_of_mut!((*dst).global_mutable).write([false; CORE_WASM_MAX_GLOBALS]);
+            core::ptr::addr_of_mut!((*dst).global_count).write(global_count);
+            core::ptr::addr_of_mut!((*dst).memory).write_bytes(0, 1);
+            core::ptr::addr_of_mut!((*dst).data_dropped).write([false; WASM_MAX_DATA_SEGMENTS]);
+            core::ptr::addr_of_mut!((*dst).element_dropped)
+                .write([false; CORE_WASM_MAX_ELEMENT_SEGMENTS]);
+            core::ptr::addr_of_mut!((*dst).table_functions)
+                .write([u32::MAX; CORE_WASM_TABLE_CAPACITY]);
+            core::ptr::addr_of_mut!((*dst).table_size).write(table_size);
+            core::ptr::addr_of_mut!((*dst).control_targets)
+                .write([CoreControlTarget::EMPTY; CORE_WASM_CONTROL_TARGET_CAPACITY]);
+            core::ptr::addr_of_mut!((*dst).control_target_count).write(0);
+            core::ptr::addr_of_mut!((*dst).pending).write(None);
+            core::ptr::addr_of_mut!((*dst).done).write(false);
+        }
+        let instance = unsafe { &mut *dst };
+        for index in 0..CORE_WASM_TABLE_CAPACITY {
+            instance.table_functions[index] = instance.module.table_functions[index];
+        }
+        for (index, global) in instance
+            .module
+            .globals
+            .iter()
+            .copied()
+            .flatten()
+            .take(global_count)
+            .enumerate()
+        {
+            instance.globals[index] = global.initial;
+            instance.global_kinds[index] = global.kind;
+            instance.global_mutable[index] = global.mutable;
+        }
+        instance.init_core_data_segments()?;
+        instance.push_frame(start_function_index)?;
+        Ok(())
     }
 }
 
-#[cfg(feature = "wasm-engine-wasip1-full")]
-fn core_wasm_frames_empty<'a>() -> Result<Frames<'a>, WasmError> {
-    let boxed = std::vec![Frame::empty(); CORE_WASM_CALL_STACK_CAPACITY].into_boxed_slice();
-    boxed
-        .try_into()
-        .map_err(|_| WasmError::Unsupported("failed to allocate core wasm frames"))
-}
-
-#[cfg(not(feature = "wasm-engine-wasip1-full"))]
-fn core_wasm_frames_empty<'a>() -> Result<Frames<'a>, WasmError> {
-    Ok([Frame::empty(); CORE_WASM_CALL_STACK_CAPACITY])
-}
-
-#[cfg(not(feature = "wasm-engine-wasip1-full"))]
-#[cfg(all(
-    target_arch = "arm",
-    target_os = "none",
-    not(feature = "wasm-engine-wasip1-full"),
-    feature = "wasm-engine-static-placement"
-))]
-unsafe fn write_core_wasm_frames_empty<'a>(dst: *mut Frames<'a>) {
-    let frames = dst.cast::<Frame<'a>>();
+unsafe fn write_empty_frames<'a>(dst: *mut Frames<'a>) {
     for index in 0..CORE_WASM_CALL_STACK_CAPACITY {
         unsafe {
-            frames.add(index).write(Frame::empty());
+            core::ptr::addr_of_mut!((*dst)[index]).write(Frame::empty());
         }
     }
 }
@@ -2138,7 +1941,8 @@ fn decode_core_control_targets(
         let opcode = reader.read_u8()?;
         match opcode {
             OPCODE_BLOCK | OPCODE_LOOP | OPCODE_IF => {
-                let _block_type = reader.read_u8()?;
+                let block_type = reader.read_u8()?;
+                core::hint::black_box(block_type);
                 let target_index = count;
                 let slot = targets
                     .get_mut(target_index)
@@ -2287,7 +2091,8 @@ fn skip_core_immediates(reader: &mut Reader<'_>, opcode: u8) -> Result<(), WasmE
         }
         OPCODE_BR_TABLE => {
             let count = reader.read_var_u32()? as usize;
-            for _ in 0..count {
+            for branch_index in 0..count {
+                core::hint::black_box(branch_index);
                 reader.read_var_u32()?;
             }
             reader.read_var_u32()?;
@@ -2482,7 +2287,8 @@ impl<'a> Interpreter<'a> {
                     self.push_frame(function_index)?;
                 }
                 OPCODE_DROP => {
-                    let _ = self.pop_core_value()?;
+                    let dropped_value = self.pop_core_value()?;
+                    core::hint::black_box(dropped_value);
                 }
                 OPCODE_SELECT => {
                     let condition = self.pop_core_i32()?;
@@ -3207,6 +3013,7 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn complete_memory_grow_event(&mut self) -> Result<MemoryGrowEvent, WasmError> {
         let pending = self.pending.take().ok_or(WasmError::PendingRequired)?;
         let PendingExecution::MemoryGrow(event) = pending else {
@@ -3593,7 +3400,8 @@ impl<'a> Interpreter<'a> {
     }
 
     fn core_load_effective_addr(&mut self) -> Result<usize, WasmError> {
-        let _align = self.current_read_var_u32()?;
+        let align = self.current_read_var_u32()?;
+        core::hint::black_box(align);
         let offset = self.current_read_var_u32()?;
         let base = self.pop_core_i32()?;
         self.core_translate_addr(base.checked_add(offset).ok_or(WasmError::Truncated)?)
@@ -3952,7 +3760,8 @@ fn wasm_f32_sqrt(value: f32) -> f32 {
         return value;
     }
     let mut x = if value >= 1.0 { value } else { 1.0 };
-    for _ in 0..8 {
+    for sqrt_iteration in 0..8 {
+        core::hint::black_box(sqrt_iteration);
         x = 0.5 * (x + value / x);
     }
     x
@@ -4038,7 +3847,8 @@ fn wasm_f64_sqrt(value: f64) -> f64 {
         return value;
     }
     let mut x = if value >= 1.0 { value } else { 1.0 };
-    for _ in 0..12 {
+    for sqrt_iteration in 0..12 {
+        core::hint::black_box(sqrt_iteration);
         x = 0.5 * (x + value / x);
     }
     x
@@ -4115,38 +3925,30 @@ fn trunc_f64_to_i64_u(value: f64) -> Result<u64, WasmError> {
 }
 
 impl<'a> Vm<'a> {
+    #[cfg(test)]
     pub(super) fn new(module: &'a [u8], handlers: Wasip1HandlerSet) -> Result<Self, WasmError> {
-        let core_module = Module::parse(module)?;
-        validate_core_wasip1_imports(&core_module, handlers)?;
-        Ok(Self {
-            core: core_module.instantiate()?,
-            handlers,
-            done: false,
-        })
+        let mut vm = core::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            Self::init_in_place(vm.as_mut_ptr(), module, handlers)?;
+            Ok(vm.assume_init())
+        }
     }
 
-    #[cfg(all(
-        target_arch = "arm",
-        target_os = "none",
-        not(feature = "wasm-engine-wasip1-full"),
-        feature = "wasm-engine-static-placement"
-    ))]
-    pub(super) fn initialize<'slot>(
-        slot: &'slot mut core::mem::MaybeUninit<Self>,
+    pub(super) unsafe fn init_in_place(
+        dst: *mut Self,
         module: &'a [u8],
         handlers: Wasip1HandlerSet,
-    ) -> Result<&'slot mut Self, WasmError> {
-        let core_module = Module::parse(module)?;
-        validate_core_wasip1_imports(&core_module, handlers)?;
-        let ptr = slot.as_mut_ptr();
+    ) -> Result<(), WasmError> {
         unsafe {
-            let core_slot = &mut *core::ptr::addr_of_mut!((*ptr).core)
-                .cast::<core::mem::MaybeUninit<Interpreter<'a>>>();
-            core_module.instantiate_into(core_slot)?;
-            core::ptr::addr_of_mut!((*ptr).handlers).write(handlers);
-            core::ptr::addr_of_mut!((*ptr).done).write(false);
-            Ok(&mut *ptr)
+            let core = core::ptr::addr_of_mut!((*dst).core);
+            let core_module = core::ptr::addr_of_mut!((*core).module);
+            Module::parse_in_place(core_module, module)?;
+            validate_core_wasip1_imports(&*core_module, handlers)?;
+            Interpreter::init_from_parsed_module_in_place(core)?;
+            core::ptr::addr_of_mut!((*dst).handlers).write(handlers);
+            core::ptr::addr_of_mut!((*dst).done).write(false);
         }
+        Ok(())
     }
 
     pub(super) fn resume(&mut self, budget: BudgetRun) -> Result<VmEvent, WasmError> {
@@ -4296,14 +4098,17 @@ impl<'a> Vm<'a> {
         self.complete_host_call(errno)
     }
 
+    #[cfg(test)]
     pub(super) fn complete_sched_yield(&mut self, errno: u32) -> Result<(), WasmError> {
         self.complete_host_call(errno)
     }
 
+    #[cfg(test)]
     pub(super) fn complete_proc_raise(&mut self, errno: u32) -> Result<(), WasmError> {
         self.complete_host_call(errno)
     }
 
+    #[cfg(test)]
     pub(super) fn complete_path_minimal(
         &mut self,
         _call: PathCall,
@@ -4312,6 +4117,7 @@ impl<'a> Vm<'a> {
         self.complete_host_call(errno)
     }
 
+    #[cfg(test)]
     pub(super) fn complete_path_full(
         &mut self,
         _call: PathCall,
@@ -4360,6 +4166,7 @@ impl<'a> Vm<'a> {
         self.complete_host_call(errno)
     }
 
+    #[cfg(test)]
     pub(super) fn complete_fd_prestat_get(
         &mut self,
         call: PathCall,
@@ -4383,6 +4190,7 @@ impl<'a> Vm<'a> {
         self.complete_host_call(errno)
     }
 
+    #[cfg(test)]
     pub(super) fn complete_fd_prestat_dir_name(
         &mut self,
         call: PathCall,
@@ -4405,6 +4213,7 @@ impl<'a> Vm<'a> {
         self.complete_host_call(errno)
     }
 
+    #[cfg(test)]
     pub(super) fn complete_fd_filestat_get(
         &mut self,
         call: PathCall,
@@ -4419,6 +4228,7 @@ impl<'a> Vm<'a> {
         self.complete_filestat_at(call.arg_i32(1)?, stat, errno)
     }
 
+    #[cfg(test)]
     pub(super) fn complete_path_filestat_get(
         &mut self,
         call: PathCall,
@@ -4433,6 +4243,7 @@ impl<'a> Vm<'a> {
         self.complete_filestat_at(call.arg_i32(4)?, stat, errno)
     }
 
+    #[cfg(test)]
     pub(super) fn complete_path_readlink(
         &mut self,
         call: PathCall,
@@ -4457,6 +4268,7 @@ impl<'a> Vm<'a> {
         self.complete_host_call(errno)
     }
 
+    #[cfg(test)]
     pub(super) fn complete_fd_readdir(
         &mut self,
         call: PathCall,
@@ -4481,6 +4293,7 @@ impl<'a> Vm<'a> {
         self.complete_host_call(errno)
     }
 
+    #[cfg(test)]
     pub(super) fn complete_fd_pread(
         &mut self,
         call: PathCall,
@@ -4504,20 +4317,7 @@ impl<'a> Vm<'a> {
         self.complete_host_call(errno)
     }
 
-    pub(super) fn complete_fd_pwrite(
-        &mut self,
-        call: PathCall,
-        written: u32,
-        errno: u32,
-    ) -> Result<(), WasmError> {
-        if call.kind != PathOp::FdPwrite {
-            return Err(WasmError::Invalid("fd_pwrite completion kind mismatch"));
-        }
-        self.core
-            .write_memory_u32(call.arg_i32(4)?, if errno == 0 { written } else { 0 })?;
-        self.complete_host_call(errno)
-    }
-
+    #[cfg(test)]
     pub(super) fn complete_fd_seek(
         &mut self,
         call: PathCall,
@@ -4534,22 +4334,7 @@ impl<'a> Vm<'a> {
         self.complete_host_call(errno)
     }
 
-    pub(super) fn complete_fd_tell(
-        &mut self,
-        call: PathCall,
-        offset: u64,
-        errno: u32,
-    ) -> Result<(), WasmError> {
-        if call.kind != PathOp::FdTell {
-            return Err(WasmError::Invalid("fd_tell completion kind mismatch"));
-        }
-        if errno == 0 {
-            self.core
-                .write_memory(call.arg_i32(1)?, &offset.to_le_bytes())?;
-        }
-        self.complete_host_call(errno)
-    }
-
+    #[cfg(test)]
     fn complete_filestat_at(
         &mut self,
         ptr: u32,
@@ -4566,6 +4351,7 @@ impl<'a> Vm<'a> {
         self.complete_host_call(errno)
     }
 
+    #[cfg(test)]
     pub(super) fn complete_socket(
         &mut self,
         _call: SocketCall,
@@ -4579,6 +4365,7 @@ impl<'a> Vm<'a> {
         self.complete_host_call(errno)
     }
 
+    #[cfg(test)]
     pub(super) fn complete_sock_accept(
         &mut self,
         call: SocketCall,
@@ -4594,6 +4381,7 @@ impl<'a> Vm<'a> {
         self.complete_host_call(errno)
     }
 
+    #[cfg(test)]
     pub(super) fn sock_recv_iovec(&self, call: SocketCall) -> Result<(u32, u32), WasmError> {
         if call.kind != SocketOp::SockRecv {
             return Err(WasmError::Invalid("socket recv kind mismatch"));
@@ -4606,6 +4394,7 @@ impl<'a> Vm<'a> {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn complete_sock_recv(
         &mut self,
         call: SocketCall,
@@ -4633,6 +4422,7 @@ impl<'a> Vm<'a> {
         self.complete_host_call(errno)
     }
 
+    #[cfg(test)]
     pub(super) fn sock_send_payload(&self, call: SocketCall) -> Result<InlinePayload, WasmError> {
         if call.kind != SocketOp::SockSend {
             return Err(WasmError::Invalid("socket send kind mismatch"));
@@ -4645,6 +4435,7 @@ impl<'a> Vm<'a> {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn complete_sock_send(
         &mut self,
         call: SocketCall,
@@ -4659,6 +4450,7 @@ impl<'a> Vm<'a> {
         self.complete_host_call(errno)
     }
 
+    #[cfg(test)]
     pub(super) fn complete_sock_shutdown(
         &mut self,
         call: SocketCall,
@@ -4725,10 +4517,6 @@ impl<'a> Vm<'a> {
         self.complete_host_call(errno)
     }
 
-    pub(super) fn complete_memory_grow_event(&mut self) -> Result<MemoryGrowEvent, WasmError> {
-        self.core.complete_memory_grow_event()
-    }
-
     #[cfg(test)]
     fn read_memory(&self, addr: u32, out: &mut [u8]) -> Result<(), WasmError> {
         self.core.read_memory(addr, out)
@@ -4744,14 +4532,7 @@ impl<'a> Vm<'a> {
         self.core.read_memory_u32(addr)
     }
 
-    #[cfg(all(
-        test,
-        any(
-            feature = "wasip1-sys-sock",
-            feature = "wasm-engine-wasip1-std-profile",
-            feature = "wasm-engine-wasip1-full"
-        )
-    ))]
+    #[cfg(all(test, any(feature = "wasip1-sys-sock", feature = "wasm-engine-core")))]
     fn socket_as_engine_req(&self, call: SocketCall, lease_id: u8) -> Result<EngineReq, WasmError> {
         match call.kind {
             SocketOp::SockSend => {
@@ -4833,37 +4614,6 @@ impl<'a> Vm<'a> {
             total = total.checked_add(len).ok_or(WasmError::Truncated)?;
         }
         Ok(total)
-    }
-
-    pub(super) fn sock_send_total_len(&self, call: SocketCall) -> Result<u32, WasmError> {
-        if call.kind != SocketOp::SockSend {
-            return Err(WasmError::Invalid("socket send kind mismatch"));
-        }
-        self.fd_write_total_len(FdWriteCall {
-            fd: call.fd()?,
-            iovs: call.arg_i32(1)?,
-            iovs_len: call.arg_i32(2)?,
-            nwritten: call.arg_i32(4)?,
-        })
-    }
-
-    pub(super) fn copy_sock_send_payload(
-        &self,
-        call: SocketCall,
-        out: &mut [u8],
-    ) -> Result<usize, WasmError> {
-        if call.kind != SocketOp::SockSend {
-            return Err(WasmError::Invalid("socket send kind mismatch"));
-        }
-        self.copy_fd_write_payload(
-            FdWriteCall {
-                fd: call.fd()?,
-                iovs: call.arg_i32(1)?,
-                iovs_len: call.arg_i32(2)?,
-                nwritten: call.arg_i32(4)?,
-            },
-            out,
-        )
     }
 
     pub(super) fn poll_oneoff_delay_ticks(&self, call: PollOneoffCall) -> Result<u64, WasmError> {
@@ -5298,6 +5048,7 @@ impl<'a> Vm<'a> {
         ))
     }
 
+    #[cfg(test)]
     fn path_fd_iovec(
         &self,
         call: PathCall,
@@ -5378,7 +5129,6 @@ impl<'a> TestWasmModule<'a> {
         let mut saw_functions = false;
         let mut saw_exports = false;
         let mut import_count = 0u32;
-        let mut optional_import = None;
         let mut local_start_sig = FuncSig::Unsupported;
         let mut start_export_index = None;
         let mut start_body = None;
@@ -5393,9 +5143,7 @@ impl<'a> TestWasmModule<'a> {
                     type_count = parse_type_section(&mut section, &mut func_types)?;
                 }
                 SECTION_IMPORT => {
-                    let imports = parse_import_section(&mut section, &func_types[..type_count])?;
-                    import_count = imports.0;
-                    optional_import = imports.1;
+                    import_count = parse_import_section(&mut section, &func_types[..type_count])?;
                     saw_imports = true;
                 }
                 SECTION_FUNCTION => {
@@ -5442,7 +5190,6 @@ impl<'a> TestWasmModule<'a> {
 
         Ok(Self {
             start_body: start_body.ok_or(WasmError::Invalid("missing code section"))?,
-            optional_import,
         })
     }
 
@@ -5454,7 +5201,6 @@ impl<'a> TestWasmModule<'a> {
             stack_len: 0,
             pending: None,
             done: false,
-            optional_import: self.optional_import,
         }
     }
 }
@@ -5516,22 +5262,6 @@ impl<'a> TestWasmInstance<'a> {
                             self.pending = Some(PendingHostCall::Yield);
                             Ok(TestVmEvent::HostCall(EngineReq::Yield))
                         }
-                    } else if function_index == SLEEP_IMPORT_INDEX {
-                        match self.optional_import {
-                            Some(OptionalImport::SleepUntil) => {
-                                let tick = self.pop()? as u64;
-                                self.pending = Some(PendingHostCall::SleepUntil(tick));
-                                Ok(TestVmEvent::HostCall(EngineReq::TimerSleepUntil(
-                                    TimerSleepUntil::new(tick),
-                                )))
-                            }
-                            Some(OptionalImport::GpioSet) => {
-                                let set = GpioSet::from_wasm_value(self.pop()? as u32);
-                                self.pending = Some(PendingHostCall::GpioSet(set));
-                                Ok(TestVmEvent::HostCall(EngineReq::GpioSet(set)))
-                            }
-                            None => Err(WasmError::Unsupported("call target not supported")),
-                        }
                     } else {
                         Err(WasmError::Unsupported("call target not supported"))
                     };
@@ -5570,16 +5300,6 @@ impl<'a> TestWasmInstance<'a> {
                 Ok(())
             }
             (PendingHostCall::Yield, EngineRet::Yielded) => Ok(()),
-            (PendingHostCall::SleepUntil(expected), EngineRet::TimerSleepDone(done))
-                if expected == done.tick() =>
-            {
-                Ok(())
-            }
-            (PendingHostCall::GpioSet(expected), EngineRet::GpioSetDone(actual))
-                if expected == actual =>
-            {
-                Ok(())
-            }
             _ => Err(WasmError::PendingMismatch),
         }
     }
@@ -5648,9 +5368,8 @@ fn parse_type_section(
 fn parse_import_section(
     section: &mut Reader<'_>,
     func_types: &[FuncSig],
-) -> Result<(u32, Option<OptionalImport>), WasmError> {
+) -> Result<u32, WasmError> {
     let count = section.read_var_u32()?;
-    let mut optional = None;
     for index in 0..count {
         let module = section.read_name()?;
         let field = section.read_name()?;
@@ -5671,16 +5390,10 @@ fn parse_import_section(
         match index {
             LOG_IMPORT_INDEX if field == b"log_u32" && sig == FuncSig::I32ToUnit => {}
             YIELD_IMPORT_INDEX if field == b"yield_now" && sig == FuncSig::UnitToUnit => {}
-            SLEEP_IMPORT_INDEX if field == b"sleep_until" && sig == FuncSig::I32ToUnit => {
-                optional = Some(OptionalImport::SleepUntil);
-            }
-            SLEEP_IMPORT_INDEX if field == b"gpio_set" && sig == FuncSig::I32ToUnit => {
-                optional = Some(OptionalImport::GpioSet);
-            }
             _ => return Err(WasmError::Unsupported("unsupported test import shape")),
         }
     }
-    Ok((count, optional))
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -5704,7 +5417,8 @@ fn parse_function_section(
 #[cfg(test)]
 fn parse_export_section(section: &mut Reader<'_>) -> Result<u32, WasmError> {
     let count = section.read_var_u32()?;
-    for _ in 0..count {
+    for export_index in 0..count {
+        core::hint::black_box(export_index);
         let export_name = section.read_name()?;
         let kind = section.read_u8()?;
         let index = section.read_var_u32()?;
@@ -5740,43 +5454,28 @@ fn parse_code_section<'a>(section: &mut Reader<'a>) -> Result<&'a [u8], WasmErro
 mod tests {
     use super::{
         BAD_ROUTE_EARLY_YIELD_WASM_GUEST, EXTERNAL_KIND_FUNC, ExecutionEvent,
-        FUEL_EXHAUSTION_WASM_GUEST, FileStat, GPIO_WASM_GUEST, Interpreter, NORMAL_WASM_GUEST,
-        OPCODE_CALL, OPCODE_DROP, OPCODE_END, OPCODE_I32_CONST, OPCODE_I64_CONST,
-        ROUTE_WASM_ALERT_VALUE, ROUTE_WASM_GUEST, ROUTE_WASM_NORMAL_VALUE, SECTION_CODE,
-        SECTION_EXPORT, SECTION_FUNCTION, SECTION_IMPORT, SECTION_MEMORY, SECTION_TYPE,
-        SLEEP_WASM_GUEST, TEST_LOG_YIELD_WASM_GUEST, TEST_RESUME_FUEL, TRAP_WASM_GUEST,
-        TestBudgetedVmEvent, TestVmEvent, TestWasmInstance, TestWasmModule, VALTYPE_I32,
-        VALTYPE_I64, Value, Vm, VmEvent, WASIP1_FILESTAT_FILETYPE_OFFSET,
+        FUEL_EXHAUSTION_WASM_GUEST, FileStat, Interpreter, NORMAL_WASM_GUEST, OPCODE_CALL,
+        OPCODE_DROP, OPCODE_END, OPCODE_I32_CONST, OPCODE_I64_CONST, ROUTE_WASM_ALERT_VALUE,
+        ROUTE_WASM_GUEST, ROUTE_WASM_NORMAL_VALUE, SECTION_CODE, SECTION_EXPORT, SECTION_FUNCTION,
+        SECTION_IMPORT, SECTION_MEMORY, SECTION_TYPE, TEST_LOG_YIELD_WASM_GUEST, TEST_RESUME_FUEL,
+        TRAP_WASM_GUEST, TestBudgetedVmEvent, TestVmEvent, TestWasmInstance, TestWasmModule,
+        VALTYPE_I32, VALTYPE_I64, Value, Vm, VmEvent, WASIP1_FILESTAT_FILETYPE_OFFSET,
         WASIP1_FILESTAT_SIZE_OFFSET, WASIP1_FILETYPE_DIRECTORY, WASIP1_FILETYPE_REGULAR_FILE,
         WASIP1_IMPORT_MODULE, WASIP1_PRESTAT_DIR_NAME_LEN_OFFSET, WasmError,
     };
-    #[cfg(any(
-        feature = "wasm-engine-wasip1-std-profile",
-        feature = "wasm-engine-wasip1-full"
-    ))]
+    #[cfg(feature = "wasm-engine-core")]
     use super::{FdStat, WASIP1_FDSTAT_RIGHTS_BASE_OFFSET};
     #[cfg(any(
-        feature = "wasip1-sys-path-minimal",
+        feature = "wasip1-sys-path-open",
         feature = "wasip1-sys-sock",
-        feature = "wasm-engine-wasip1-std-profile",
-        feature = "wasm-engine-wasip1-full"
+        feature = "wasm-engine-core"
     ))]
     use super::{PathOp, SocketOp};
-    #[cfg(any(
-        feature = "wasip1-sys-sock",
-        feature = "wasm-engine-wasip1-std-profile",
-        feature = "wasm-engine-wasip1-full"
-    ))]
+    #[cfg(any(feature = "wasip1-sys-sock", feature = "wasm-engine-core"))]
     use crate::choreography::protocol::{FdRead, FdRequest, FdWrite};
     use crate::{
-        choreography::protocol::{
-            BudgetExpired, BudgetRun, EngineReq, EngineRet, GpioSet, MemBorrow, MemFence,
-            MemFenceReason, StdoutChunk, TimerSleepDone, TimerSleepUntil,
-        },
-        kernel::{
-            features::Wasip1HandlerSet,
-            wasi::{MemoryLeaseError, MemoryLeaseTable},
-        },
+        choreography::protocol::{BudgetExpired, BudgetRun, EngineReq, EngineRet},
+        kernel::features::Wasip1HandlerSet,
     };
     use std::vec::Vec;
 
@@ -5981,7 +5680,8 @@ mod tests {
 
     #[test]
     fn test_wasm_module_parses() {
-        let _module = TestWasmModule::parse(TEST_LOG_YIELD_WASM_GUEST).expect("parse test wasm");
+        let module = TestWasmModule::parse(TEST_LOG_YIELD_WASM_GUEST).expect("parse test wasm");
+        core::hint::black_box(module);
     }
 
     #[test]
@@ -6277,11 +5977,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(
-        feature = "wasip1-sys-path-minimal",
-        feature = "wasm-engine-wasip1-std-profile",
-        feature = "wasm-engine-wasip1-full"
-    ))]
+    #[cfg(any(feature = "wasip1-sys-path-open", feature = "wasm-engine-core"))]
     #[test]
     fn core_wasip1_trampoline_maps_full_feature_syscall_surface() {
         std::thread::Builder::new()
@@ -6903,11 +6599,7 @@ mod tests {
             .expect("wasm test joins");
     }
 
-    #[cfg(any(
-        feature = "wasip1-sys-path-minimal",
-        feature = "wasm-engine-wasip1-std-profile",
-        feature = "wasm-engine-wasip1-full"
-    ))]
+    #[cfg(any(feature = "wasip1-sys-path-open", feature = "wasm-engine-core"))]
     #[test]
     fn core_wasip1_path_helpers_write_meaningful_choreofs_results() {
         let path_open = core_wasip1_single_import_module(
@@ -7455,53 +7147,6 @@ mod tests {
     }
 
     #[test]
-    fn sleep_wasm_guest_emits_timer_sleep_then_yield() {
-        let mut guest = TestWasmInstance::new(SLEEP_WASM_GUEST).expect("instantiate sleep guest");
-
-        assert_eq!(
-            guest.resume().expect("resume to sleep"),
-            TestVmEvent::HostCall(EngineReq::TimerSleepUntil(TimerSleepUntil::new(42)))
-        );
-        guest
-            .complete_host_call(EngineRet::TimerSleepDone(TimerSleepDone::new(42)))
-            .expect("complete sleep");
-
-        assert_eq!(
-            guest.resume().expect("resume to yield"),
-            TestVmEvent::HostCall(EngineReq::Yield)
-        );
-        guest
-            .complete_host_call(EngineRet::Yielded)
-            .expect("complete yield");
-
-        assert_eq!(guest.resume().expect("resume to done"), TestVmEvent::Done);
-    }
-
-    #[test]
-    fn gpio_wasm_guest_emits_gpio_set_then_yield() {
-        let mut guest = TestWasmInstance::new(GPIO_WASM_GUEST).expect("instantiate gpio guest");
-        let set = GpioSet::new(25, true);
-
-        assert_eq!(
-            guest.resume().expect("resume to gpio set"),
-            TestVmEvent::HostCall(EngineReq::GpioSet(set))
-        );
-        guest
-            .complete_host_call(EngineRet::GpioSetDone(set))
-            .expect("complete gpio set");
-
-        assert_eq!(
-            guest.resume().expect("resume to yield"),
-            TestVmEvent::HostCall(EngineReq::Yield)
-        );
-        guest
-            .complete_host_call(EngineRet::Yielded)
-            .expect("complete yield");
-
-        assert_eq!(guest.resume().expect("resume to done"), TestVmEvent::Done);
-    }
-
-    #[test]
     fn trap_guest_rejects_and_next_guest_can_run() {
         let mut trapped = TestWasmInstance::new(TRAP_WASM_GUEST).expect("instantiate trap guest");
         assert_eq!(trapped.resume(), Err(WasmError::Trap));
@@ -7516,28 +7161,6 @@ mod tests {
         assert_eq!(
             next.resume().expect("resume next yield"),
             TestVmEvent::HostCall(EngineReq::Yield)
-        );
-    }
-
-    #[test]
-    fn trap_guest_revokes_outstanding_memory_leases() {
-        let mut leases: MemoryLeaseTable<2> = MemoryLeaseTable::new(4096, 1);
-        let grant = leases
-            .grant_read(MemBorrow::new(1024, 8, 1))
-            .expect("grant read");
-        let chunk = StdoutChunk::new_with_lease(grant.lease_id(), b"hibana").expect("chunk");
-
-        let mut trapped = TestWasmInstance::new(TRAP_WASM_GUEST).expect("instantiate trap guest");
-        assert_eq!(trapped.resume(), Err(WasmError::Trap));
-        leases.fence(MemFence::new(MemFenceReason::Trap, 2));
-
-        assert_eq!(
-            leases.validate_read_chunk(&chunk),
-            Err(MemoryLeaseError::UnknownLease)
-        );
-        assert_eq!(
-            leases.grant_read(MemBorrow::new(1024, 8, 1)),
-            Err(MemoryLeaseError::EpochMismatch)
         );
     }
 

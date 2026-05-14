@@ -42,12 +42,13 @@ fn sleep_ms(ms: u64) {
     subscription[SUBSCRIPTION_CLOCK_TIMEOUT_OFFSET..SUBSCRIPTION_CLOCK_TIMEOUT_OFFSET + 8]
         .copy_from_slice(&(ms * 1_000_000).to_le_bytes());
     unsafe {
-        let _ = poll_oneoff(
+        let errno = poll_oneoff(
             subscription.as_ptr(),
             event.as_mut_ptr(),
             1,
             &raw mut NEVENTS,
         );
+        core::hint::black_box(errno);
     }
 }
 

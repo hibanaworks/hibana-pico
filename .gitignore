@@ -1,4 +1,6 @@
 /target
+/apps/wasip1/hibana-wasi-guest/target/
+/apps/wasip1/hibana-wasi-guest/Cargo.lock
 /integration/cross-repo/target
 /internal/pico_smoke/target
 /internal/pico2_smoke/target

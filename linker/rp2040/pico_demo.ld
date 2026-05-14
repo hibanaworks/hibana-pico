@@ -5,9 +5,9 @@ MEMORY
 }
 
 __stack_top = ORIGIN(RAM) + LENGTH(RAM);
-__stack_limit = __stack_top - 48K;
+__stack_limit = __stack_top - 12K;
 __stack_reserved_bytes = __stack_top - __stack_limit;
-__core1_stack_top = __stack_top - 24K;
+__core1_stack_top = __stack_top - 8K;
 
 ENTRY(Reset);
 
@@ -50,4 +50,4 @@ SECTIONS
 }
 
 ASSERT(SIZEOF(.boot2) == 256, "rp2040 flash image must start with a 256-byte boot2 stage")
-ASSERT(__static_ram_end <= __stack_limit, "hibana-pico static RAM exceeds the reserved 48 KiB dual-core stack budget")
+ASSERT(__static_ram_end <= __stack_limit, "hibana-pico static RAM exceeds the reserved dual-core stack budget")

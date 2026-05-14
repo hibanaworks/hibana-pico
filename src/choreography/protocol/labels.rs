@@ -26,12 +26,6 @@ pub const LABEL_MEM_GRANT: u8 = 30;
 pub const LABEL_MEM_RELEASE: u8 = 31;
 pub const LABEL_MEM_COMMIT: u8 = 32;
 pub const LABEL_MEM_FENCE: u8 = 33;
-pub const LABEL_TIMER_SLEEP_UNTIL: u8 = 34;
-pub const LABEL_TIMER_SLEEP_DONE: u8 = 35;
-pub const LABEL_GPIO_SET: u8 = 36;
-pub const LABEL_GPIO_SET_DONE: u8 = 37;
-pub const LABEL_UART_WRITE: u8 = 38;
-pub const LABEL_UART_WRITE_RET: u8 = 39;
 pub const LABEL_MGMT_IMAGE_BEGIN: u8 = 40;
 pub const LABEL_MGMT_IMAGE_CHUNK: u8 = 41;
 pub const LABEL_MGMT_IMAGE_END: u8 = 42;
@@ -42,10 +36,6 @@ pub const LABEL_ENGINE_RUN: u8 = 50;
 pub const LABEL_ENGINE_BUDGET_EXPIRED: u8 = 51;
 pub const LABEL_ENGINE_SUSPEND: u8 = 52;
 pub const LABEL_ENGINE_RESTART: u8 = 53;
-pub const LABEL_GPIO_WAIT: u8 = 54;
-pub const LABEL_GPIO_SUBSCRIBE: u8 = 55;
-pub const LABEL_GPIO_EDGE: u8 = 56;
-pub const LABEL_GPIO_WAIT_RET: u8 = 58;
 pub const LABEL_NET_STREAM_WRITE: u8 = 59;
 pub const LABEL_NET_STREAM_ACK: u8 = 60;
 pub const LABEL_NET_STREAM_READ: u8 = 61;
@@ -86,8 +76,6 @@ pub const LABEL_ACTIVATION_AUTHORITY_CONTROL: u8 = 133;
 pub const LABEL_ACTIVATION_CONTROL: u8 = 134;
 pub const LABEL_REENTRY_PERMIT_CONTROL: u8 = LABEL_ACTIVATION_AUTHORITY_CONTROL;
 pub const LABEL_ACTIVATION_PERMIT_CONTROL: u8 = LABEL_ACTIVATION_CONTROL;
-pub const LABEL_ENGINE_ABORT_ROUTE_CONTROL: u8 = 135;
-pub const LABEL_ENGINE_NORMAL_ROUTE_CONTROL: u8 = 136;
 pub const LABEL_TOPOLOGY_BEGIN_CONTROL: u8 = 138;
 pub const LABEL_TOPOLOGY_ACK_CONTROL: u8 = 139;
 pub const LABEL_TOPOLOGY_COMMIT_CONTROL: u8 = 140;
@@ -95,6 +83,8 @@ pub const LABEL_TX_COMMIT_CONTROL: u8 = 141;
 pub const LABEL_TX_ABORT_CONTROL: u8 = 142;
 pub const LABEL_STATE_SNAPSHOT_CONTROL: u8 = 143;
 pub const LABEL_STATE_RESTORE_CONTROL: u8 = 144;
+pub const LABEL_WASI_IMPORT_LOOP_CONTINUE_CONTROL: u8 = 145;
+pub const LABEL_WASI_IMPORT_LOOP_BREAK_CONTROL: u8 = 146;
 pub const LABEL_ROUTE_CHOREOFS_OPEN_REJECT: u8 = 147;
 pub const LABEL_ROUTE_CHOREOFS_OPEN_ADMIT: u8 = 148;
 pub const LABEL_REMOTE_SAMPLE_REQ: u8 = 65;
@@ -138,8 +128,6 @@ pub const TAG_REQ_WASIP1_STDIN: u8 = 5;
 pub const TAG_REQ_WASIP1_CLOCK_NOW: u8 = 6;
 pub const TAG_REQ_WASIP1_RANDOM_SEED: u8 = 7;
 pub const TAG_REQ_WASIP1_EXIT: u8 = 8;
-pub const TAG_REQ_TIMER_SLEEP_UNTIL: u8 = 9;
-pub const TAG_REQ_GPIO_SET: u8 = 10;
 pub const TAG_REQ_WASI_FD_WRITE: u8 = 11;
 pub const TAG_REQ_WASI_FD_READ: u8 = 12;
 pub const TAG_REQ_WASI_FD_FDSTAT_GET: u8 = 13;
@@ -161,8 +149,6 @@ pub const TAG_RET_WASIP1_STDERR_WRITTEN: u8 = 4;
 pub const TAG_RET_WASIP1_STDIN_READ: u8 = 5;
 pub const TAG_RET_WASIP1_CLOCK_NOW: u8 = 6;
 pub const TAG_RET_WASIP1_RANDOM_SEED: u8 = 7;
-pub const TAG_RET_TIMER_SLEEP_DONE: u8 = 8;
-pub const TAG_RET_GPIO_SET_DONE: u8 = 9;
 pub const TAG_RET_WASI_FD_WRITE_DONE: u8 = 10;
 pub const TAG_RET_WASI_FD_READ_DONE: u8 = 11;
 pub const TAG_RET_WASI_FD_FDSTAT: u8 = 12;
@@ -182,7 +168,6 @@ pub const WASIP1_PATH_CHUNK_CAPACITY: usize = 40;
 pub const STDOUT_CHUNK_CAPACITY: usize = WASIP1_STREAM_CHUNK_CAPACITY;
 pub const STDERR_CHUNK_CAPACITY: usize = WASIP1_STREAM_CHUNK_CAPACITY;
 pub const STDIN_CHUNK_CAPACITY: usize = WASIP1_STREAM_CHUNK_CAPACITY;
-pub const UART_WRITE_CHUNK_CAPACITY: usize = 64;
 pub const MGMT_IMAGE_CHUNK_CAPACITY: usize = 32;
 pub const MEM_LEASE_NONE: u8 = 0;
 
@@ -195,8 +180,8 @@ pub type TransactionControlWireHandle = (u8, u64);
 pub type StateControlWireHandle = (u8, u64);
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct EngineLabelUniverse;
+pub struct BuiltInLabelUniverse;
 
-impl LabelUniverse for EngineLabelUniverse {
+impl LabelUniverse for BuiltInLabelUniverse {
     const MAX_LABEL: u8 = LABEL_ROUTE_CHOREOFS_OPEN_ADMIT;
 }

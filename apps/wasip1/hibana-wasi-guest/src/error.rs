@@ -1,6 +1,7 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     InvalidPath,
+    InvalidPayload,
     PayloadTooLarge { max: usize, actual: usize },
     PollNotReady { ready: usize },
     ShortWrite { expected: usize, actual: usize },

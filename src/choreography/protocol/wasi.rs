@@ -33,12 +33,11 @@ impl ControlResourceKind for MemReadLeaseKind {
     const OP: ControlOp = ControlOp::Fence;
     const AUTO_MINT_WIRE: bool = true;
 
-    fn mint_handle(
-        _sid: SessionId,
-        _lane: Lane,
-        _scope: ScopeId,
-    ) -> <Self as ResourceKind>::Handle {
-        (MemRights::Read.tag(), 1)
+    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+        (
+            MemRights::Read.tag(),
+            ((sid.raw() as u64) << 32) | ((lane.raw() as u64) << 24) | scope.raw(),
+        )
     }
 }
 
@@ -71,12 +70,11 @@ impl ControlResourceKind for MemWriteLeaseKind {
     const OP: ControlOp = ControlOp::Fence;
     const AUTO_MINT_WIRE: bool = true;
 
-    fn mint_handle(
-        _sid: SessionId,
-        _lane: Lane,
-        _scope: ScopeId,
-    ) -> <Self as ResourceKind>::Handle {
-        (MemRights::Write.tag(), 1)
+    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
+        (
+            MemRights::Write.tag(),
+            ((sid.raw() as u64) << 32) | ((lane.raw() as u64) << 24) | scope.raw(),
+        )
     }
 }
 
@@ -592,8 +590,6 @@ pub enum EngineReq {
     EnvironSizesGet(EnvironSizesGet),
     EnvironGet(EnvironGet),
     PathOpen(PathOpen),
-    TimerSleepUntil(TimerSleepUntil),
-    GpioSet(GpioSet),
 }
 
 impl WireEncode for EngineReq {
@@ -621,8 +617,6 @@ impl WireEncode for EngineReq {
             Self::EnvironSizesGet(_) => 1,
             Self::EnvironGet(_) => 3,
             Self::PathOpen(open) => 12 + open.len(),
-            Self::TimerSleepUntil(_) => 9,
-            Self::GpioSet(_) => 3,
         })
     }
 
@@ -821,23 +815,6 @@ impl WireEncode for EngineReq {
                 out[12..12 + len].copy_from_slice(open.path());
                 Ok(12 + len)
             }
-            Self::TimerSleepUntil(sleep) => {
-                if out.len() < 9 {
-                    return Err(CodecError::Truncated);
-                }
-                out[0] = TAG_REQ_TIMER_SLEEP_UNTIL;
-                out[1..9].copy_from_slice(&sleep.tick().to_be_bytes());
-                Ok(9)
-            }
-            Self::GpioSet(set) => {
-                if out.len() < 3 {
-                    return Err(CodecError::Truncated);
-                }
-                out[0] = TAG_REQ_GPIO_SET;
-                out[1] = set.pin();
-                out[2] = set.high() as u8;
-                Ok(3)
-            }
         }
     }
 }
@@ -890,10 +867,6 @@ impl WirePayload for EngineReq {
             }
             TAG_REQ_WASI_ENVIRON_GET => Ok(Self::EnvironGet(EnvironGet::decode(rest)?)),
             TAG_REQ_WASI_PATH_OPEN => Ok(Self::PathOpen(PathOpen::decode(rest)?)),
-            TAG_REQ_TIMER_SLEEP_UNTIL => Ok(Self::TimerSleepUntil(
-                TimerSleepUntil::decode_payload(Payload::new(rest))?,
-            )),
-            TAG_REQ_GPIO_SET => Ok(Self::GpioSet(GpioSet::decode_payload(Payload::new(rest))?)),
             _ => Err(CodecError::Invalid("unknown engine request tag")),
         }
     }
@@ -921,8 +894,6 @@ pub enum EngineRet {
     EnvironSizes(EnvironSizes),
     EnvironDone(EnvironDone),
     PathOpened(PathOpened),
-    TimerSleepDone(TimerSleepDone),
-    GpioSetDone(GpioSet),
 }
 
 impl WireEncode for EngineRet {
@@ -948,8 +919,6 @@ impl WireEncode for EngineRet {
             Self::EnvironSizes(_) => 3,
             Self::EnvironDone(done) => 3 + done.len(),
             Self::PathOpened(_) => 4,
-            Self::TimerSleepDone(_) => 9,
-            Self::GpioSetDone(_) => 3,
         })
     }
 
@@ -1137,23 +1106,6 @@ impl WireEncode for EngineRet {
                 out[2..4].copy_from_slice(&opened.errno().to_be_bytes());
                 Ok(4)
             }
-            Self::TimerSleepDone(done) => {
-                if out.len() < 9 {
-                    return Err(CodecError::Truncated);
-                }
-                out[0] = TAG_RET_TIMER_SLEEP_DONE;
-                out[1..9].copy_from_slice(&done.tick().to_be_bytes());
-                Ok(9)
-            }
-            Self::GpioSetDone(set) => {
-                if out.len() < 3 {
-                    return Err(CodecError::Truncated);
-                }
-                out[0] = TAG_RET_GPIO_SET_DONE;
-                out[1] = set.pin();
-                out[2] = set.high() as u8;
-                Ok(3)
-            }
         }
     }
 }
@@ -1204,12 +1156,6 @@ impl WirePayload for EngineRet {
             TAG_RET_WASI_ENVIRON_SIZES => Ok(Self::EnvironSizes(EnvironSizes::decode(rest)?)),
             TAG_RET_WASI_ENVIRON_DONE => Ok(Self::EnvironDone(EnvironDone::decode(rest)?)),
             TAG_RET_WASI_PATH_OPENED => Ok(Self::PathOpened(PathOpened::decode(rest)?)),
-            TAG_RET_TIMER_SLEEP_DONE => Ok(Self::TimerSleepDone(TimerSleepDone::decode_payload(
-                Payload::new(rest),
-            )?)),
-            TAG_RET_GPIO_SET_DONE => Ok(Self::GpioSetDone(GpioSet::decode_payload(Payload::new(
-                rest,
-            ))?)),
             _ => Err(CodecError::Invalid("unknown engine reply tag")),
         }
     }

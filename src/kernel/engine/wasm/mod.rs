@@ -1,27 +1,16 @@
-//! Public Wasm/WASI P1 engine facade.
+//! Private Wasm/WASI P1 engine facade.
 //!
-//! The engine has one public handle: [`Guest`].  The parser, interpreter,
-//! import lowering, memory writeback, and pending slot live in the private
-//! `vm` module.
+//! The engine boundary has one handle: [`Guest`]. The parser, interpreter,
+//! import lowering, memory writeback, and pending slot live in `vm`.
 
 mod vm;
-
-#[cfg(all(
-    target_arch = "arm",
-    target_os = "none",
-    feature = "wasm-engine-static-placement"
-))]
-use core::mem::MaybeUninit;
 
 use crate::{
     choreography::protocol::{BudgetExpired, BudgetRun, ProcExitStatus},
     kernel::features::Wasip1HandlerSet,
 };
 
-pub use vm::{
-    FdStat, FileStat, MemoryGrowEvent as MemoryGrow, PathBytes, WASIP1_FILETYPE_DIRECTORY,
-    WASIP1_FILETYPE_REGULAR_FILE,
-};
+pub use vm::{FdStat, PathBytes};
 
 pub type Error = vm::WasmError;
 
@@ -30,35 +19,15 @@ pub struct Guest<'a> {
 }
 
 impl<'a> Guest<'a> {
-    pub fn new(module: &'a [u8]) -> Result<Self, Error> {
-        Ok(Self {
-            vm: vm::Vm::new(module, Wasip1HandlerSet::active())?,
-        })
-    }
-
-    #[cfg(all(
-        target_arch = "arm",
-        target_os = "none",
-        feature = "wasm-engine-static-placement"
-    ))]
-    pub(crate) fn place_in_static_slot<'slot>(
-        slot: &'slot mut MaybeUninit<Self>,
-        module: &'a [u8],
-    ) -> Result<&'slot mut Self, Error> {
-        #[cfg(feature = "wasm-engine-wasip1-full")]
-        {
-            Ok(slot.write(Self::new(module)?))
+    pub unsafe fn init_in_place(dst: *mut Self, module: &'a [u8]) -> Result<(), Error> {
+        unsafe {
+            vm::Vm::init_in_place(
+                core::ptr::addr_of_mut!((*dst).vm),
+                module,
+                Wasip1HandlerSet::active(),
+            )?;
         }
-        #[cfg(not(feature = "wasm-engine-wasip1-full"))]
-        {
-            let guest = slot.as_mut_ptr();
-            unsafe {
-                let vm_slot =
-                    &mut *core::ptr::addr_of_mut!((*guest).vm).cast::<MaybeUninit<vm::Vm<'a>>>();
-                vm::Vm::initialize(vm_slot, module, Wasip1HandlerSet::active())?;
-                Ok(&mut *guest)
-            }
-        }
+        Ok(())
     }
 
     pub fn resume<'guest>(&'guest mut self, budget: BudgetRun) -> Result<Event<'guest, 'a>, Error> {
@@ -95,21 +64,15 @@ impl<'a> Guest<'a> {
                 RandomGet { call },
             )))),
             Ok(vm::VmEvent::SchedYield) => Ok(Event::Call(Call::SchedYield(Pending::new(
-                self,
-                SchedYield { _private: () },
+                self, SchedYield,
             )))),
-            Ok(vm::VmEvent::PathMinimal(call)) => Ok(Event::Call(Call::Path(Pending::new(
-                self,
-                Path { call, full: false },
-            )))),
-            Ok(vm::VmEvent::PathFull(call)) => Ok(Event::Call(Call::Path(Pending::new(
-                self,
-                Path { call, full: true },
-            )))),
-            Ok(vm::VmEvent::Socket(call)) => Ok(Event::Call(Call::Socket(Pending::new(
-                self,
-                Socket { call },
-            )))),
+            Ok(vm::VmEvent::PathMinimal(call)) | Ok(vm::VmEvent::PathFull(call)) => {
+                Ok(Event::Call(Call::Path(Pending::new(self, Path { call }))))
+            }
+            Ok(vm::VmEvent::Socket(call)) => {
+                core::hint::black_box(call);
+                Ok(Event::Call(Call::Socket(Pending::new(self, Socket))))
+            }
             Ok(vm::VmEvent::ArgsSizesGet(call)) => Ok(Event::Call(Call::ArgsSizesGet(
                 Pending::new(self, ArgsSizesGet { call }),
             ))),
@@ -124,14 +87,17 @@ impl<'a> Guest<'a> {
                 self,
                 EnvironGet { call },
             )))),
-            Ok(vm::VmEvent::ProcRaise(code)) => Ok(Event::Call(Call::ProcRaise(Pending::new(
-                self,
-                ProcRaise { code },
-            )))),
-            Ok(vm::VmEvent::MemoryGrow(event)) => Ok(Event::Call(Call::MemoryGrow(Pending::new(
-                self,
-                MemoryGrowCall { event },
-            )))),
+            Ok(vm::VmEvent::ProcRaise(code)) => {
+                core::hint::black_box(code);
+                Ok(Event::Call(Call::ProcRaise(Pending::new(self, ProcRaise))))
+            }
+            Ok(vm::VmEvent::MemoryGrow(event)) => {
+                core::hint::black_box(event);
+                Ok(Event::Call(Call::MemoryGrow(Pending::new(
+                    self,
+                    MemoryGrowCall,
+                ))))
+            }
             Ok(vm::VmEvent::BudgetExpired(expired)) => Ok(Event::BudgetExpired(expired)),
             Ok(vm::VmEvent::ProcExit(status)) => Ok(Event::Exit(ProcExit::new(status))),
             Ok(vm::VmEvent::Done) => Ok(Event::Done),
@@ -195,10 +161,6 @@ pub struct ProcExit {
 impl ProcExit {
     const fn new(status: u32) -> Self {
         Self { status }
-    }
-
-    pub const fn status(self) -> u32 {
-        self.status
     }
 
     pub const fn as_protocol_status(self) -> Option<ProcExitStatus> {
@@ -275,25 +237,6 @@ impl From<vm::PathOp> for PathKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SocketKind {
-    SockAccept,
-    SockRecv,
-    SockSend,
-    SockShutdown,
-}
-
-impl From<vm::SocketOp> for SocketKind {
-    fn from(value: vm::SocketOp) -> Self {
-        match value {
-            vm::SocketOp::SockAccept => Self::SockAccept,
-            vm::SocketOp::SockRecv => Self::SockRecv,
-            vm::SocketOp::SockSend => Self::SockSend,
-            vm::SocketOp::SockShutdown => Self::SockShutdown,
-        }
-    }
-}
-
 pub struct Payload {
     raw: vm::InlinePayload,
 }
@@ -311,14 +254,6 @@ pub struct FdWrite {
 impl Pending<'_, '_, FdWrite> {
     pub const fn fd(&self) -> u8 {
         self.call.call.fd()
-    }
-
-    pub fn payload_len(&self) -> Result<usize, Error> {
-        Ok(self.vm().fd_write_total_len(self.call.call)? as usize)
-    }
-
-    pub fn copy_payload_into(&self, out: &mut [u8]) -> Result<usize, Error> {
-        self.vm().copy_fd_write_payload(self.call.call, out)
     }
 
     pub fn payload(&self) -> Result<Payload, Error> {
@@ -402,6 +337,10 @@ impl Pending<'_, '_, ClockTimeGet> {
         self.call.call.clock_id()
     }
 
+    pub const fn precision(&self) -> u64 {
+        self.call.call.precision()
+    }
+
     pub fn complete(self, nanos: u64, errno: u32) -> Result<(), Error> {
         self.complete_with(|vm, call| vm.complete_clock_time_get(call.call, nanos, errno))
     }
@@ -426,10 +365,6 @@ pub struct RandomGet {
 }
 
 impl Pending<'_, '_, RandomGet> {
-    pub const fn len(&self) -> u32 {
-        self.call.call.buf_len()
-    }
-
     pub const fn buf_len(&self) -> u32 {
         self.call.call.buf_len()
     }
@@ -439,36 +374,19 @@ impl Pending<'_, '_, RandomGet> {
     }
 }
 
-pub struct SchedYield {
-    _private: (),
-}
-
-impl Pending<'_, '_, SchedYield> {
-    pub fn complete(self, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, _| vm.complete_sched_yield(errno))
-    }
-}
+pub struct SchedYield;
 
 pub struct Path {
     call: vm::PathCall,
-    full: bool,
 }
 
 impl Pending<'_, '_, Path> {
-    pub const fn is_full(&self) -> bool {
-        self.call.full
-    }
-
     pub fn kind(&self) -> PathKind {
         self.call.call.kind().into()
     }
 
     pub fn fd(&self) -> Result<u8, Error> {
         self.call.call.fd()
-    }
-
-    pub fn arg_i32(&self, index: usize) -> Result<u32, Error> {
-        self.call.call.arg_i32(index)
     }
 
     pub fn arg_i64(&self, index: usize) -> Result<u64, Error> {
@@ -479,113 +397,12 @@ impl Pending<'_, '_, Path> {
         self.vm().path_bytes(self.call.call)
     }
 
-    pub fn complete_errno(self, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| {
-            if call.full {
-                vm.complete_path_full(call.call, errno)
-            } else {
-                vm.complete_path_minimal(call.call, errno)
-            }
-        })
-    }
-
     pub fn complete_path_open(self, opened_fd: u32, errno: u32) -> Result<(), Error> {
         self.complete_with(|vm, call| vm.complete_path_open(call.call, opened_fd, errno))
     }
-
-    pub fn complete_fd_prestat_get(self, name_len: u32, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.complete_fd_prestat_get(call.call, name_len, errno))
-    }
-
-    pub fn complete_fd_prestat_dir_name(self, name: &[u8], errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.complete_fd_prestat_dir_name(call.call, name, errno))
-    }
-
-    pub fn complete_fd_filestat_get(self, stat: FileStat, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.complete_fd_filestat_get(call.call, stat, errno))
-    }
-
-    pub fn complete_path_filestat_get(self, stat: FileStat, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.complete_path_filestat_get(call.call, stat, errno))
-    }
-
-    pub fn complete_path_readlink(self, target: &[u8], errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.complete_path_readlink(call.call, target, errno))
-    }
-
-    pub fn complete_fd_readdir(self, bytes: &[u8], errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.complete_fd_readdir(call.call, bytes, errno))
-    }
-
-    pub fn complete_fd_pread(self, bytes: &[u8], errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.complete_fd_pread(call.call, bytes, errno))
-    }
-
-    pub fn complete_fd_pwrite(self, written: u32, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.complete_fd_pwrite(call.call, written, errno))
-    }
-
-    pub fn complete_fd_seek(self, offset: u64, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.complete_fd_seek(call.call, offset, errno))
-    }
-
-    pub fn complete_fd_tell(self, offset: u64, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.complete_fd_tell(call.call, offset, errno))
-    }
 }
 
-pub struct Socket {
-    call: vm::SocketCall,
-}
-
-impl Pending<'_, '_, Socket> {
-    pub fn kind(&self) -> SocketKind {
-        self.call.call.kind().into()
-    }
-
-    pub fn fd(&self) -> Result<u8, Error> {
-        self.call.call.fd()
-    }
-
-    pub fn payload(&self) -> Result<Payload, Error> {
-        Ok(Payload {
-            raw: self.vm().sock_send_payload(self.call.call)?,
-        })
-    }
-
-    pub fn payload_len(&self) -> Result<usize, Error> {
-        Ok(self.vm().sock_send_total_len(self.call.call)? as usize)
-    }
-
-    pub fn copy_payload_into(&self, out: &mut [u8]) -> Result<usize, Error> {
-        self.vm().copy_sock_send_payload(self.call.call, out)
-    }
-
-    pub fn max_recv_len(&self) -> Result<usize, Error> {
-        let (_, max_len) = self.vm().sock_recv_iovec(self.call.call)?;
-        Ok(max_len as usize)
-    }
-
-    pub fn complete_errno(self, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.complete_socket(call.call, errno))
-    }
-
-    pub fn complete_sock_send(self, written: u32, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.complete_sock_send(call.call, written, errno))
-    }
-
-    pub fn complete_sock_recv(self, bytes: &[u8], ro_flags: u32, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.complete_sock_recv(call.call, bytes, ro_flags, errno))
-    }
-
-    pub fn complete_sock_shutdown(self, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.complete_sock_shutdown(call.call, errno))
-    }
-
-    pub fn complete_sock_accept(self, accepted_fd: u32, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.complete_sock_accept(call.call, accepted_fd, errno))
-    }
-}
+pub struct Socket;
 
 pub struct ArgsSizesGet {
     call: vm::ArgsSizesGetCall,
@@ -604,6 +421,10 @@ pub struct ArgsGet {
 }
 
 impl Pending<'_, '_, ArgsGet> {
+    pub const fn max_len(&self) -> u8 {
+        u8::MAX
+    }
+
     pub fn complete(self, args: &[&[u8]], errno: u32) -> Result<(), Error> {
         self.complete_with(|vm, call| vm.complete_args_get(call.call, args, errno))
     }
@@ -626,35 +447,15 @@ pub struct EnvironGet {
 }
 
 impl Pending<'_, '_, EnvironGet> {
+    pub const fn max_len(&self) -> u8 {
+        u8::MAX
+    }
+
     pub fn complete(self, environ: &[(&[u8], &[u8])], errno: u32) -> Result<(), Error> {
         self.complete_with(|vm, call| vm.complete_environ_get(call.call, environ, errno))
     }
 }
 
-pub struct ProcRaise {
-    code: u32,
-}
+pub struct ProcRaise;
 
-impl Pending<'_, '_, ProcRaise> {
-    pub const fn code(&self) -> u32 {
-        self.call.code
-    }
-
-    pub fn complete(self, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, _| vm.complete_proc_raise(errno))
-    }
-}
-
-pub struct MemoryGrowCall {
-    event: MemoryGrow,
-}
-
-impl Pending<'_, '_, MemoryGrowCall> {
-    pub const fn event(&self) -> MemoryGrow {
-        self.call.event
-    }
-
-    pub fn complete(self) -> Result<MemoryGrow, Error> {
-        self.complete_with(|vm, _| vm.complete_memory_grow_event())
-    }
-}
+pub struct MemoryGrowCall;
