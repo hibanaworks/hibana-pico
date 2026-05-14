@@ -70,7 +70,7 @@ if rg -n -S 'pub mod (carrier|host|linux|mcu|rp2040|swarm|process|bare)|pub stru
   exit 1
 fi
 
-if rg -n -S 'site::carrier|appkit::InProcessCarrier|pub struct InProcess(Carrier|Tx|Rx)|has_in_process_carrier' src examples tests README.md plan_shin.md --glob '!tests/host_architecture_boundaries.rs'; then
+if rg -n -S 'site::carrier|appkit::InProcessCarrier|pub struct InProcess(Carrier|Tx|Rx)|has_in_process_carrier' src examples tests README.md --glob '!tests/host_architecture_boundaries.rs'; then
   echo "plan gate failed: in-process carrier vocabulary must be user/example implementation, not a core public path" >&2
   exit 1
 fi

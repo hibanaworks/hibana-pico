@@ -1,6 +1,147 @@
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_std)]
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_main)]
 
+use core::convert::Infallible;
+
+use baker_firmware::{
+    BakerArtifacts, BakerCapsuleFacts, BakerChoreoFsRouteBreak, BakerChoreoFsRouteContinue,
+    BakerPlacement, DriverImage, EngineImage, FD_WRITE_RIGHT, WASM_CHOREOFS_TRAFFIC,
+};
+use hibana::g;
+use hibana_pico::{
+    appkit,
+    choreography::protocol::{
+        EngineReq, EngineRet, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET, LABEL_WASI_PATH_OPEN,
+        LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF, LABEL_WASI_POLL_ONEOFF_RET,
+    },
+};
+
+const TRAFFIC_DEVICE: appkit::ObjectSpec = appkit::ObjectSpec::new(
+    b"device/traffic",
+    appkit::ObjectId(1),
+    appkit::FdSpec::new(3, FD_WRITE_RIGHT, 1),
+);
+static OBJECT_FACTS: appkit::ObjectSpecSet<1> = appkit::ObjectSpecSet::new([TRAFFIC_DEVICE]);
+
+pub struct ChoreoFsTraffic;
+pub struct ChoreoFsTrafficLocal;
+
+impl appkit::Capsule for ChoreoFsTraffic {
+    type Universe = appkit::BuiltInUniverse;
+    type Placement = BakerPlacement;
+    type Local = ChoreoFsTrafficLocal;
+    type Report = Infallible;
+
+    fn choreography() -> impl hibana::substrate::program::Projectable<Self::Universe> {
+        let path_open = g::seq(
+            g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>, 1>(),
+            g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>, 1>(),
+        );
+        let write_wait = || {
+            g::seq(
+                g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 1>(),
+                g::seq(
+                    g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 1>(
+                    ),
+                    g::seq(
+                        g::send::<
+                            g::Role<1>,
+                            g::Role<0>,
+                            g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>,
+                            1,
+                        >(),
+                        g::send::<
+                            g::Role<0>,
+                            g::Role<1>,
+                            g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>,
+                            1,
+                        >(),
+                    ),
+                ),
+            )
+        };
+        let admitted_cycle = || {
+            g::route(
+                g::seq(
+                    g::send::<g::Role<1>, g::Role<1>, BakerChoreoFsRouteContinue, 1>(),
+                    write_wait(),
+                ),
+                g::send::<g::Role<1>, g::Role<1>, BakerChoreoFsRouteBreak, 1>(),
+            )
+        };
+        g::seq(path_open, admitted_cycle())
+    }
+}
+
+impl BakerCapsuleFacts for ChoreoFsTraffic {
+    type DriverArtifact = appkit::NoWasi;
+    type EngineArtifact = appkit::WasiImage<'static>;
+
+    const DRIVER_IMAGE_ID: appkit::ImageId = appkit::ImageId(10);
+    const ENGINE_IMAGE_ID: appkit::ImageId = appkit::ImageId(11);
+
+    fn driver_facts() -> appkit::DriverFacts<'static> {
+        OBJECT_FACTS.driver_facts()
+    }
+}
+
+impl appkit::Localside<ChoreoFsTraffic> for ChoreoFsTrafficLocal {
+    fn engine<'endpoint, 'guest, const ROLE: u8>(
+        ctx: appkit::EngineCtx<'endpoint, 'guest, ChoreoFsTraffic, ROLE>,
+    ) -> impl core::future::Future<Output = Infallible> {
+        async move {
+            #[cfg(feature = "wasm-engine-core")]
+            {
+                if ROLE == 1 && ctx.artifact_len() != 0 {
+                    return baker_firmware::baker_drive_wasi_engine(ctx).await;
+                }
+            }
+            ctx.pending().await
+        }
+    }
+
+    fn driver<'a, const ROLE: u8>(
+        ctx: appkit::DriverCtx<'a, ChoreoFsTraffic, ROLE>,
+    ) -> impl core::future::Future<Output = Infallible> {
+        async move {
+            if ROLE == 0 && !ctx.choreofs().entries().is_empty() {
+                return baker_firmware::baker_choreofs_driver(ctx).await;
+            }
+            ctx.pending().await
+        }
+    }
+
+    fn boundary<'a, const ROLE: u8>(
+        ctx: appkit::BoundaryCtx<'a, ChoreoFsTraffic, ROLE>,
+    ) -> impl core::future::Future<Output = Infallible> {
+        ctx.pending()
+    }
+
+    fn link<'a, const ROLE: u8>(
+        ctx: appkit::LinkCtx<'a, ChoreoFsTraffic, ROLE>,
+    ) -> impl core::future::Future<Output = Infallible> {
+        ctx.pending()
+    }
+
+    fn supervisor<'a, const ROLE: u8>(
+        ctx: appkit::SupervisorCtx<'a, ChoreoFsTraffic, ROLE>,
+    ) -> impl core::future::Future<Output = Infallible> {
+        ctx.pending()
+    }
+}
+
+impl appkit::ArtifactForImage<ChoreoFsTraffic, DriverImage> for BakerArtifacts {
+    fn artifact_for_image(&self) -> appkit::NoWasi {
+        appkit::NoWasi
+    }
+}
+
+impl appkit::ArtifactForImage<ChoreoFsTraffic, EngineImage> for BakerArtifacts {
+    fn artifact_for_image(&self) -> appkit::WasiImage<'static> {
+        appkit::WasiImage::from_static(WASM_CHOREOFS_TRAFFIC)
+    }
+}
+
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
@@ -10,16 +151,16 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn baker_selected_run() -> ! {
-    baker_firmware::run_choreofs_traffic()
+    baker_firmware::run::<ChoreoFsTraffic>()
 }
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
 fn main() {
-    baker_firmware::run_choreofs_traffic()
+    baker_firmware::run::<ChoreoFsTraffic>()
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> ! {
-    baker_firmware::run_choreofs_traffic()
+    baker_firmware::run::<ChoreoFsTraffic>()
 }

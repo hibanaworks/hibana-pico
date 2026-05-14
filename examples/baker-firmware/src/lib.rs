@@ -8,12 +8,9 @@ use core::{
 use core::{assert, assert_eq};
 use hibana::{
     g,
-    substrate::{
-        cap::{
-            GenericCapToken,
-            advanced::{LoopBreakKind, LoopContinueKind},
-        },
-        program::Projectable,
+    substrate::cap::{
+        GenericCapToken,
+        advanced::{LoopBreakKind, LoopContinueKind},
     },
 };
 #[cfg(feature = "wasm-engine-core")]
@@ -27,28 +24,25 @@ use hibana_pico::{
         LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF, LABEL_WASI_POLL_ONEOFF_RET, MemFence,
         MemFenceReason, PathOpened, PollReady,
     },
-    site,
 };
 
-pub struct BakerTraffic;
-pub struct BakerChoreoFsTraffic;
-pub struct BakerChoreoFsTrafficLoop;
-pub struct BakerFailSafe;
-pub struct BakerRecovery;
-pub struct BakerManyReentry;
 pub struct BakerPlacement;
-pub struct BakerControlLocal;
-pub struct BakerManyReentryLocal;
-pub struct BakerChoreoFsLocal;
 pub struct BakerArtifacts;
 
-mod image {
-    pub struct Driver;
-    pub struct Engine;
+pub struct DriverImage;
+pub struct EngineImage;
+
+impl DriverImage {
+    pub const fn new() -> Self {
+        Self
+    }
 }
 
-type DriverImage = site::Local<image::Driver>;
-type EngineImage = site::Local<image::Engine>;
+impl EngineImage {
+    pub const fn new() -> Self {
+        Self
+    }
+}
 
 mod rp2040_sio {
     use core::cell::Cell;
@@ -525,11 +519,11 @@ static VECTOR_TABLE: VectorTable = VectorTable {
     external_irqs: [default_handler; 32],
 };
 
-const RESULT_SUCCESS: u32 = 0x4849_4f4b;
+pub const RESULT_SUCCESS: u32 = 0x4849_4f4b;
 const RESULT_FAILURE: u32 = 0x4849_4641;
-const RESULT_FAIL_SAFE_OK: u32 = 0x4849_4653;
-const RESULT_RECOVERY_OK: u32 = 0x4849_5243;
-const RESULT_MANY_REENTRY_OK: u32 = 0x4849_524d;
+pub const RESULT_FAIL_SAFE_OK: u32 = 0x4849_4653;
+pub const RESULT_RECOVERY_OK: u32 = 0x4849_5243;
+pub const RESULT_MANY_REENTRY_OK: u32 = 0x4849_524d;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const STAGE_CORE0_START: u32 = 0x4849_0001;
@@ -690,7 +684,7 @@ const GREEN_LED_PIN: u8 = 22;
 const ORANGE_LED_PIN: u8 = 21;
 const RED_LED_PIN: u8 = 20;
 const BAKER_LED_PREOPEN_FD: u8 = 9;
-const FD_WRITE_RIGHT: u64 = 1 << 6;
+pub const FD_WRITE_RIGHT: u64 = 1 << 6;
 const CHOREOFS_REENTRY_CYCLES: u32 = 3;
 const CHOREOFS_WRITES_PER_CYCLE: u32 = 3;
 const CHOREOFS_EXPECTED_PATH_OPENS: u32 = 1;
@@ -699,231 +693,36 @@ const CHOREOFS_EXPECTED_POLLS: u32 = CHOREOFS_EXPECTED_FD_WRITES;
 const CHOREOFS_VISUAL_READY_CYCLES: u32 = 1;
 #[cfg(feature = "wasm-engine-core")]
 const BAKER_LINK_WASM_FUEL_PER_ACTIVATION: u32 = 250_000;
-const LABEL_BAKER_CHOREOFS_ROUTE_CONTINUE: u8 = 120;
-const LABEL_BAKER_CHOREOFS_ROUTE_BREAK: u8 = 121;
+pub const LABEL_BAKER_CHOREOFS_ROUTE_CONTINUE: u8 = 120;
+pub const LABEL_BAKER_CHOREOFS_ROUTE_BREAK: u8 = 121;
 
-type BakerChoreoFsRouteContinue = g::Msg<
+pub type BakerChoreoFsRouteContinue = g::Msg<
     { LABEL_BAKER_CHOREOFS_ROUTE_CONTINUE },
     GenericCapToken<LoopContinueKind>,
     LoopContinueKind,
 >;
-type BakerChoreoFsRouteBreak =
+pub type BakerChoreoFsRouteBreak =
     g::Msg<{ LABEL_BAKER_CHOREOFS_ROUTE_BREAK }, GenericCapToken<LoopBreakKind>, LoopBreakKind>;
 
 #[cfg(feature = "embed-wasip1-artifacts")]
-const WASM_CHOREOFS_TRAFFIC: &[u8] = include_bytes!(concat!(
+pub const WASM_CHOREOFS_TRAFFIC: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../target/wasip1-apps/wasm32-wasip1/release/wasip1-led-choreofs-traffic-cycle.wasm"
 ));
 #[cfg(not(feature = "embed-wasip1-artifacts"))]
-const WASM_CHOREOFS_TRAFFIC: &[u8] = &[];
+pub const WASM_CHOREOFS_TRAFFIC: &[u8] = &[];
 
-const TRAFFIC_DEVICE: appkit::ObjectSpec = appkit::ObjectSpec::new(
-    b"device/traffic",
-    appkit::ObjectId(1),
-    appkit::FdSpec::new(3, FD_WRITE_RIGHT, 1),
-);
-static BAKER_OBJECT_FACTS: appkit::ObjectSpecSet<1> = appkit::ObjectSpecSet::new([TRAFFIC_DEVICE]);
+pub trait BakerCapsuleFacts: appkit::Capsule<Placement = BakerPlacement> {
+    type DriverArtifact;
+    type EngineArtifact;
 
-trait BakerImageFacts {
+    const DRIVER_IMAGE_ID: appkit::ImageId;
+    const ENGINE_IMAGE_ID: appkit::ImageId;
+    const SUCCESS_RESULT: u32 = RESULT_SUCCESS;
+    const CHOREOFS_VISUAL_LOOP: bool = false;
+
     fn driver_facts() -> appkit::DriverFacts<'static> {
         appkit::DriverFacts::EMPTY
-    }
-
-    fn choreofs_visual_loop() -> bool {
-        false
-    }
-
-    fn success_result() -> u32 {
-        RESULT_SUCCESS
-    }
-}
-
-impl BakerImageFacts for BakerTraffic {}
-impl BakerImageFacts for BakerFailSafe {
-    fn success_result() -> u32 {
-        RESULT_FAIL_SAFE_OK
-    }
-}
-impl BakerImageFacts for BakerRecovery {
-    fn success_result() -> u32 {
-        RESULT_RECOVERY_OK
-    }
-}
-impl BakerImageFacts for BakerManyReentry {
-    fn success_result() -> u32 {
-        RESULT_MANY_REENTRY_OK
-    }
-}
-
-impl BakerImageFacts for BakerChoreoFsTraffic {
-    fn driver_facts() -> appkit::DriverFacts<'static> {
-        BAKER_OBJECT_FACTS.driver_facts()
-    }
-}
-
-impl BakerImageFacts for BakerChoreoFsTrafficLoop {
-    fn driver_facts() -> appkit::DriverFacts<'static> {
-        BAKER_OBJECT_FACTS.driver_facts()
-    }
-
-    fn choreofs_visual_loop() -> bool {
-        true
-    }
-}
-
-impl appkit::Capsule for BakerTraffic {
-    type Universe = appkit::BuiltInUniverse;
-    type Placement = BakerPlacement;
-    type Local = BakerControlLocal;
-    type Report = core::convert::Infallible;
-
-    fn choreography() -> impl Projectable<Self::Universe> {
-        g::seq(
-            g::send::<g::Role<1>, g::Role<0>, EngineAbortBeginControl, 0>(),
-            g::seq(
-                g::send::<g::Role<1>, g::Role<0>, EngineAbortMsg, 0>(),
-                g::seq(
-                    g::send::<g::Role<0>, g::Role<1>, EngineAbortFenceControl, 0>(),
-                    g::send::<g::Role<1>, g::Role<0>, EngineAbortAckControl, 0>(),
-                ),
-            ),
-        )
-    }
-}
-
-impl appkit::Capsule for BakerChoreoFsTraffic {
-    type Universe = appkit::BuiltInUniverse;
-    type Placement = BakerPlacement;
-    type Local = BakerChoreoFsLocal;
-    type Report = core::convert::Infallible;
-
-    fn choreography() -> impl Projectable<Self::Universe> {
-        let path_open = g::seq(
-            g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>, 1>(),
-            g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>, 1>(),
-        );
-        let write_wait = || {
-            g::seq(
-                g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 1>(),
-                g::seq(
-                    g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 1>(
-                    ),
-                    g::seq(
-                        g::send::<
-                            g::Role<1>,
-                            g::Role<0>,
-                            g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>,
-                            1,
-                        >(),
-                        g::send::<
-                            g::Role<0>,
-                            g::Role<1>,
-                            g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>,
-                            1,
-                        >(),
-                    ),
-                ),
-            )
-        };
-        let admitted_cycle = || {
-            g::route(
-                g::seq(
-                    g::send::<g::Role<1>, g::Role<1>, BakerChoreoFsRouteContinue, 1>(),
-                    write_wait(),
-                ),
-                g::send::<g::Role<1>, g::Role<1>, BakerChoreoFsRouteBreak, 1>(),
-            )
-        };
-        g::seq(path_open, admitted_cycle())
-    }
-}
-
-impl appkit::Capsule for BakerChoreoFsTrafficLoop {
-    type Universe = appkit::BuiltInUniverse;
-    type Placement = BakerPlacement;
-    type Local = BakerChoreoFsLocal;
-    type Report = core::convert::Infallible;
-
-    fn choreography() -> impl Projectable<Self::Universe> {
-        <BakerChoreoFsTraffic as appkit::Capsule>::choreography()
-    }
-}
-
-impl appkit::Capsule for BakerFailSafe {
-    type Universe = appkit::BuiltInUniverse;
-    type Placement = BakerPlacement;
-    type Local = BakerControlLocal;
-    type Report = core::convert::Infallible;
-
-    fn choreography() -> impl Projectable<Self::Universe> {
-        g::seq(
-            g::send::<g::Role<1>, g::Role<0>, EngineAbortBeginControl, 0>(),
-            g::seq(
-                g::send::<g::Role<1>, g::Role<0>, EngineAbortMsg, 0>(),
-                g::seq(
-                    g::send::<g::Role<0>, g::Role<1>, EngineAbortFenceControl, 0>(),
-                    g::send::<g::Role<1>, g::Role<0>, EngineAbortAckControl, 0>(),
-                ),
-            ),
-        )
-    }
-}
-
-impl appkit::Capsule for BakerRecovery {
-    type Universe = appkit::BuiltInUniverse;
-    type Placement = BakerPlacement;
-    type Local = BakerControlLocal;
-    type Report = core::convert::Infallible;
-
-    fn choreography() -> impl Projectable<Self::Universe> {
-        g::seq(
-            g::send::<g::Role<1>, g::Role<0>, EngineAbortBeginControl, 0>(),
-            g::seq(
-                g::send::<g::Role<1>, g::Role<0>, EngineAbortMsg, 0>(),
-                g::seq(
-                    g::send::<g::Role<0>, g::Role<1>, EngineAbortFenceControl, 0>(),
-                    g::send::<g::Role<1>, g::Role<0>, EngineAbortAckControl, 0>(),
-                ),
-            ),
-        )
-    }
-}
-
-impl appkit::Capsule for BakerManyReentry {
-    type Universe = appkit::BuiltInUniverse;
-    type Placement = BakerPlacement;
-    type Local = BakerManyReentryLocal;
-    type Report = core::convert::Infallible;
-
-    fn choreography() -> impl Projectable<Self::Universe> {
-        g::seq(
-            g::send::<g::Role<1>, g::Role<0>, EngineAbortBeginControl, 0>(),
-            g::seq(
-                g::send::<g::Role<1>, g::Role<0>, EngineAbortMsg, 0>(),
-                g::seq(
-                    g::send::<g::Role<0>, g::Role<1>, EngineAbortFenceControl, 0>(),
-                    g::seq(
-                        g::send::<g::Role<1>, g::Role<0>, EngineAbortAckControl, 0>(),
-                        g::seq(
-                            g::send::<g::Role<1>, g::Role<0>, EngineAbortBeginControl, 1>(),
-                            g::seq(
-                                g::send::<g::Role<1>, g::Role<0>, EngineAbortMsg, 1>(),
-                                g::seq(
-                                    g::send::<
-                                        g::Role<0>,
-                                        g::Role<1>,
-                                        g::Msg<LABEL_MEM_FENCE, MemFence>,
-                                        1,
-                                    >(),
-                                    g::send::<g::Role<1>, g::Role<0>, EngineAbortAckControl, 1>(),
-                                ),
-                            ),
-                        ),
-                    ),
-                ),
-            ),
-        )
     }
 }
 
@@ -941,101 +740,11 @@ where
     }
 }
 
-impl<C> appkit::Localside<C> for BakerControlLocal
-where
-    C: appkit::Capsule<Local = BakerControlLocal> + BakerImageFacts,
-{
-    fn engine<'endpoint, 'guest, const ROLE: u8>(
-        ctx: appkit::EngineCtx<'endpoint, 'guest, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        async move {
-            if ROLE == 1 {
-                return baker_control_engine_one_cycle(ctx).await;
-            }
-            ctx.pending().await
-        }
-    }
-
-    fn driver<'a, const ROLE: u8>(
-        ctx: appkit::DriverCtx<'a, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        async move {
-            if ROLE == 0 {
-                return baker_control_driver_one_cycle(ctx).await;
-            }
-            ctx.pending().await
-        }
-    }
-
-    fn boundary<'a, const ROLE: u8>(
-        ctx: appkit::BoundaryCtx<'a, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        ctx.pending()
-    }
-
-    fn link<'a, const ROLE: u8>(
-        ctx: appkit::LinkCtx<'a, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        ctx.pending()
-    }
-
-    fn supervisor<'a, const ROLE: u8>(
-        ctx: appkit::SupervisorCtx<'a, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        ctx.pending()
-    }
-}
-
-impl<C> appkit::Localside<C> for BakerManyReentryLocal
-where
-    C: appkit::Capsule<Local = BakerManyReentryLocal> + BakerImageFacts,
-{
-    fn engine<'endpoint, 'guest, const ROLE: u8>(
-        ctx: appkit::EngineCtx<'endpoint, 'guest, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        async move {
-            if ROLE == 1 {
-                return baker_many_reentry_engine(ctx).await;
-            }
-            ctx.pending().await
-        }
-    }
-
-    fn driver<'a, const ROLE: u8>(
-        ctx: appkit::DriverCtx<'a, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        async move {
-            if ROLE == 0 {
-                return baker_many_reentry_driver(ctx).await;
-            }
-            ctx.pending().await
-        }
-    }
-
-    fn boundary<'a, const ROLE: u8>(
-        ctx: appkit::BoundaryCtx<'a, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        ctx.pending()
-    }
-
-    fn link<'a, const ROLE: u8>(
-        ctx: appkit::LinkCtx<'a, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        ctx.pending()
-    }
-
-    fn supervisor<'a, const ROLE: u8>(
-        ctx: appkit::SupervisorCtx<'a, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        ctx.pending()
-    }
-}
-
-async fn baker_control_engine_one_cycle<C, const ROLE: u8>(
+pub async fn baker_control_engine_one_cycle<C, const ROLE: u8>(
     mut ctx: appkit::EngineCtx<'_, '_, C, ROLE>,
 ) -> core::convert::Infallible
 where
-    C: appkit::Capsule<Local = BakerControlLocal> + BakerImageFacts,
+    C: BakerCapsuleFacts,
 {
     baker_engine_send_abort_begin(&mut ctx).await;
     baker_engine_send_abort_reason(&mut ctx, 1).await;
@@ -1045,11 +754,11 @@ where
     core::future::pending::<core::convert::Infallible>().await
 }
 
-async fn baker_control_driver_one_cycle<C, const ROLE: u8>(
+pub async fn baker_control_driver_one_cycle<C, const ROLE: u8>(
     mut ctx: appkit::DriverCtx<'_, C, ROLE>,
 ) -> core::convert::Infallible
 where
-    C: appkit::Capsule<Local = BakerControlLocal> + BakerImageFacts,
+    C: BakerCapsuleFacts,
 {
     baker_driver_recv_abort_begin(&mut ctx).await;
     baker_driver_recv_abort_reason(&mut ctx).await;
@@ -1057,15 +766,15 @@ where
     baker_driver_send_abort_fence(&mut ctx).await;
     baker_driver_recv_abort_ack(&mut ctx).await;
     mark_stage(STAGE_RUNTIME_READY);
-    mark_result(C::success_result());
+    mark_result(C::SUCCESS_RESULT);
     core::future::pending::<core::convert::Infallible>().await
 }
 
-async fn baker_many_reentry_engine<C, const ROLE: u8>(
+pub async fn baker_many_reentry_engine<C, const ROLE: u8>(
     mut ctx: appkit::EngineCtx<'_, '_, C, ROLE>,
 ) -> core::convert::Infallible
 where
-    C: appkit::Capsule<Local = BakerManyReentryLocal> + BakerImageFacts,
+    C: BakerCapsuleFacts,
 {
     baker_engine_send_abort_begin(&mut ctx).await;
     baker_engine_send_abort_reason(&mut ctx, 1).await;
@@ -1079,11 +788,11 @@ where
     core::future::pending::<core::convert::Infallible>().await
 }
 
-async fn baker_many_reentry_driver<C, const ROLE: u8>(
+pub async fn baker_many_reentry_driver<C, const ROLE: u8>(
     mut ctx: appkit::DriverCtx<'_, C, ROLE>,
 ) -> core::convert::Infallible
 where
-    C: appkit::Capsule<Local = BakerManyReentryLocal> + BakerImageFacts,
+    C: BakerCapsuleFacts,
 {
     baker_driver_recv_abort_begin(&mut ctx).await;
     baker_driver_recv_abort_reason(&mut ctx).await;
@@ -1096,7 +805,7 @@ where
     baker_driver_send_mem_fence(&mut ctx).await;
     baker_driver_recv_abort_ack(&mut ctx).await;
     mark_stage(STAGE_RUNTIME_READY);
-    mark_result(C::success_result());
+    mark_result(C::SUCCESS_RESULT);
     core::future::pending::<core::convert::Infallible>().await
 }
 
@@ -1239,60 +948,12 @@ where
     }
 }
 
-impl<C> appkit::Localside<C> for BakerChoreoFsLocal
-where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
-{
-    fn engine<'endpoint, 'guest, const ROLE: u8>(
-        ctx: appkit::EngineCtx<'endpoint, 'guest, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        async move {
-            #[cfg(feature = "wasm-engine-core")]
-            {
-                if ROLE == 1 && ctx.artifact_len() != 0 {
-                    return baker_drive_wasi_engine(ctx).await;
-                }
-            }
-            ctx.pending().await
-        }
-    }
-
-    fn driver<'a, const ROLE: u8>(
-        ctx: appkit::DriverCtx<'a, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        async move {
-            if ROLE == 0 && !ctx.choreofs().entries().is_empty() {
-                return baker_choreofs_driver(ctx).await;
-            }
-            ctx.pending().await
-        }
-    }
-
-    fn boundary<'a, const ROLE: u8>(
-        ctx: appkit::BoundaryCtx<'a, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        ctx.pending()
-    }
-
-    fn link<'a, const ROLE: u8>(
-        ctx: appkit::LinkCtx<'a, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        ctx.pending()
-    }
-
-    fn supervisor<'a, const ROLE: u8>(
-        ctx: appkit::SupervisorCtx<'a, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        ctx.pending()
-    }
-}
-
 #[cfg(feature = "wasm-engine-core")]
-async fn baker_drive_wasi_engine<C, const ROLE: u8>(
+pub async fn baker_drive_wasi_engine<C, const ROLE: u8>(
     mut ctx: appkit::EngineCtx<'_, '_, C, ROLE>,
 ) -> core::convert::Infallible
 where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
+    C: BakerCapsuleFacts,
 {
     record_choreofs_engine_status(CHOREOFS_ENGINE_STARTED);
     record_choreofs_engine_status(CHOREOFS_ENGINE_DRIVE_BEGIN);
@@ -1315,7 +976,7 @@ where
     }
     record_choreofs_engine_status(CHOREOFS_ENGINE_PATH_OPEN_DONE);
 
-    let visual_loop = C::choreofs_visual_loop();
+    let visual_loop = C::CHOREOFS_VISUAL_LOOP;
     let mut cycle = 0u32;
     loop {
         let mut write_index = 0u32;
@@ -1362,7 +1023,7 @@ where
 async fn baker_engine_resolve_choreofs_loop<C, const ROLE: u8>(
     ctx: &mut appkit::EngineCtx<'_, '_, C, ROLE>,
 ) where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
+    C: BakerCapsuleFacts,
 {
     record_choreofs_engine_status(CHOREOFS_ENGINE_LOOP_CONTINUE_BEGIN);
     let flow = match ctx.endpoint().flow::<BakerChoreoFsRouteContinue>() {
@@ -1381,11 +1042,11 @@ async fn baker_engine_resolve_choreofs_loop<C, const ROLE: u8>(
     record_choreofs_engine_status(CHOREOFS_ENGINE_LOOP_CONTINUE_DONE);
 }
 
-async fn baker_choreofs_driver<C, const ROLE: u8>(
+pub async fn baker_choreofs_driver<C, const ROLE: u8>(
     mut ctx: appkit::DriverCtx<'_, C, ROLE>,
 ) -> core::convert::Infallible
 where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
+    C: BakerCapsuleFacts,
 {
     reset_choreofs_markers();
     record_choreofs_engine_status(CHOREOFS_DRIVER_STARTED);
@@ -1398,7 +1059,7 @@ where
         (3u8, b"2".as_slice()),
         (3u8, b"4".as_slice()),
     ];
-    let visual_loop = C::choreofs_visual_loop();
+    let visual_loop = C::CHOREOFS_VISUAL_LOOP;
     let mut cycle = 0u32;
     loop {
         let mut index = 0usize;
@@ -1412,7 +1073,7 @@ where
         if visual_loop && cycle == CHOREOFS_VISUAL_READY_CYCLES {
             record_stack_high_water();
             mark_stage(STAGE_RUNTIME_READY);
-            mark_result(C::success_result());
+            mark_result(C::SUCCESS_RESULT);
         }
         if !visual_loop && cycle >= CHOREOFS_REENTRY_CYCLES {
             break;
@@ -1422,7 +1083,7 @@ where
     baker_driver_assert_choreofs_counts();
     record_stack_high_water();
     mark_stage(STAGE_RUNTIME_READY);
-    mark_result(C::success_result());
+    mark_result(C::SUCCESS_RESULT);
     core::future::pending::<core::convert::Infallible>().await
 }
 
@@ -1430,7 +1091,7 @@ async fn baker_recv_engine_req<C, const ROLE: u8, const LABEL: u8>(
     ctx: &mut appkit::DriverCtx<'_, C, ROLE>,
 ) -> EngineReq
 where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
+    C: BakerCapsuleFacts,
 {
     match ctx.endpoint().recv::<g::Msg<LABEL, EngineReq>>().await {
         Ok(request) => request,
@@ -1447,7 +1108,7 @@ async fn baker_offer_engine_req<C, const ROLE: u8, const LABEL: u8>(
     ctx: &mut appkit::DriverCtx<'_, C, ROLE>,
 ) -> EngineReq
 where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
+    C: BakerCapsuleFacts,
 {
     record_choreofs_driver_trace(0x5745_c000 | LABEL as u32);
     let branch = match ctx.endpoint().offer().await {
@@ -1483,7 +1144,7 @@ async fn baker_send_engine_ret<C, const ROLE: u8, const LABEL: u8>(
     ctx: &mut appkit::DriverCtx<'_, C, ROLE>,
     reply: EngineRet,
 ) where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
+    C: BakerCapsuleFacts,
 {
     let flow = match ctx.endpoint().flow::<g::Msg<LABEL, EngineRet>>() {
         Ok(flow) => flow,
@@ -1502,7 +1163,7 @@ async fn baker_driver_path_open<C, const ROLE: u8>(
     ctx: &mut appkit::DriverCtx<'_, C, ROLE>,
 ) -> appkit::LedgerFdFact
 where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
+    C: BakerCapsuleFacts,
 {
     let request = match baker_recv_engine_req::<C, ROLE, LABEL_WASI_PATH_OPEN>(ctx).await {
         EngineReq::PathOpen(request) => request,
@@ -1547,7 +1208,7 @@ async fn baker_driver_fd_write<C, const ROLE: u8>(
     expected_fd: u8,
     expected_payload: &[u8],
 ) where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
+    C: BakerCapsuleFacts,
 {
     let request = match baker_offer_engine_req::<C, ROLE, LABEL_WASI_FD_WRITE>(ctx).await {
         EngineReq::FdWrite(request) => request,
@@ -1565,7 +1226,7 @@ async fn baker_handle_fd_write<C, const ROLE: u8>(
     expected_fd: u8,
     expected_payload: &[u8],
 ) where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
+    C: BakerCapsuleFacts,
 {
     if request.fd() != expected_fd || request.as_bytes() != expected_payload {
         core::hint::black_box((request, expected_fd));
@@ -1606,7 +1267,7 @@ async fn baker_handle_fd_write<C, const ROLE: u8>(
 
 async fn baker_driver_poll_oneoff<C, const ROLE: u8>(ctx: &mut appkit::DriverCtx<'_, C, ROLE>)
 where
-    C: appkit::Capsule<Local = BakerChoreoFsLocal> + BakerImageFacts,
+    C: BakerCapsuleFacts,
 {
     let request = match baker_recv_engine_req::<C, ROLE, LABEL_WASI_POLL_ONEOFF>(ctx).await {
         EngineReq::PollOneoff(request) => request,
@@ -1665,66 +1326,6 @@ fn baker_driver_assert_choreofs_counts() {
     {
         core::hint::black_box((path_opens, writes, polls, led_mask, seen_led_mask));
         runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-    }
-}
-
-impl<I> appkit::ArtifactForImage<BakerTraffic, I> for BakerArtifacts
-where
-    I: appkit::LogicalImage<BakerTraffic, Artifact = appkit::NoWasi>,
-{
-    fn artifact_for_image(&self) -> I::Artifact {
-        appkit::NoWasi
-    }
-}
-
-impl appkit::ArtifactForImage<BakerChoreoFsTraffic, DriverImage> for BakerArtifacts {
-    fn artifact_for_image(&self) -> appkit::NoWasi {
-        appkit::NoWasi
-    }
-}
-
-impl appkit::ArtifactForImage<BakerChoreoFsTraffic, EngineImage> for BakerArtifacts {
-    fn artifact_for_image(&self) -> appkit::WasiImage<'static> {
-        appkit::WasiImage::from_static(WASM_CHOREOFS_TRAFFIC)
-    }
-}
-
-impl appkit::ArtifactForImage<BakerChoreoFsTrafficLoop, DriverImage> for BakerArtifacts {
-    fn artifact_for_image(&self) -> appkit::NoWasi {
-        appkit::NoWasi
-    }
-}
-
-impl appkit::ArtifactForImage<BakerChoreoFsTrafficLoop, EngineImage> for BakerArtifacts {
-    fn artifact_for_image(&self) -> appkit::WasiImage<'static> {
-        appkit::WasiImage::from_static(WASM_CHOREOFS_TRAFFIC)
-    }
-}
-
-impl<I> appkit::ArtifactForImage<BakerFailSafe, I> for BakerArtifacts
-where
-    I: appkit::LogicalImage<BakerFailSafe, Artifact = appkit::NoWasi>,
-{
-    fn artifact_for_image(&self) -> I::Artifact {
-        appkit::NoWasi
-    }
-}
-
-impl<I> appkit::ArtifactForImage<BakerRecovery, I> for BakerArtifacts
-where
-    I: appkit::LogicalImage<BakerRecovery, Artifact = appkit::NoWasi>,
-{
-    fn artifact_for_image(&self) -> I::Artifact {
-        appkit::NoWasi
-    }
-}
-
-impl<I> appkit::ArtifactForImage<BakerManyReentry, I> for BakerArtifacts
-where
-    I: appkit::LogicalImage<BakerManyReentry, Artifact = appkit::NoWasi>,
-{
-    fn artifact_for_image(&self) -> I::Artifact {
-        appkit::NoWasi
     }
 }
 
@@ -2092,16 +1693,19 @@ fn check_report<R, I>(report: &appkit::RunReport<R, I>, required_role: u8) {
     );
 }
 
-impl appkit::LogicalImage<BakerTraffic> for DriverImage {
-    type Artifact = appkit::NoWasi;
+impl<C> appkit::LogicalImage<C> for DriverImage
+where
+    C: BakerCapsuleFacts,
+{
+    type Artifact = C::DriverArtifact;
     type Exit<R> = appkit::RunReport<R, Self>;
     type Carrier<'a> = rp2040_sio::SioTransport;
 
-    const IMAGE_ID: appkit::ImageId = appkit::ImageId(0);
+    const IMAGE_ID: appkit::ImageId = C::DRIVER_IMAGE_ID;
     const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
     const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(0);
     const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
-    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(appkit::ImageId(1));
+    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(C::ENGINE_IMAGE_ID);
 
     fn init() -> Self {
         Self::new()
@@ -2126,368 +1730,23 @@ impl appkit::LogicalImage<BakerTraffic> for DriverImage {
     }
 
     fn driver_facts() -> appkit::DriverFacts<'static> {
-        <BakerTraffic as BakerImageFacts>::driver_facts()
+        C::driver_facts()
     }
 }
 
-impl appkit::LogicalImage<BakerTraffic> for EngineImage {
-    type Artifact = appkit::NoWasi;
+impl<C> appkit::LogicalImage<C> for EngineImage
+where
+    C: BakerCapsuleFacts,
+{
+    type Artifact = C::EngineArtifact;
     type Exit<R> = appkit::RunReport<R, Self>;
     type Carrier<'a> = rp2040_sio::SioTransport;
 
-    const IMAGE_ID: appkit::ImageId = appkit::ImageId(1);
+    const IMAGE_ID: appkit::ImageId = C::ENGINE_IMAGE_ID;
     const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
     const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(1);
     const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
-    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(appkit::ImageId(0));
-
-    fn init() -> Self {
-        Self::new()
-    }
-
-    fn safe_state(&mut self) {
-        mark_safe_state();
-    }
-
-    fn carrier<'a>() -> Self::Carrier<'a> {
-        rp2040_sio::SioTransport::new()
-    }
-
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
-        baker_engine_attach_storage()
-    }
-
-    #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        baker_wasi_guest_storage::<ROLE>()
-    }
-}
-
-impl appkit::LogicalImage<BakerChoreoFsTraffic> for DriverImage {
-    type Artifact = appkit::NoWasi;
-    type Exit<R> = appkit::RunReport<R, Self>;
-    type Carrier<'a> = rp2040_sio::SioTransport;
-
-    const IMAGE_ID: appkit::ImageId = appkit::ImageId(10);
-    const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
-    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(0);
-    const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
-    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(appkit::ImageId(11));
-
-    fn init() -> Self {
-        Self::new()
-    }
-
-    fn safe_state(&mut self) {
-        mark_safe_state();
-    }
-
-    fn carrier<'a>() -> Self::Carrier<'a> {
-        rp2040_sio::SioTransport::new()
-    }
-
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
-        baker_driver_attach_storage()
-    }
-
-    #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        baker_wasi_guest_storage::<ROLE>()
-    }
-
-    fn driver_facts() -> appkit::DriverFacts<'static> {
-        <BakerChoreoFsTraffic as BakerImageFacts>::driver_facts()
-    }
-}
-
-impl appkit::LogicalImage<BakerChoreoFsTraffic> for EngineImage {
-    type Artifact = appkit::WasiImage<'static>;
-    type Exit<R> = appkit::RunReport<R, Self>;
-    type Carrier<'a> = rp2040_sio::SioTransport;
-
-    const IMAGE_ID: appkit::ImageId = appkit::ImageId(11);
-    const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
-    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(1);
-    const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
-    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(appkit::ImageId(10));
-
-    fn init() -> Self {
-        Self::new()
-    }
-
-    fn safe_state(&mut self) {
-        mark_safe_state();
-    }
-
-    fn carrier<'a>() -> Self::Carrier<'a> {
-        rp2040_sio::SioTransport::new()
-    }
-
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
-        baker_engine_attach_storage()
-    }
-
-    #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        baker_wasi_guest_storage::<ROLE>()
-    }
-}
-
-impl appkit::LogicalImage<BakerChoreoFsTrafficLoop> for DriverImage {
-    type Artifact = appkit::NoWasi;
-    type Exit<R> = appkit::RunReport<R, Self>;
-    type Carrier<'a> = rp2040_sio::SioTransport;
-
-    const IMAGE_ID: appkit::ImageId = appkit::ImageId(12);
-    const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
-    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(0);
-    const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
-    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(appkit::ImageId(13));
-
-    fn init() -> Self {
-        Self::new()
-    }
-
-    fn safe_state(&mut self) {
-        mark_safe_state();
-    }
-
-    fn carrier<'a>() -> Self::Carrier<'a> {
-        rp2040_sio::SioTransport::new()
-    }
-
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
-        baker_driver_attach_storage()
-    }
-
-    #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        baker_wasi_guest_storage::<ROLE>()
-    }
-
-    fn driver_facts() -> appkit::DriverFacts<'static> {
-        <BakerChoreoFsTrafficLoop as BakerImageFacts>::driver_facts()
-    }
-}
-
-impl appkit::LogicalImage<BakerChoreoFsTrafficLoop> for EngineImage {
-    type Artifact = appkit::WasiImage<'static>;
-    type Exit<R> = appkit::RunReport<R, Self>;
-    type Carrier<'a> = rp2040_sio::SioTransport;
-
-    const IMAGE_ID: appkit::ImageId = appkit::ImageId(13);
-    const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
-    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(1);
-    const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
-    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(appkit::ImageId(12));
-
-    fn init() -> Self {
-        Self::new()
-    }
-
-    fn safe_state(&mut self) {
-        mark_safe_state();
-    }
-
-    fn carrier<'a>() -> Self::Carrier<'a> {
-        rp2040_sio::SioTransport::new()
-    }
-
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
-        baker_engine_attach_storage()
-    }
-
-    #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        baker_wasi_guest_storage::<ROLE>()
-    }
-}
-
-impl appkit::LogicalImage<BakerFailSafe> for DriverImage {
-    type Artifact = appkit::NoWasi;
-    type Exit<R> = appkit::RunReport<R, Self>;
-    type Carrier<'a> = rp2040_sio::SioTransport;
-
-    const IMAGE_ID: appkit::ImageId = appkit::ImageId(20);
-    const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
-    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(0);
-    const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
-    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(appkit::ImageId(21));
-
-    fn init() -> Self {
-        Self::new()
-    }
-
-    fn safe_state(&mut self) {
-        mark_safe_state();
-    }
-
-    fn carrier<'a>() -> Self::Carrier<'a> {
-        rp2040_sio::SioTransport::new()
-    }
-
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
-        baker_driver_attach_storage()
-    }
-
-    #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        baker_wasi_guest_storage::<ROLE>()
-    }
-}
-
-impl appkit::LogicalImage<BakerFailSafe> for EngineImage {
-    type Artifact = appkit::NoWasi;
-    type Exit<R> = appkit::RunReport<R, Self>;
-    type Carrier<'a> = rp2040_sio::SioTransport;
-
-    const IMAGE_ID: appkit::ImageId = appkit::ImageId(21);
-    const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
-    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(1);
-    const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
-    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(appkit::ImageId(20));
-
-    fn init() -> Self {
-        Self::new()
-    }
-
-    fn safe_state(&mut self) {
-        mark_safe_state();
-    }
-
-    fn carrier<'a>() -> Self::Carrier<'a> {
-        rp2040_sio::SioTransport::new()
-    }
-
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
-        baker_engine_attach_storage()
-    }
-
-    #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        baker_wasi_guest_storage::<ROLE>()
-    }
-}
-
-impl appkit::LogicalImage<BakerRecovery> for DriverImage {
-    type Artifact = appkit::NoWasi;
-    type Exit<R> = appkit::RunReport<R, Self>;
-    type Carrier<'a> = rp2040_sio::SioTransport;
-
-    const IMAGE_ID: appkit::ImageId = appkit::ImageId(30);
-    const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
-    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(0);
-    const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
-    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(appkit::ImageId(31));
-
-    fn init() -> Self {
-        Self::new()
-    }
-
-    fn safe_state(&mut self) {
-        mark_safe_state();
-    }
-
-    fn carrier<'a>() -> Self::Carrier<'a> {
-        rp2040_sio::SioTransport::new()
-    }
-
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
-        baker_driver_attach_storage()
-    }
-
-    #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        baker_wasi_guest_storage::<ROLE>()
-    }
-}
-
-impl appkit::LogicalImage<BakerRecovery> for EngineImage {
-    type Artifact = appkit::NoWasi;
-    type Exit<R> = appkit::RunReport<R, Self>;
-    type Carrier<'a> = rp2040_sio::SioTransport;
-
-    const IMAGE_ID: appkit::ImageId = appkit::ImageId(31);
-    const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
-    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(1);
-    const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
-    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(appkit::ImageId(30));
-
-    fn init() -> Self {
-        Self::new()
-    }
-
-    fn safe_state(&mut self) {
-        mark_safe_state();
-    }
-
-    fn carrier<'a>() -> Self::Carrier<'a> {
-        rp2040_sio::SioTransport::new()
-    }
-
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
-        baker_engine_attach_storage()
-    }
-
-    #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        baker_wasi_guest_storage::<ROLE>()
-    }
-}
-
-impl appkit::LogicalImage<BakerManyReentry> for DriverImage {
-    type Artifact = appkit::NoWasi;
-    type Exit<R> = appkit::RunReport<R, Self>;
-    type Carrier<'a> = rp2040_sio::SioTransport;
-
-    const IMAGE_ID: appkit::ImageId = appkit::ImageId(40);
-    const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
-    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(0);
-    const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
-    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(appkit::ImageId(41));
-
-    fn init() -> Self {
-        Self::new()
-    }
-
-    fn safe_state(&mut self) {
-        mark_safe_state();
-    }
-
-    fn carrier<'a>() -> Self::Carrier<'a> {
-        rp2040_sio::SioTransport::new()
-    }
-
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
-        baker_driver_attach_storage()
-    }
-
-    #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        baker_wasi_guest_storage::<ROLE>()
-    }
-}
-
-impl appkit::LogicalImage<BakerManyReentry> for EngineImage {
-    type Artifact = appkit::NoWasi;
-    type Exit<R> = appkit::RunReport<R, Self>;
-    type Carrier<'a> = rp2040_sio::SioTransport;
-
-    const IMAGE_ID: appkit::ImageId = appkit::ImageId(41);
-    const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
-    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(1);
-    const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
-    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(appkit::ImageId(40));
+    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(C::DRIVER_IMAGE_ID);
 
     fn init() -> Self {
         Self::new()
@@ -2514,141 +1773,30 @@ impl appkit::LogicalImage<BakerManyReentry> for EngineImage {
 
 static ARTIFACTS: BakerArtifacts = BakerArtifacts;
 
-pub fn run_traffic() -> ! {
+pub fn run<C>() -> !
+where
+    C: BakerCapsuleFacts,
+    BakerArtifacts:
+        appkit::ArtifactForImage<C, DriverImage> + appkit::ArtifactForImage<C, EngineImage>,
+    <DriverImage as appkit::LogicalImage<C>>::Artifact: appkit::ArtifactEvidence,
+    <EngineImage as appkit::LogicalImage<C>>::Artifact: appkit::ArtifactEvidence,
+{
     mark_stage(STAGE_RUNTIME_BEGIN);
     if rp2040_sio::core_id() == 0 {
-        let mut report =
-            appkit::run::<DriverImage, BakerTraffic>(<BakerArtifacts as appkit::ArtifactBundle<
-                BakerTraffic,
-            >>::for_image::<DriverImage>(
-                &ARTIFACTS
-            ));
-        check_report(&report, 0);
-        <DriverImage as appkit::LogicalImage<BakerTraffic>>::safe_state(report.image_mut());
-    } else {
-        let mut report =
-            appkit::run::<EngineImage, BakerTraffic>(<BakerArtifacts as appkit::ArtifactBundle<
-                BakerTraffic,
-            >>::for_image::<EngineImage>(
-                &ARTIFACTS
-            ));
-        check_report(&report, 1);
-        <EngineImage as appkit::LogicalImage<BakerTraffic>>::safe_state(report.image_mut());
-    }
-    mark_stage(STAGE_RUNTIME_READY);
-    mark_result(RESULT_SUCCESS);
-    park()
-}
-
-pub fn run_choreofs_traffic() -> ! {
-    mark_stage(STAGE_RUNTIME_BEGIN);
-    if rp2040_sio::core_id() == 0 {
-        let report = appkit::run::<DriverImage, BakerChoreoFsTraffic>(appkit::NoWasi);
-        check_report(&report, 0);
-    } else {
-        let report = appkit::run::<EngineImage, BakerChoreoFsTraffic>(
-            <BakerArtifacts as appkit::ArtifactBundle<BakerChoreoFsTraffic>>::for_image::<
-                EngineImage,
-            >(&ARTIFACTS),
-        );
-        check_report(&report, 1);
-    }
-    mark_stage(STAGE_RUNTIME_READY);
-    mark_result(RESULT_SUCCESS);
-    park()
-}
-
-pub fn run_choreofs_traffic_loop() -> ! {
-    mark_stage(STAGE_RUNTIME_BEGIN);
-    if rp2040_sio::core_id() == 0 {
-        let report = appkit::run::<DriverImage, BakerChoreoFsTrafficLoop>(appkit::NoWasi);
-        check_report(&report, 0);
-    } else {
-        let report = appkit::run::<EngineImage, BakerChoreoFsTrafficLoop>(
-            <BakerArtifacts as appkit::ArtifactBundle<BakerChoreoFsTrafficLoop>>::for_image::<
-                EngineImage,
-            >(&ARTIFACTS),
-        );
-        check_report(&report, 1);
-    }
-    mark_stage(STAGE_RUNTIME_READY);
-    mark_result(RESULT_SUCCESS);
-    park()
-}
-
-pub fn run_fail_safe() -> ! {
-    mark_stage(STAGE_RUNTIME_BEGIN);
-    if rp2040_sio::core_id() == 0 {
-        let mut report =
-            appkit::run::<DriverImage, BakerFailSafe>(<BakerArtifacts as appkit::ArtifactBundle<
-                BakerFailSafe,
-            >>::for_image::<DriverImage>(
-                &ARTIFACTS
-            ));
-        check_report(&report, 0);
-        <DriverImage as appkit::LogicalImage<BakerFailSafe>>::safe_state(report.image_mut());
-    } else {
-        let mut report =
-            appkit::run::<EngineImage, BakerFailSafe>(<BakerArtifacts as appkit::ArtifactBundle<
-                BakerFailSafe,
-            >>::for_image::<EngineImage>(
-                &ARTIFACTS
-            ));
-        check_report(&report, 1);
-        <EngineImage as appkit::LogicalImage<BakerFailSafe>>::safe_state(report.image_mut());
-    }
-    mark_stage(STAGE_RUNTIME_READY);
-    mark_result(RESULT_FAIL_SAFE_OK);
-    park()
-}
-
-pub fn run_recovery() -> ! {
-    mark_stage(STAGE_RUNTIME_BEGIN);
-    if rp2040_sio::core_id() == 0 {
-        let mut report =
-            appkit::run::<DriverImage, BakerRecovery>(<BakerArtifacts as appkit::ArtifactBundle<
-                BakerRecovery,
-            >>::for_image::<DriverImage>(
-                &ARTIFACTS
-            ));
-        check_report(&report, 0);
-        <DriverImage as appkit::LogicalImage<BakerRecovery>>::safe_state(report.image_mut());
-    } else {
-        let mut report =
-            appkit::run::<EngineImage, BakerRecovery>(<BakerArtifacts as appkit::ArtifactBundle<
-                BakerRecovery,
-            >>::for_image::<EngineImage>(
-                &ARTIFACTS
-            ));
-        check_report(&report, 1);
-        <EngineImage as appkit::LogicalImage<BakerRecovery>>::safe_state(report.image_mut());
-    }
-    mark_stage(STAGE_RUNTIME_READY);
-    mark_result(RESULT_RECOVERY_OK);
-    park()
-}
-
-pub fn run_many_reentry() -> ! {
-    mark_stage(STAGE_RUNTIME_BEGIN);
-    if rp2040_sio::core_id() == 0 {
-        let mut report = appkit::run::<DriverImage, BakerManyReentry>(
-            <BakerArtifacts as appkit::ArtifactBundle<BakerManyReentry>>::for_image::<DriverImage>(
-                &ARTIFACTS,
-            ),
+        let mut report = appkit::run::<DriverImage, C>(
+            <BakerArtifacts as appkit::ArtifactBundle<C>>::for_image::<DriverImage>(&ARTIFACTS),
         );
         check_report(&report, 0);
-        <DriverImage as appkit::LogicalImage<BakerManyReentry>>::safe_state(report.image_mut());
+        <DriverImage as appkit::LogicalImage<C>>::safe_state(report.image_mut());
     } else {
-        let mut report = appkit::run::<EngineImage, BakerManyReentry>(
-            <BakerArtifacts as appkit::ArtifactBundle<BakerManyReentry>>::for_image::<EngineImage>(
-                &ARTIFACTS,
-            ),
+        let mut report = appkit::run::<EngineImage, C>(
+            <BakerArtifacts as appkit::ArtifactBundle<C>>::for_image::<EngineImage>(&ARTIFACTS),
         );
         check_report(&report, 1);
-        <EngineImage as appkit::LogicalImage<BakerManyReentry>>::safe_state(report.image_mut());
+        <EngineImage as appkit::LogicalImage<C>>::safe_state(report.image_mut());
     }
     mark_stage(STAGE_RUNTIME_READY);
-    mark_result(RESULT_MANY_REENTRY_OK);
+    mark_result(C::SUCCESS_RESULT);
     park()
 }
 

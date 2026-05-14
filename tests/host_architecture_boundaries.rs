@@ -274,21 +274,14 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         baker,
         &[
             "rp2040_sio::core_id()",
-            "type DriverImage = site::Local<image::Driver>",
-            "type EngineImage = site::Local<image::Engine>",
+            "pub struct DriverImage;",
+            "pub struct EngineImage;",
             "pub struct SioTransport",
-            "appkit::run::<DriverImage, BakerTraffic>",
-            "appkit::run::<EngineImage, BakerTraffic>",
-            "appkit::run::<DriverImage, BakerChoreoFsTraffic>",
-            "appkit::run::<EngineImage, BakerChoreoFsTraffic>",
-            "appkit::run::<DriverImage, BakerChoreoFsTrafficLoop>",
-            "appkit::run::<EngineImage, BakerChoreoFsTrafficLoop>",
-            "appkit::run::<DriverImage, BakerFailSafe>",
-            "appkit::run::<DriverImage, BakerRecovery>",
-            "appkit::run::<DriverImage, BakerManyReentry>",
+            "pub trait BakerCapsuleFacts",
+            "appkit::run::<DriverImage, C>",
+            "appkit::run::<EngineImage, C>",
             "baker_control_driver_one_cycle",
             "baker_many_reentry_driver",
-            "g::send::<g::Role<0>, g::Role<1>, EngineAbortFenceControl, 0>()",
         ],
     );
     assert_absent(
@@ -305,43 +298,70 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "option_env!(\"HIBANA_BAKER_PATTERN\")",
             "run_selected_pattern",
             "fn main()",
+            "impl appkit::Capsule for",
         ],
     );
     assert_present(
         "examples/baker-firmware/src/bin/traffic.rs",
         traffic_bin,
-        &["baker_selected_run", "baker_firmware::run_traffic()"],
+        &[
+            "impl appkit::Capsule for Traffic",
+            "fn choreography()",
+            "impl appkit::Localside<Traffic> for TrafficLocal",
+            "baker_firmware::run::<Traffic>()",
+        ],
     );
     assert_present(
         "examples/baker-firmware/src/bin/choreofs_traffic.rs",
         choreofs_bin,
         &[
-            "baker_selected_run",
-            "baker_firmware::run_choreofs_traffic()",
+            "const TRAFFIC_DEVICE: appkit::ObjectSpec",
+            "impl appkit::Capsule for ChoreoFsTraffic",
+            "fn choreography()",
+            "impl appkit::Localside<ChoreoFsTraffic> for ChoreoFsTrafficLocal",
+            "baker_firmware::run::<ChoreoFsTraffic>()",
         ],
     );
     assert_present(
         "examples/baker-firmware/src/bin/choreofs_traffic_loop.rs",
         choreofs_loop_bin,
         &[
-            "baker_selected_run",
-            "baker_firmware::run_choreofs_traffic_loop()",
+            "const TRAFFIC_DEVICE: appkit::ObjectSpec",
+            "impl appkit::Capsule for ChoreoFsTrafficLoop",
+            "const CHOREOFS_VISUAL_LOOP: bool = true",
+            "impl appkit::Localside<ChoreoFsTrafficLoop> for ChoreoFsTrafficLoopLocal",
+            "baker_firmware::run::<ChoreoFsTrafficLoop>()",
         ],
     );
     assert_present(
         "examples/baker-firmware/src/bin/fail_safe.rs",
         fail_safe_bin,
-        &["baker_selected_run", "baker_firmware::run_fail_safe()"],
+        &[
+            "impl appkit::Capsule for FailSafe",
+            "const SUCCESS_RESULT: u32 = baker_firmware::RESULT_FAIL_SAFE_OK",
+            "impl appkit::Localside<FailSafe> for FailSafeLocal",
+            "baker_firmware::run::<FailSafe>()",
+        ],
     );
     assert_present(
         "examples/baker-firmware/src/bin/recovery.rs",
         recovery_bin,
-        &["baker_selected_run", "baker_firmware::run_recovery()"],
+        &[
+            "impl appkit::Capsule for Recovery",
+            "const SUCCESS_RESULT: u32 = baker_firmware::RESULT_RECOVERY_OK",
+            "impl appkit::Localside<Recovery> for RecoveryLocal",
+            "baker_firmware::run::<Recovery>()",
+        ],
     );
     assert_present(
         "examples/baker-firmware/src/bin/many_reentry.rs",
         many_reentry_bin,
-        &["baker_selected_run", "baker_firmware::run_many_reentry()"],
+        &[
+            "impl appkit::Capsule for ManyReentry",
+            "g::Msg<LABEL_MEM_FENCE, MemFence>",
+            "impl appkit::Localside<ManyReentry> for ManyReentryLocal",
+            "baker_firmware::run::<ManyReentry>()",
+        ],
     );
 }
 

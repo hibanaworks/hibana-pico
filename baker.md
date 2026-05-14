@@ -11,15 +11,15 @@ artifact contains two logical images:
 
 ```text
 examples/baker-firmware
-  src/lib.rs: shared Baker capsules, SIO carrier, markers, and reset support
-  src/bin/traffic.rs
-  src/bin/choreofs_traffic.rs
-  src/bin/choreofs_traffic_loop.rs
-  src/bin/fail_safe.rs
-  src/bin/recovery.rs
-  src/bin/many_reentry.rs
-  Core0 logical image: site::Local<image::Driver>
-  Core1 logical image: site::Local<image::Engine>
+  src/lib.rs: Baker SIO carrier, markers, reset support, logical image helpers
+  src/bin/traffic.rs: Capsule + choreography + Localside
+  src/bin/choreofs_traffic.rs: Capsule + choreography + Localside + ObjectSpec
+  src/bin/choreofs_traffic_loop.rs: Capsule + choreography + Localside + ObjectSpec
+  src/bin/fail_safe.rs: Capsule + choreography + Localside
+  src/bin/recovery.rs: Capsule + choreography + Localside
+  src/bin/many_reentry.rs: Capsule + choreography + Localside
+  Core0 logical image: DriverImage
+  Core1 logical image: EngineImage
 ```
 
 Both images are projections of the same raw Hibana choreography. Each
@@ -41,8 +41,8 @@ The current source map is:
 | AppKit capsule/logical-image substrate | `src/appkit.rs` |
 | Generic site marker | `src/site.rs` |
 | Baker-local RP2040 SIO carrier | `examples/baker-firmware/src/lib.rs` |
-| Baker shared capsules and logical images | `examples/baker-firmware/src/lib.rs` |
-| Baker validation entrypoints | `examples/baker-firmware/src/bin/*.rs` |
+| Baker logical-image/reset support | `examples/baker-firmware/src/lib.rs` |
+| Baker validation Capsules, choreography, Localside, ObjectSpec | `examples/baker-firmware/src/bin/*.rs` |
 | WASI P1 ChoreoFS traffic guest | `apps/wasip1/wasip1-smoke-apps/src/bin/wasip1-led-choreofs-traffic-cycle.rs` |
 | WASI P1 guest build gate | `scripts/check_wasip1_guest_builds.sh` |
 | Hardware proof runner | `scripts/run_baker_link_hardware_pattern.sh` |
