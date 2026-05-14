@@ -70,23 +70,23 @@ const WASM_CHOREOFS_TRAFFIC: &[u8] = include_bytes!(concat!(
 #[cfg(not(feature = "embed-wasip1-artifacts"))]
 const WASM_CHOREOFS_TRAFFIC: &[u8] = &[];
 
-const GREEN_LED: appkit::ObjectSpec = appkit::ObjectSpec::new(
+const GREEN_LED: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
     b"device/led/green",
     appkit::ObjectId(1),
     appkit::FdSpec::new(3, FD_WRITE_RIGHT, 1),
 );
-const YELLOW_LED: appkit::ObjectSpec = appkit::ObjectSpec::new(
+const YELLOW_LED: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
     b"device/led/yellow",
     appkit::ObjectId(2),
     appkit::FdSpec::new(4, FD_WRITE_RIGHT, 1),
 );
-const RED_LED: appkit::ObjectSpec = appkit::ObjectSpec::new(
+const RED_LED: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
     b"device/led/red",
     appkit::ObjectId(3),
     appkit::FdSpec::new(5, FD_WRITE_RIGHT, 1),
 );
-static OBJECT_FACTS: appkit::ObjectSpecSet<3> =
-    appkit::ObjectSpecSet::new([GREEN_LED, YELLOW_LED, RED_LED]);
+static OBJECT_FACTS: appkit::ChoreoFsObjectSet<3> =
+    appkit::ChoreoFsObjectSet::new([GREEN_LED, YELLOW_LED, RED_LED]);
 static LED_OBJECTS: [LedObject; 3] = [
     LedObject::new(appkit::ObjectId(1), GREEN_LED_PIN, GREEN_LED_MASK),
     LedObject::new(appkit::ObjectId(2), YELLOW_LED_PIN, YELLOW_LED_MASK),

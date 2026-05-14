@@ -622,37 +622,6 @@ pub struct WasiP1;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NoWasi;
 
-/// Guest artifact bytes handed to engine-side localside code.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct GuestArtifact<'a> {
-    bytes: Option<&'a [u8]>,
-}
-
-impl<'a> GuestArtifact<'a> {
-    pub const NONE: Self = Self { bytes: None };
-
-    pub const fn from_wasi(image: WasiImage<'a>) -> Self {
-        Self {
-            bytes: Some(image.bytes),
-        }
-    }
-
-    pub const fn bytes(self) -> Option<&'a [u8]> {
-        self.bytes
-    }
-
-    pub const fn byte_len(self) -> usize {
-        match self.bytes {
-            Some(bytes) => bytes.len(),
-            None => 0,
-        }
-    }
-
-    pub const fn is_wasi(self) -> bool {
-        self.bytes.is_some()
-    }
-}
-
 /// WASI Preview 1 imports required by a projected choreography.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WasiImports {
@@ -925,11 +894,20 @@ impl<R, I> FromRunReport<R, I> for RunReport<R, I> {
     }
 }
 
-/// Artifact evidence consumed by [`run`] while validating a logical image.
-pub trait ArtifactEvidence {
+mod artifact_seal {
+    pub trait Sealed {}
+}
+
+/// Internal artifact evidence consumed by [`run`] while validating a logical image.
+///
+/// This trait is public only as a sealed generic bound for wrappers that are
+/// themselves generic over a capsule. User code should select `WasiImage` or
+/// `NoWasi`; it cannot implement new artifact authority.
+#[doc(hidden)]
+pub trait ArtifactEvidence: artifact_seal::Sealed {
     fn byte_len(&self) -> usize;
-    fn guest_artifact(&self) -> GuestArtifact<'_>;
-    fn validate(&self, required: WasiImports) -> Result<(), ArtifactError>;
+    fn wasi_bytes(&self) -> Option<&[u8]>;
+    fn validate(&self, required: WasiImports) -> bool;
 }
 
 /// Endpoint/carrier facts validated for one logical image run.
@@ -1056,14 +1034,10 @@ const fn session_id_from_projection(projection: ProjectionCaps) -> u32 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ArtifactError {
-    Empty,
+enum ArtifactError {
     BadWasmMagic,
     MalformedWasm,
-    MissingWasip1Import,
-    MissingRequiredWasiImport,
     UnsupportedWasiImport,
-    ForbiddenPreview2Surface,
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
@@ -1267,19 +1241,19 @@ impl ArtifactEvidence for WasiImage<'_> {
         self.bytes.len()
     }
 
-    fn guest_artifact(&self) -> GuestArtifact<'_> {
-        GuestArtifact::from_wasi(*self)
+    fn wasi_bytes(&self) -> Option<&[u8]> {
+        Some(self.bytes)
     }
 
-    fn validate(&self, required: WasiImports) -> Result<(), ArtifactError> {
+    fn validate(&self, required: WasiImports) -> bool {
         if self.bytes.is_empty() {
-            return Err(ArtifactError::Empty);
+            return false;
         }
         if !self.bytes.starts_with(b"\0asm") {
-            return Err(ArtifactError::BadWasmMagic);
+            return false;
         }
         if !contains_bytes(self.bytes, b"wasi_snapshot_preview1") {
-            return Err(ArtifactError::MissingWasip1Import);
+            return false;
         }
         for forbidden in [
             b"wasi_snapshot_preview2".as_slice(),
@@ -1289,36 +1263,39 @@ impl ArtifactEvidence for WasiImage<'_> {
             b"component-model".as_slice(),
         ] {
             if contains_bytes(self.bytes, forbidden) {
-                return Err(ArtifactError::ForbiddenPreview2Surface);
+                return false;
             }
         }
-        let observed = parse_wasip1_imports(self.bytes)?;
+        let Ok(observed) = parse_wasip1_imports(self.bytes) else {
+            return false;
+        };
         if observed.is_empty() {
-            return Err(ArtifactError::MissingWasip1Import);
+            return false;
         }
         if !required.is_subset_of(observed) {
-            return Err(ArtifactError::MissingRequiredWasiImport);
+            return false;
         }
-        Ok(())
+        true
     }
 }
+
+impl artifact_seal::Sealed for WasiImage<'_> {}
 
 impl ArtifactEvidence for NoWasi {
     fn byte_len(&self) -> usize {
         0
     }
 
-    fn guest_artifact(&self) -> GuestArtifact<'_> {
-        GuestArtifact::NONE
+    fn wasi_bytes(&self) -> Option<&[u8]> {
+        None
     }
 
-    fn validate(&self, required: WasiImports) -> Result<(), ArtifactError> {
-        if !required.is_empty() {
-            return Err(ArtifactError::MissingRequiredWasiImport);
-        }
-        Ok(())
+    fn validate(&self, required: WasiImports) -> bool {
+        required.is_empty()
     }
 }
+
+impl artifact_seal::Sealed for NoWasi {}
 
 /// Metadata-derived capacity facts for a capsule program.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1880,7 +1857,7 @@ struct AttachProjectedRoles<
     rendezvous: hibana::substrate::ids::RendezvousId,
     session: hibana::substrate::ids::SessionId,
     endpoint_carrier: EndpointCarrierFacts,
-    guest_artifact: GuestArtifact<'guest>,
+    wasi_guest_bytes: Option<&'guest [u8]>,
     driver_facts: DriverFacts<'static>,
     count: u8,
     role_kinds: RoleKindCounts,
@@ -1940,14 +1917,15 @@ where
                 let ctx = EngineCtx::new(
                     endpoint_ctx,
                     self.endpoint_carrier,
-                    self.guest_artifact,
+                    self.wasi_guest_bytes,
                     ImageTy::wasi_guest_storage::<ROLE>(),
                 );
                 #[cfg(not(feature = "wasm-engine-core"))]
-                let ctx = EngineCtx::new(endpoint_ctx, self.endpoint_carrier, self.guest_artifact);
+                let ctx =
+                    EngineCtx::new(endpoint_ctx, self.endpoint_carrier, self.wasi_guest_bytes);
                 #[cfg(feature = "wasm-engine-core")]
                 {
-                    if self.guest_artifact.is_wasi() {
+                    if self.wasi_guest_bytes.is_some() {
                         #[cfg(any(test, not(target_os = "none")))]
                         self.tasks
                             .push(drive_canonical_wasi_engine::<C, ImageTy, ROLE>(ctx));
@@ -1970,7 +1948,7 @@ where
                 #[cfg(not(feature = "wasm-engine-core"))]
                 {
                     assert!(
-                        !self.guest_artifact.is_wasi(),
+                        self.wasi_guest_bytes.is_none(),
                         "WASI P1 logical image requires wasm-engine-core"
                     );
                     #[cfg(any(test, not(target_os = "none")))]
@@ -2044,7 +2022,7 @@ where
 fn attach_projected_roles<C, I>(
     program: &impl hibana::substrate::program::Projectable<C::Universe>,
     endpoint_carrier: EndpointCarrierFacts,
-    guest_artifact: GuestArtifact<'_>,
+    wasi_guest_bytes: Option<&[u8]>,
 ) -> AttachSummary
 where
     C: Capsule,
@@ -2121,7 +2099,7 @@ where
             rendezvous,
             session,
             endpoint_carrier,
-            guest_artifact,
+            wasi_guest_bytes,
             driver_facts: I::driver_facts(),
             count: 0,
             role_kinds: RoleKindCounts::default(),
@@ -2559,18 +2537,18 @@ impl FdSpec {
     }
 }
 
-/// Const helper for writing path/object and fd facts as one object.
+/// Const helper for writing ChoreoFS path/object and fd facts as one object.
 ///
-/// `ObjectSpec` is not a manifest and not an authority table. It only expands
+/// `ChoreoFsObject` is not a manifest and not an authority table. It only expands
 /// into [`ChoreoFsFact`] and [`LedgerFdFact`] for driver-local facts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ObjectSpec {
+pub struct ChoreoFsObject {
     path: &'static [u8],
     object: ObjectId,
     fd: FdSpec,
 }
 
-impl ObjectSpec {
+impl ChoreoFsObject {
     pub const fn new(path: &'static [u8], object: ObjectId, fd: FdSpec) -> Self {
         Self { path, object, fd }
     }
@@ -2596,15 +2574,15 @@ impl ObjectSpec {
     }
 }
 
-/// Bounded static expansion of object specs into driver facts.
+/// Bounded static expansion of ChoreoFS object facts into driver facts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ObjectSpecSet<const N: usize> {
+pub struct ChoreoFsObjectSet<const N: usize> {
     choreofs: [ChoreoFsFact<'static>; N],
     ledger: [LedgerFdFact; N],
 }
 
-impl<const N: usize> ObjectSpecSet<N> {
-    pub const fn new(specs: [ObjectSpec; N]) -> Self {
+impl<const N: usize> ChoreoFsObjectSet<N> {
+    pub const fn new(specs: [ChoreoFsObject; N]) -> Self {
         let mut choreofs = [ChoreoFsFact::EMPTY; N];
         let mut ledger = [LedgerFdFact::EMPTY; N];
         let mut idx = 0usize;
@@ -2824,7 +2802,7 @@ impl Drop for WasiGuestSlot<'_> {
 pub struct EngineCtx<'endpoint, 'guest, C: Capsule, const ROLE: u8> {
     endpoint: RoleEndpointCtx<'endpoint, C, ROLE>,
     endpoint_carrier: EndpointCarrierFacts,
-    guest_artifact: GuestArtifact<'guest>,
+    wasi_guest_bytes: Option<&'guest [u8]>,
     #[cfg(feature = "wasm-engine-core")]
     guest_storage: Option<WasiGuestStorage<'guest>>,
     #[cfg(feature = "wasm-engine-core")]
@@ -2835,13 +2813,13 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
     fn new(
         endpoint: RoleEndpointCtx<'endpoint, C, ROLE>,
         endpoint_carrier: EndpointCarrierFacts,
-        guest_artifact: GuestArtifact<'guest>,
+        wasi_guest_bytes: Option<&'guest [u8]>,
         #[cfg(feature = "wasm-engine-core")] guest_storage: WasiGuestStorage<'guest>,
     ) -> Self {
         Self {
             endpoint,
             endpoint_carrier,
-            guest_artifact,
+            wasi_guest_bytes,
             #[cfg(feature = "wasm-engine-core")]
             guest_storage: Some(guest_storage),
             #[cfg(feature = "wasm-engine-core")]
@@ -2851,14 +2829,6 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
 
     pub const fn endpoint_carrier(&self) -> EndpointCarrierFacts {
         self.endpoint_carrier
-    }
-
-    pub const fn artifact_len(&self) -> usize {
-        self.guest_artifact.byte_len()
-    }
-
-    pub const fn guest_artifact(&self) -> GuestArtifact<'guest> {
-        self.guest_artifact
     }
 
     pub const fn role(&self) -> u8 {
@@ -2935,7 +2905,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         &mut self,
         budget: BudgetRun,
     ) -> Result<WasiGuestStatus, WasiGuestError> {
-        let Some(bytes) = self.guest_artifact.bytes() else {
+        let Some(bytes) = self.wasi_guest_bytes else {
             return Err(WasiGuestError::NoWasiArtifact);
         };
         let mut guest_slot = match self.guest_slot.take() {
@@ -3443,9 +3413,9 @@ where
     let image_projection =
         derive_projection_caps_for_roles_from_program::<C>(&program, I::REQUESTED_ROLES);
     let artifact_len = artifact.byte_len();
-    let guest_artifact = artifact.guest_artifact();
+    let wasi_guest_bytes = artifact.wasi_bytes();
     assert!(
-        artifact.validate(image_projection.wasi_imports).is_ok(),
+        artifact.validate(image_projection.wasi_imports),
         "logical image artifact must be a WASI Preview 1 artifact or explicit NoWasi"
     );
     assert!(
@@ -3479,7 +3449,8 @@ where
         I::CARRIER,
         image_projection,
     );
-    let attach_summary = attach_projected_roles::<C, I>(&program, endpoint_carrier, guest_artifact);
+    let attach_summary =
+        attach_projected_roles::<C, I>(&program, endpoint_carrier, wasi_guest_bytes);
     assert!(
         attach_summary.endpoint_count == projected_roles.count(),
         "logical image projected roles must attach through SessionKit"
@@ -4479,11 +4450,10 @@ mod tests {
             TEST_ATTACHED_QUEUE_CARRIER,
             projection,
         );
-        let guest_artifact = GuestArtifact::from_wasi(WasiImage::from_static(module.as_slice()));
         let mut engine_ctx: EngineCtx<'_, '_, BridgeCapsule, 0> = EngineCtx::new(
             RoleEndpointCtx::new(engine_endpoint),
             endpoint_carrier,
-            guest_artifact,
+            Some(module.as_slice()),
             <crate::site::Local<BridgeImage> as LogicalImage<BridgeCapsule>>::wasi_guest_storage::<0>(
             ),
         );

@@ -676,8 +676,8 @@ const GPIO_PAD_DEFAULT: u32 = 0x56;
 
 const BAKER_SAFE_STATE_LED_PINS: [u8; 3] = [22, 21, 20];
 pub trait BakerCapsuleFacts: appkit::Capsule<Placement = BakerPlacement> {
-    type DriverArtifact;
-    type EngineArtifact;
+    type DriverArtifact: appkit::ArtifactEvidence;
+    type EngineArtifact: appkit::ArtifactEvidence;
 
     const DRIVER_IMAGE_ID: appkit::ImageId;
     const ENGINE_IMAGE_ID: appkit::ImageId;
@@ -1203,8 +1203,6 @@ where
     C: BakerCapsuleFacts,
     BakerArtifacts:
         appkit::ArtifactForImage<C, DriverImage> + appkit::ArtifactForImage<C, EngineImage>,
-    <DriverImage as appkit::LogicalImage<C>>::Artifact: appkit::ArtifactEvidence,
-    <EngineImage as appkit::LogicalImage<C>>::Artifact: appkit::ArtifactEvidence,
 {
     mark_stage(STAGE_RUNTIME_BEGIN);
     if rp2040_sio::core_id() == 0 {

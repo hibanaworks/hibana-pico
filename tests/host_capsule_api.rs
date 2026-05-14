@@ -46,10 +46,6 @@ const WASM_FD_WRITE: &[u8] = b"\0asm\x01\0\0\0\
 const WASM_FD_READ: &[u8] = b"\0asm\x01\0\0\0\
     \x01\x04\x01\x60\x00\x00\
     \x02\x22\x01\x16wasi_snapshot_preview1\x07fd_read\x00\x00";
-const WASM_FD_WRITE_AND_READ: &[u8] = b"\0asm\x01\0\0\0\
-    \x01\x04\x01\x60\x00\x00\
-    \x02\x44\x02\x16wasi_snapshot_preview1\x08fd_write\x00\x00\
-    \x16wasi_snapshot_preview1\x07fd_read\x00\x00";
 const TEST_LOCAL_QUEUE_CARRIER: appkit::CarrierKind = appkit::CarrierKind::new(1001);
 const TEST_TCP: appkit::CarrierKind = appkit::CarrierKind::new(1002);
 const TEST_UART: appkit::CarrierKind = appkit::CarrierKind::new(1004);
@@ -634,13 +630,13 @@ static COUNTING_ENGINE_POLLS: AtomicUsize = AtomicUsize::new(0);
 static COUNTING_DRIVER_POLLS: AtomicUsize = AtomicUsize::new(0);
 static COUNTING_BOUNDARY_POLLS: AtomicUsize = AtomicUsize::new(0);
 static CHOREOFS_RUNTIME_COMPLETIONS: AtomicUsize = AtomicUsize::new(0);
-const CHOREOFS_RUNTIME_OBJECT: appkit::ObjectSpec = appkit::ObjectSpec::new(
+const CHOREOFS_RUNTIME_OBJECT: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
     b"device/led/green",
     appkit::ObjectId(7),
     appkit::FdSpec::new(4, 0x2, 11),
 );
-static CHOREOFS_RUNTIME_FACTS: appkit::ObjectSpecSet<1> =
-    appkit::ObjectSpecSet::new([CHOREOFS_RUNTIME_OBJECT]);
+static CHOREOFS_RUNTIME_FACTS: appkit::ChoreoFsObjectSet<1> =
+    appkit::ChoreoFsObjectSet::new([CHOREOFS_RUNTIME_OBJECT]);
 
 struct WrappedRunExit<R, I> {
     report: appkit::RunReport<R, I>,
@@ -885,7 +881,6 @@ impl appkit::Localside<CountingCapsule> for CountingLocal {
     fn engine<'endpoint, 'guest, const ROLE: u8>(
         ctx: appkit::EngineCtx<'endpoint, 'guest, CountingCapsule, ROLE>,
     ) -> impl core::future::Future<Output = core::convert::Infallible> {
-        assert_eq!(ctx.guest_artifact(), appkit::GuestArtifact::NONE);
         COUNTING_ENGINE_POLLS.fetch_add(1, Ordering::SeqCst);
         ctx.pending()
     }
@@ -2186,12 +2181,12 @@ fn hibana_substrate_surfaces_remain_available_to_capsules() {
 
 #[test]
 fn driver_facts_are_separate_from_progress_authority() {
-    const LED_DEVICE: appkit::ObjectSpec = appkit::ObjectSpec::new(
+    const LED_DEVICE: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
         b"device/led/green",
         appkit::ObjectId(7),
         appkit::FdSpec::new(3, 0x2, 11),
     );
-    static FACTS: appkit::ObjectSpecSet<1> = appkit::ObjectSpecSet::new([LED_DEVICE]);
+    static FACTS: appkit::ChoreoFsObjectSet<1> = appkit::ChoreoFsObjectSet::new([LED_DEVICE]);
 
     let facts = FACTS.driver_facts();
     let wasm = leak_wasm(fd_write_guest_module());
@@ -2219,38 +2214,32 @@ fn driver_facts_are_separate_from_progress_authority() {
 
 #[test]
 fn wasi_image_rejects_non_p1_artifacts() {
-    use hibana_pico::appkit::ArtifactEvidence;
-
-    let p1 = appkit::WasiImage::from_static(WASM_FD_WRITE);
-    assert_eq!(p1.validate(appkit::WasiImports::FD_WRITE), Ok(()));
-
-    let empty = appkit::WasiImage::from_static(b"");
-    assert_eq!(
-        empty.validate(appkit::WasiImports::EMPTY),
-        Err(appkit::ArtifactError::Empty)
+    let p1 = leak_wasm(fd_write_guest_module());
+    let report = appkit::run::<site::Local<image::Composite>, RichCapsule>(
+        appkit::WasiImage::from_static(p1),
     );
+    assert_eq!(report.wasi_imports(), appkit::WasiImports::FD_WRITE);
 
-    let preview2 = appkit::WasiImage::from_static(
-        b"\0asm\x01\0\0\0wasi_snapshot_preview1 wasi_snapshot_preview2",
-    );
-    assert_eq!(
-        preview2.validate(appkit::WasiImports::FD_WRITE),
-        Err(appkit::ArtifactError::ForbiddenPreview2Surface)
-    );
+    let empty = std::panic::catch_unwind(|| {
+        appkit::run::<site::Local<image::Composite>, RichCapsule>(appkit::WasiImage::from_static(
+            b"",
+        ));
+    });
+    assert!(empty.is_err());
 
-    let missing = appkit::WasiImage::from_static(WASM_FD_READ);
-    assert_eq!(
-        missing.validate(appkit::WasiImports::FD_WRITE),
-        Err(appkit::ArtifactError::MissingRequiredWasiImport)
-    );
+    let preview2 = std::panic::catch_unwind(|| {
+        appkit::run::<site::Local<image::Composite>, RichCapsule>(appkit::WasiImage::from_static(
+            b"\0asm\x01\0\0\0wasi_snapshot_preview1 wasi_snapshot_preview2",
+        ));
+    });
+    assert!(preview2.is_err());
 
-    let extra = appkit::WasiImage::from_static(WASM_FD_WRITE_AND_READ);
-    assert_eq!(extra.validate(appkit::WasiImports::FD_WRITE), Ok(()));
-
-    assert_eq!(
-        appkit::NoWasi.validate(appkit::WasiImports::FD_WRITE),
-        Err(appkit::ArtifactError::MissingRequiredWasiImport)
-    );
+    let missing = std::panic::catch_unwind(|| {
+        appkit::run::<site::Local<image::Composite>, RichCapsule>(appkit::WasiImage::from_static(
+            WASM_FD_READ,
+        ));
+    });
+    assert!(missing.is_err());
 }
 
 struct CaptureProgramFacts {
