@@ -259,6 +259,72 @@ fn site_exposes_substrate_facts_not_protocol_authority() {
 }
 
 #[test]
+fn wasip1_guest_examples_live_under_examples_and_keep_socket_assets() {
+    let root_cargo = include_str!("../Cargo.toml");
+    let helper = include_str!("../examples/wasip1-guests/hibana-wasi-guest/src/lib.rs");
+    let net = include_str!("../examples/wasip1-guests/hibana-wasi-guest/src/net.rs");
+    let sys = include_str!("../examples/wasip1-guests/hibana-wasi-guest/src/sys.rs");
+    let smoke_manifest = include_str!("../examples/wasip1-guests/wasip1-smoke-apps/Cargo.toml");
+    let baker_guest_manifest = include_str!("../examples/baker-firmware/wasip1/traffic/Cargo.toml");
+
+    assert_present(
+        "examples/wasip1-guests/hibana-wasi-guest/src/lib.rs",
+        helper,
+        &["pub mod choreofs;", "pub mod net;"],
+    );
+    assert_present(
+        "examples/wasip1-guests/hibana-wasi-guest/src/net.rs",
+        net,
+        &[
+            "pub struct Datagram",
+            "pub struct Stream",
+            "pub struct Listener",
+            "sock_send_exact",
+            "sock_recv_checked",
+            "sock_accept_stream",
+        ],
+    );
+    assert_present(
+        "examples/wasip1-guests/hibana-wasi-guest/src/sys.rs",
+        sys,
+        &[
+            "fn sock_send",
+            "fn sock_recv",
+            "fn sock_shutdown",
+            "fn sock_accept",
+        ],
+    );
+    assert_present(
+        "examples/wasip1-guests/wasip1-smoke-apps/Cargo.toml",
+        smoke_manifest,
+        &[
+            "wasip1-std-sock-send-recv",
+            "wasip1-std-sock-accept-send-recv",
+            "wasip1-std-sock-accept-bad",
+            "wasip1-std-stream-control",
+        ],
+    );
+    assert_present(
+        "examples/baker-firmware/wasip1/traffic/Cargo.toml",
+        baker_guest_manifest,
+        &[
+            "name = \"baker-wasip1-traffic\"",
+            "wasip1-led-choreofs-traffic-cycle",
+            "../../../wasip1-guests/hibana-wasi-guest",
+        ],
+    );
+    assert_absent(
+        "Cargo.toml",
+        root_cargo,
+        &[
+            "apps/wasip1/hibana-wasi-guest",
+            "apps/wasip1/swarm-node-apps",
+            "apps/wasip1/wasip1-smoke-apps",
+        ],
+    );
+}
+
+#[test]
 fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
     let baker = include_str!("../examples/baker-firmware/src/lib.rs");
     let traffic_bin = include_str!("../examples/baker-firmware/src/bin/traffic.rs");
@@ -266,7 +332,7 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
     let choreofs_loop_bin =
         include_str!("../examples/baker-firmware/src/bin/choreofs_traffic_loop.rs");
     let choreofs_wasi_guest = include_str!(
-        "../apps/wasip1/wasip1-smoke-apps/src/bin/wasip1-led-choreofs-traffic-cycle.rs"
+        "../examples/baker-firmware/wasip1/traffic/src/bin/wasip1-led-choreofs-traffic-cycle.rs"
     );
     let fail_safe_bin = include_str!("../examples/baker-firmware/src/bin/fail_safe.rs");
     let recovery_bin = include_str!("../examples/baker-firmware/src/bin/recovery.rs");
@@ -283,8 +349,6 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "pub trait BakerCapsuleFacts",
             "appkit::run::<DriverImage, C>",
             "appkit::run::<EngineImage, C>",
-            "baker_control_driver_one_cycle",
-            "baker_many_reentry_driver",
         ],
     );
     assert_absent(
@@ -302,6 +366,17 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "run_selected_pattern",
             "fn main()",
             "impl appkit::Capsule for",
+            "const GREEN_LED: appkit::ObjectSpec",
+            "const YELLOW_LED: appkit::ObjectSpec",
+            "const RED_LED: appkit::ObjectSpec",
+            "BakerChoreoFsRouteContinue",
+            "BakerChoreoFsRouteBreak",
+            "baker_drive_wasi_engine",
+            "baker_choreofs_driver",
+            "baker_control_engine_one_cycle",
+            "baker_control_driver_one_cycle",
+            "baker_many_reentry_engine",
+            "baker_many_reentry_driver",
         ],
     );
     assert_present(
@@ -335,13 +410,29 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "const YELLOW_LED: appkit::ObjectSpec",
             "const RED_LED: appkit::ObjectSpec",
             "impl appkit::Capsule for ChoreoFsTrafficLoop",
-            "const CHOREOFS_VISUAL_LOOP: bool = true",
+            "const VISUAL_READY_CYCLES: u32 = 1",
             "impl appkit::Localside<ChoreoFsTrafficLoop> for ChoreoFsTrafficLoopLocal",
             "baker_firmware::run::<ChoreoFsTrafficLoop>()",
         ],
     );
+    assert_absent(
+        "examples/baker-firmware/src/bin/choreofs_traffic.rs",
+        choreofs_bin,
+        &[
+            "async fn drive_wasi_engine",
+            "async fn drive_choreofs_driver",
+        ],
+    );
+    assert_absent(
+        "examples/baker-firmware/src/bin/choreofs_traffic_loop.rs",
+        choreofs_loop_bin,
+        &[
+            "async fn drive_wasi_engine",
+            "async fn drive_choreofs_driver",
+        ],
+    );
     assert_present(
-        "apps/wasip1/wasip1-smoke-apps/src/bin/wasip1-led-choreofs-traffic-cycle.rs",
+        "examples/baker-firmware/wasip1/traffic/src/bin/wasip1-led-choreofs-traffic-cycle.rs",
         choreofs_wasi_guest,
         &[
             "use hibana_wasi_guest::baker::{Led, sleep_ms};",
@@ -355,7 +446,7 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         ],
     );
     assert_absent(
-        "apps/wasip1/wasip1-smoke-apps/src/bin/wasip1-led-choreofs-traffic-cycle.rs",
+        "examples/baker-firmware/wasip1/traffic/src/bin/wasip1-led-choreofs-traffic-cycle.rs",
         choreofs_wasi_guest,
         &[
             "#![no_std]",
@@ -427,17 +518,29 @@ fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
     assert_present(
         "examples/heterogeneous-split-example/src/bin/linux-control.rs",
         linux,
-        &["heterogeneous_split_example::run_linux_control()"],
+        &[
+            "appkit::run::<",
+            "site::Local<heterogeneous_split_example::image::LinuxControl>",
+            "heterogeneous_split_example::Control",
+        ],
     );
     assert_present(
         "examples/heterogeneous-split-example/src/bin/m33-realtime.rs",
         m33,
-        &["heterogeneous_split_example::run_m33_realtime()"],
+        &[
+            "appkit::run::<",
+            "site::Local<heterogeneous_split_example::image::M33Realtime>",
+            "heterogeneous_split_example::Control",
+        ],
     );
     assert_present(
         "examples/heterogeneous-split-example/src/bin/rp2040-io.rs",
         rp2040,
-        &["heterogeneous_split_example::run_rp2040_io()"],
+        &[
+            "appkit::run::<",
+            "site::Local<heterogeneous_split_example::image::Rp2040Io>",
+            "heterogeneous_split_example::Control",
+        ],
     );
     assert_absent(
         "examples/heterogeneous-split-example/src/lib.rs",
@@ -451,6 +554,9 @@ fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
             "RefCell",
             "Vec<",
             "direct syscall completion",
+            "pub fn run_linux_control",
+            "pub fn run_m33_realtime",
+            "pub fn run_rp2040_io",
         ],
     );
 }

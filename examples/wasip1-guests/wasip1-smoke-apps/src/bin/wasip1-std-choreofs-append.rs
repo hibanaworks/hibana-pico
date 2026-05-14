@@ -18,8 +18,6 @@ fn main() {
     stdout
         .write_all(b"hibana choreofs append ")
         .expect("write append marker");
-    stdout
-        .write_all(&value[..len])
-        .expect("write append value");
+    stdout.write_all(&value[..len]).expect("write append value");
     stdout.write_all(b"\n").expect("write append newline");
 }

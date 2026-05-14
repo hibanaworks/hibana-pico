@@ -11,12 +11,8 @@ unsafe impl Sync for Ciovec {}
 #[link(wasm_import_module = "wasi_snapshot_preview1")]
 unsafe extern "C" {
     fn fd_write(fd: u32, iovs: *const Ciovec, iovs_len: usize, nwritten: *mut usize) -> u16;
-    fn poll_oneoff(
-        in_: *const u8,
-        out: *mut u8,
-        nsubscriptions: usize,
-        nevents: *mut usize,
-    ) -> u16;
+    fn poll_oneoff(in_: *const u8, out: *mut u8, nsubscriptions: usize, nevents: *mut usize)
+    -> u16;
 }
 
 const GREEN_FD: u32 = 3;

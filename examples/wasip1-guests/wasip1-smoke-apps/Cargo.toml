@@ -78,10 +78,6 @@ name = "wasip1-led-choreofs-open"
 path = "src/bin/wasip1-led-choreofs-open.rs"
 
 [[bin]]
-name = "wasip1-led-choreofs-traffic-cycle"
-path = "src/bin/wasip1-led-choreofs-traffic-cycle.rs"
-
-[[bin]]
 name = "wasip1-led-choreofs-bad-path"
 path = "src/bin/wasip1-led-choreofs-bad-path.rs"
 

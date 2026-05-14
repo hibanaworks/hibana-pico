@@ -8,8 +8,8 @@ use hibana::g;
 use hibana_pico::{
     appkit,
     choreography::protocol::{
-        EngineAbortAckControl, EngineAbortBeginControl, EngineAbortFenceControl, EngineAbortMsg,
-        LABEL_MEM_FENCE, MemFence,
+        EngineAbort, EngineAbortAckControl, EngineAbortBeginControl, EngineAbortFenceControl,
+        EngineAbortMsg, EngineAbortReason, LABEL_MEM_FENCE, MemFence, MemFenceReason,
     },
 };
 
@@ -64,22 +64,181 @@ impl BakerCapsuleFacts for ManyReentry {
 
 impl appkit::Localside<ManyReentry> for ManyReentryLocal {
     fn engine<'endpoint, 'guest, const ROLE: u8>(
-        ctx: appkit::EngineCtx<'endpoint, 'guest, ManyReentry, ROLE>,
+        mut ctx: appkit::EngineCtx<'endpoint, 'guest, ManyReentry, ROLE>,
     ) -> impl core::future::Future<Output = Infallible> {
         async move {
             if ROLE == 1 {
-                return baker_firmware::baker_many_reentry_engine(ctx).await;
+                let begin = match ctx.endpoint().flow::<EngineAbortBeginControl>() {
+                    Ok(flow) => flow,
+                    Err(_) => {
+                        baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR)
+                    }
+                };
+                if begin.send(()).await.is_err() {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                let first_abort = EngineAbort::new(EngineAbortReason::FuelExhausted, 1);
+                let first_abort_flow = match ctx.endpoint().flow::<EngineAbortMsg>() {
+                    Ok(flow) => flow,
+                    Err(_) => {
+                        baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR)
+                    }
+                };
+                if first_abort_flow.send(&first_abort).await.is_err() {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                if ctx
+                    .endpoint()
+                    .recv::<EngineAbortFenceControl>()
+                    .await
+                    .is_err()
+                {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                let first_ack = match ctx.endpoint().flow::<EngineAbortAckControl>() {
+                    Ok(flow) => flow,
+                    Err(_) => {
+                        baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR)
+                    }
+                };
+                if first_ack.send(()).await.is_err() {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                let second_begin = match ctx.endpoint().flow::<EngineAbortBeginControl>() {
+                    Ok(flow) => flow,
+                    Err(_) => {
+                        baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR)
+                    }
+                };
+                if second_begin.send(()).await.is_err() {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                let second_abort = EngineAbort::new(EngineAbortReason::FuelExhausted, 2);
+                let second_abort_flow = match ctx.endpoint().flow::<EngineAbortMsg>() {
+                    Ok(flow) => flow,
+                    Err(_) => {
+                        baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR)
+                    }
+                };
+                if second_abort_flow.send(&second_abort).await.is_err() {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                if ctx
+                    .endpoint()
+                    .recv::<g::Msg<LABEL_MEM_FENCE, MemFence>>()
+                    .await
+                    .is_err()
+                {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                let second_ack = match ctx.endpoint().flow::<EngineAbortAckControl>() {
+                    Ok(flow) => flow,
+                    Err(_) => {
+                        baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR)
+                    }
+                };
+                if second_ack.send(()).await.is_err() {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                baker_firmware::mark_runtime_ready();
+                return core::future::pending().await;
             }
             ctx.pending().await
         }
     }
 
     fn driver<'a, const ROLE: u8>(
-        ctx: appkit::DriverCtx<'a, ManyReentry, ROLE>,
+        mut ctx: appkit::DriverCtx<'a, ManyReentry, ROLE>,
     ) -> impl core::future::Future<Output = Infallible> {
         async move {
             if ROLE == 0 {
-                return baker_firmware::baker_many_reentry_driver(ctx).await;
+                if ctx
+                    .endpoint()
+                    .recv::<EngineAbortBeginControl>()
+                    .await
+                    .is_err()
+                {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                match ctx.endpoint().recv::<EngineAbortMsg>().await {
+                    Ok(abort) if abort.reason() == EngineAbortReason::FuelExhausted => {}
+                    Ok(_) | Err(_) => {
+                        baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR)
+                    }
+                }
+
+                baker_firmware::mark_safe_state();
+
+                let abort_fence = match ctx.endpoint().flow::<EngineAbortFenceControl>() {
+                    Ok(flow) => flow,
+                    Err(_) => {
+                        baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR)
+                    }
+                };
+                if abort_fence.send(()).await.is_err() {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                if ctx
+                    .endpoint()
+                    .recv::<EngineAbortAckControl>()
+                    .await
+                    .is_err()
+                {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                if ctx
+                    .endpoint()
+                    .recv::<EngineAbortBeginControl>()
+                    .await
+                    .is_err()
+                {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                match ctx.endpoint().recv::<EngineAbortMsg>().await {
+                    Ok(abort) if abort.reason() == EngineAbortReason::FuelExhausted => {}
+                    Ok(_) | Err(_) => {
+                        baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR)
+                    }
+                }
+
+                baker_firmware::mark_safe_state();
+
+                let mem_fence = MemFence::new(MemFenceReason::HotSwap, 2);
+                let mem_fence_flow =
+                    match ctx.endpoint().flow::<g::Msg<LABEL_MEM_FENCE, MemFence>>() {
+                        Ok(flow) => flow,
+                        Err(_) => {
+                            baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR)
+                        }
+                    };
+                if mem_fence_flow.send(&mem_fence).await.is_err() {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                if ctx
+                    .endpoint()
+                    .recv::<EngineAbortAckControl>()
+                    .await
+                    .is_err()
+                {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                baker_firmware::mark_runtime_ready();
+                baker_firmware::mark_success(<ManyReentry as BakerCapsuleFacts>::SUCCESS_RESULT);
+                return core::future::pending().await;
             }
             ctx.pending().await
         }

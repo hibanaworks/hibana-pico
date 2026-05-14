@@ -72,5 +72,4 @@ mod tests {
             assert_eq!(normalize_device_path(path), Err(Error::InvalidPath));
         }
     }
-
 }

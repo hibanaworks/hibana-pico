@@ -6,25 +6,7 @@ use core::{
     ptr::{read_volatile, write_volatile},
 };
 use core::{assert, assert_eq};
-use hibana::{
-    g,
-    substrate::cap::{
-        GenericCapToken,
-        advanced::{LoopBreakKind, LoopContinueKind},
-    },
-};
-#[cfg(feature = "wasm-engine-core")]
-use hibana_pico::choreography::protocol::BudgetRun;
-use hibana_pico::{
-    appkit,
-    choreography::protocol::{
-        EngineAbort, EngineAbortAckControl, EngineAbortBeginControl, EngineAbortFenceControl,
-        EngineAbortMsg, EngineAbortReason, EngineReq, EngineRet, FdWrite, FdWriteDone,
-        LABEL_MEM_FENCE, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET, LABEL_WASI_PATH_OPEN,
-        LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF, LABEL_WASI_POLL_ONEOFF_RET, MemFence,
-        MemFenceReason, PathOpen, PathOpened, PollReady,
-    },
-};
+use hibana_pico::appkit;
 
 pub struct BakerPlacement;
 pub struct BakerArtifacts;
@@ -578,35 +560,31 @@ const STAGE_CORE1_LAUNCH_ERR: u32 = 0x4849_0f01;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const STAGE_CORE1_START_TIMEOUT: u32 = 0x4849_0f02;
 #[cfg(feature = "wasm-engine-core")]
-const STAGE_WASI_ENGINE_ERROR: u32 = 0x4849_0f10;
-const STAGE_CHOREOFS_DRIVER_ERROR: u32 = 0x4849_0f11;
-const STAGE_CONTROL_FLOW_ERROR: u32 = 0x4849_0f12;
+pub const STAGE_WASI_ENGINE_ERROR: u32 = 0x4849_0f10;
+pub const STAGE_CHOREOFS_DRIVER_ERROR: u32 = 0x4849_0f11;
+pub const STAGE_CONTROL_FLOW_ERROR: u32 = 0x4849_0f12;
 
 #[cfg(feature = "wasm-engine-core")]
-const CHOREOFS_ENGINE_STARTED: u32 = 0x5741_0001;
-const CHOREOFS_DRIVER_STARTED: u32 = 0x5741_0010;
-const CHOREOFS_GPIO_READY: u32 = 0x5741_0020;
+pub const CHOREOFS_ENGINE_STARTED: u32 = 0x5741_0001;
+pub const CHOREOFS_DRIVER_STARTED: u32 = 0x5741_0010;
+pub const CHOREOFS_GPIO_READY: u32 = 0x5741_0020;
 #[cfg(feature = "wasm-engine-core")]
-const CHOREOFS_ENGINE_DRIVE_BEGIN: u32 = 0x5741_0201;
+pub const CHOREOFS_ENGINE_DRIVE_BEGIN: u32 = 0x5741_0201;
 #[cfg(feature = "wasm-engine-core")]
-const CHOREOFS_ENGINE_PATH_OPEN_DONE: u32 = 0x5741_0202;
+pub const CHOREOFS_ENGINE_PATH_OPEN_DONE: u32 = 0x5741_0202;
 #[cfg(feature = "wasm-engine-core")]
-const CHOREOFS_ENGINE_LOOP_CONTINUE_BEGIN: u32 = 0x5741_0203;
+pub const CHOREOFS_ENGINE_LOOP_CONTINUE_BEGIN: u32 = 0x5741_0203;
 #[cfg(feature = "wasm-engine-core")]
-const CHOREOFS_ENGINE_LOOP_CONTINUE_DONE: u32 = 0x5741_0204;
+pub const CHOREOFS_ENGINE_LOOP_CONTINUE_DONE: u32 = 0x5741_0204;
 #[cfg(feature = "wasm-engine-core")]
-const CHOREOFS_ENGINE_CYCLE_DRIVE_BEGIN: u32 = 0x5741_0205;
+pub const CHOREOFS_ENGINE_CYCLE_DRIVE_BEGIN: u32 = 0x5741_0205;
 #[cfg(feature = "wasm-engine-core")]
-const CHOREOFS_ENGINE_CYCLE_DRIVE_DONE: u32 = 0x5741_0206;
+pub const CHOREOFS_ENGINE_CYCLE_DRIVE_DONE: u32 = 0x5741_0206;
 #[cfg(feature = "wasm-engine-core")]
-const CHOREOFS_ENGINE_DRIVE_DONE: u32 = 0x5741_0207;
+pub const CHOREOFS_ENGINE_DRIVE_DONE: u32 = 0x5741_0207;
 #[cfg(feature = "wasm-engine-core")]
-const CHOREOFS_ENGINE_OK: u32 = 0x5741_4f4b;
+pub const CHOREOFS_ENGINE_OK: u32 = 0x5741_4f4b;
 const CHOREOFS_ENGINE_ERROR: u32 = 0x5741_4641;
-const CHOREOFS_LED_GREEN: u32 = 1 << 0;
-const CHOREOFS_LED_YELLOW: u32 = 1 << 1;
-const CHOREOFS_LED_RED: u32 = 1 << 2;
-
 #[unsafe(no_mangle)]
 static mut HIBANA_DEMO_RESULT: u32 = 0;
 #[used]
@@ -716,39 +694,9 @@ const GPIO_FUNC_SIO: u32 = 5;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const GPIO_PAD_DEFAULT: u32 = 0x56;
 
-const GREEN_LED_PIN: u8 = 22;
-const YELLOW_LED_PIN: u8 = 21;
-const RED_LED_PIN: u8 = 20;
-const BAKER_LED_PREOPEN_FD: u8 = 9;
-pub const FD_WRITE_RIGHT: u64 = 1 << 6;
-const CHOREOFS_REENTRY_CYCLES: u32 = 3;
-const CHOREOFS_WRITES_PER_CYCLE: u32 = 13;
-const CHOREOFS_EXPECTED_PATH_OPENS: u32 = 3;
-const CHOREOFS_EXPECTED_PATH_OPENS_U16: u16 = CHOREOFS_EXPECTED_PATH_OPENS as u16;
-const CHOREOFS_EXPECTED_FD_WRITES: u32 = CHOREOFS_REENTRY_CYCLES * CHOREOFS_WRITES_PER_CYCLE;
-const CHOREOFS_EXPECTED_POLLS: u32 = CHOREOFS_EXPECTED_FD_WRITES;
-const CHOREOFS_VISUAL_READY_CYCLES: u32 = 1;
+const BAKER_SAFE_STATE_LED_PINS: [u8; 3] = [22, 21, 20];
 #[cfg(feature = "wasm-engine-core")]
-const BAKER_LINK_WASM_FUEL_PER_ACTIVATION: u32 = 1_000_000;
-pub const LABEL_BAKER_CHOREOFS_ROUTE_CONTINUE: u8 = 120;
-pub const LABEL_BAKER_CHOREOFS_ROUTE_BREAK: u8 = 121;
-
-pub type BakerChoreoFsRouteContinue = g::Msg<
-    { LABEL_BAKER_CHOREOFS_ROUTE_CONTINUE },
-    GenericCapToken<LoopContinueKind>,
-    LoopContinueKind,
->;
-pub type BakerChoreoFsRouteBreak =
-    g::Msg<{ LABEL_BAKER_CHOREOFS_ROUTE_BREAK }, GenericCapToken<LoopBreakKind>, LoopBreakKind>;
-
-#[cfg(feature = "embed-wasip1-artifacts")]
-pub const WASM_CHOREOFS_TRAFFIC: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../target/wasip1-apps/wasm32-wasip1/release/wasip1-led-choreofs-traffic-cycle.wasm"
-));
-#[cfg(not(feature = "embed-wasip1-artifacts"))]
-pub const WASM_CHOREOFS_TRAFFIC: &[u8] = &[];
-
+pub const BAKER_LINK_WASM_FUEL_PER_ACTIVATION: u32 = 1_000_000;
 pub trait BakerCapsuleFacts: appkit::Capsule<Placement = BakerPlacement> {
     type DriverArtifact;
     type EngineArtifact;
@@ -756,7 +704,6 @@ pub trait BakerCapsuleFacts: appkit::Capsule<Placement = BakerPlacement> {
     const DRIVER_IMAGE_ID: appkit::ImageId;
     const ENGINE_IMAGE_ID: appkit::ImageId;
     const SUCCESS_RESULT: u32 = RESULT_SUCCESS;
-    const CHOREOFS_VISUAL_LOOP: bool = false;
 
     fn driver_facts() -> appkit::DriverFacts<'static> {
         appkit::DriverFacts::EMPTY
@@ -777,591 +724,8 @@ where
     }
 }
 
-pub async fn baker_control_engine_one_cycle<C, const ROLE: u8>(
-    mut ctx: appkit::EngineCtx<'_, '_, C, ROLE>,
-) -> core::convert::Infallible
-where
-    C: BakerCapsuleFacts,
-{
-    baker_engine_send_abort_begin(&mut ctx).await;
-    baker_engine_send_abort_reason(&mut ctx, 1).await;
-    baker_engine_recv_abort_fence(&mut ctx).await;
-    baker_engine_send_abort_ack(&mut ctx).await;
-    mark_stage(STAGE_RUNTIME_READY);
-    core::future::pending::<core::convert::Infallible>().await
-}
-
-pub async fn baker_control_driver_one_cycle<C, const ROLE: u8>(
-    mut ctx: appkit::DriverCtx<'_, C, ROLE>,
-) -> core::convert::Infallible
-where
-    C: BakerCapsuleFacts,
-{
-    baker_driver_recv_abort_begin(&mut ctx).await;
-    baker_driver_recv_abort_reason(&mut ctx).await;
-    mark_safe_state();
-    baker_driver_send_abort_fence(&mut ctx).await;
-    baker_driver_recv_abort_ack(&mut ctx).await;
-    mark_stage(STAGE_RUNTIME_READY);
-    mark_result(C::SUCCESS_RESULT);
-    core::future::pending::<core::convert::Infallible>().await
-}
-
-pub async fn baker_many_reentry_engine<C, const ROLE: u8>(
-    mut ctx: appkit::EngineCtx<'_, '_, C, ROLE>,
-) -> core::convert::Infallible
-where
-    C: BakerCapsuleFacts,
-{
-    baker_engine_send_abort_begin(&mut ctx).await;
-    baker_engine_send_abort_reason(&mut ctx, 1).await;
-    baker_engine_recv_abort_fence(&mut ctx).await;
-    baker_engine_send_abort_ack(&mut ctx).await;
-    baker_engine_send_abort_begin(&mut ctx).await;
-    baker_engine_send_abort_reason(&mut ctx, 2).await;
-    baker_engine_recv_mem_fence(&mut ctx).await;
-    baker_engine_send_abort_ack(&mut ctx).await;
-    mark_stage(STAGE_RUNTIME_READY);
-    core::future::pending::<core::convert::Infallible>().await
-}
-
-pub async fn baker_many_reentry_driver<C, const ROLE: u8>(
-    mut ctx: appkit::DriverCtx<'_, C, ROLE>,
-) -> core::convert::Infallible
-where
-    C: BakerCapsuleFacts,
-{
-    baker_driver_recv_abort_begin(&mut ctx).await;
-    baker_driver_recv_abort_reason(&mut ctx).await;
-    mark_safe_state();
-    baker_driver_send_abort_fence(&mut ctx).await;
-    baker_driver_recv_abort_ack(&mut ctx).await;
-    baker_driver_recv_abort_begin(&mut ctx).await;
-    baker_driver_recv_abort_reason(&mut ctx).await;
-    mark_safe_state();
-    baker_driver_send_mem_fence(&mut ctx).await;
-    baker_driver_recv_abort_ack(&mut ctx).await;
-    mark_stage(STAGE_RUNTIME_READY);
-    mark_result(C::SUCCESS_RESULT);
-    core::future::pending::<core::convert::Infallible>().await
-}
-
-async fn baker_engine_send_abort_begin<C, const ROLE: u8>(
-    ctx: &mut appkit::EngineCtx<'_, '_, C, ROLE>,
-) where
-    C: appkit::Capsule,
-{
-    let flow = match ctx.endpoint().flow::<EngineAbortBeginControl>() {
-        Ok(flow) => flow,
-        Err(_) => runtime_fail(STAGE_CONTROL_FLOW_ERROR),
-    };
-    if flow.send(()).await.is_err() {
-        runtime_fail(STAGE_CONTROL_FLOW_ERROR);
-    }
-}
-
-async fn baker_engine_send_abort_reason<C, const ROLE: u8>(
-    ctx: &mut appkit::EngineCtx<'_, '_, C, ROLE>,
-    code: u16,
-) where
-    C: appkit::Capsule,
-{
-    let abort = EngineAbort::new(EngineAbortReason::FuelExhausted, code);
-    let flow = match ctx.endpoint().flow::<EngineAbortMsg>() {
-        Ok(flow) => flow,
-        Err(_) => runtime_fail(STAGE_CONTROL_FLOW_ERROR),
-    };
-    if flow.send(&abort).await.is_err() {
-        runtime_fail(STAGE_CONTROL_FLOW_ERROR);
-    }
-}
-
-async fn baker_engine_recv_abort_fence<C, const ROLE: u8>(
-    ctx: &mut appkit::EngineCtx<'_, '_, C, ROLE>,
-) where
-    C: appkit::Capsule,
-{
-    if ctx
-        .endpoint()
-        .recv::<EngineAbortFenceControl>()
-        .await
-        .is_err()
-    {
-        runtime_fail(STAGE_CONTROL_FLOW_ERROR);
-    }
-}
-
-async fn baker_engine_recv_mem_fence<C, const ROLE: u8>(
-    ctx: &mut appkit::EngineCtx<'_, '_, C, ROLE>,
-) where
-    C: appkit::Capsule,
-{
-    if ctx
-        .endpoint()
-        .recv::<g::Msg<LABEL_MEM_FENCE, MemFence>>()
-        .await
-        .is_err()
-    {
-        runtime_fail(STAGE_CONTROL_FLOW_ERROR);
-    }
-}
-
-async fn baker_engine_send_abort_ack<C, const ROLE: u8>(
-    ctx: &mut appkit::EngineCtx<'_, '_, C, ROLE>,
-) where
-    C: appkit::Capsule,
-{
-    let flow = match ctx.endpoint().flow::<EngineAbortAckControl>() {
-        Ok(flow) => flow,
-        Err(_) => runtime_fail(STAGE_CONTROL_FLOW_ERROR),
-    };
-    if flow.send(()).await.is_err() {
-        runtime_fail(STAGE_CONTROL_FLOW_ERROR);
-    }
-}
-
-async fn baker_driver_recv_abort_begin<C, const ROLE: u8>(ctx: &mut appkit::DriverCtx<'_, C, ROLE>)
-where
-    C: appkit::Capsule,
-{
-    if ctx
-        .endpoint()
-        .recv::<EngineAbortBeginControl>()
-        .await
-        .is_err()
-    {
-        runtime_fail(STAGE_CONTROL_FLOW_ERROR);
-    }
-}
-
-async fn baker_driver_recv_abort_reason<C, const ROLE: u8>(ctx: &mut appkit::DriverCtx<'_, C, ROLE>)
-where
-    C: appkit::Capsule,
-{
-    match ctx.endpoint().recv::<EngineAbortMsg>().await {
-        Ok(abort) if abort.reason() == EngineAbortReason::FuelExhausted => {}
-        Ok(_) | Err(_) => runtime_fail(STAGE_CONTROL_FLOW_ERROR),
-    }
-}
-
-async fn baker_driver_send_abort_fence<C, const ROLE: u8>(ctx: &mut appkit::DriverCtx<'_, C, ROLE>)
-where
-    C: appkit::Capsule,
-{
-    let flow = match ctx.endpoint().flow::<EngineAbortFenceControl>() {
-        Ok(flow) => flow,
-        Err(_) => runtime_fail(STAGE_CONTROL_FLOW_ERROR),
-    };
-    if flow.send(()).await.is_err() {
-        runtime_fail(STAGE_CONTROL_FLOW_ERROR);
-    }
-}
-
-async fn baker_driver_send_mem_fence<C, const ROLE: u8>(ctx: &mut appkit::DriverCtx<'_, C, ROLE>)
-where
-    C: appkit::Capsule,
-{
-    let fence = MemFence::new(MemFenceReason::HotSwap, 2);
-    let flow = match ctx.endpoint().flow::<g::Msg<LABEL_MEM_FENCE, MemFence>>() {
-        Ok(flow) => flow,
-        Err(_) => runtime_fail(STAGE_CONTROL_FLOW_ERROR),
-    };
-    if flow.send(&fence).await.is_err() {
-        runtime_fail(STAGE_CONTROL_FLOW_ERROR);
-    }
-}
-
-async fn baker_driver_recv_abort_ack<C, const ROLE: u8>(ctx: &mut appkit::DriverCtx<'_, C, ROLE>)
-where
-    C: appkit::Capsule,
-{
-    if ctx
-        .endpoint()
-        .recv::<EngineAbortAckControl>()
-        .await
-        .is_err()
-    {
-        runtime_fail(STAGE_CONTROL_FLOW_ERROR);
-    }
-}
-
-#[cfg(feature = "wasm-engine-core")]
-pub async fn baker_drive_wasi_engine<C, const ROLE: u8>(
-    mut ctx: appkit::EngineCtx<'_, '_, C, ROLE>,
-) -> core::convert::Infallible
-where
-    C: BakerCapsuleFacts,
-{
-    record_choreofs_engine_status(CHOREOFS_ENGINE_STARTED);
-    record_choreofs_engine_status(CHOREOFS_ENGINE_DRIVE_BEGIN);
-    let status = ctx
-        .drive_wasi_guest_imports(
-            BudgetRun::new(1, 0, BAKER_LINK_WASM_FUEL_PER_ACTIVATION, 0),
-            CHOREOFS_EXPECTED_PATH_OPENS as u16,
-        )
-        .await;
-    match status {
-        Ok(appkit::WasiGuestStatus::ImportLimitReached(CHOREOFS_EXPECTED_PATH_OPENS_U16)) => {}
-        Ok(other) => {
-            core::hint::black_box(other);
-            runtime_fail(STAGE_WASI_ENGINE_ERROR);
-        }
-        Err(error) => {
-            record_choreofs_engine_error_code(error.diagnostic_code());
-            runtime_fail(STAGE_WASI_ENGINE_ERROR);
-        }
-    }
-    record_choreofs_engine_status(CHOREOFS_ENGINE_PATH_OPEN_DONE);
-
-    let visual_loop = C::CHOREOFS_VISUAL_LOOP;
-    let mut cycle = 0u32;
-    loop {
-        let mut write_index = 0u32;
-        while write_index < CHOREOFS_WRITES_PER_CYCLE {
-            baker_engine_resolve_choreofs_loop(&mut ctx).await;
-            record_choreofs_engine_status(CHOREOFS_ENGINE_CYCLE_DRIVE_BEGIN);
-            let status = ctx
-                .drive_wasi_guest_imports(
-                    BudgetRun::new(1, 0, BAKER_LINK_WASM_FUEL_PER_ACTIVATION, 0),
-                    2,
-                )
-                .await;
-            match status {
-                Ok(appkit::WasiGuestStatus::ImportLimitReached(2)) => {}
-                Ok(other) => {
-                    core::hint::black_box(other);
-                    runtime_fail(STAGE_WASI_ENGINE_ERROR);
-                }
-                Err(error) => {
-                    record_choreofs_engine_error_code(error.diagnostic_code());
-                    runtime_fail(STAGE_WASI_ENGINE_ERROR);
-                }
-            }
-            record_choreofs_engine_status(CHOREOFS_ENGINE_CYCLE_DRIVE_DONE);
-            write_index += 1;
-        }
-        cycle += 1;
-        if visual_loop && cycle == CHOREOFS_VISUAL_READY_CYCLES {
-            record_choreofs_engine_status(CHOREOFS_ENGINE_OK);
-            mark_stage(STAGE_RUNTIME_READY);
-        }
-        if !visual_loop && cycle >= CHOREOFS_REENTRY_CYCLES {
-            break;
-        }
-    }
-
-    record_choreofs_engine_status(CHOREOFS_ENGINE_DRIVE_DONE);
-    record_choreofs_engine_status(CHOREOFS_ENGINE_OK);
-    mark_stage(STAGE_RUNTIME_READY);
-    core::future::pending::<core::convert::Infallible>().await
-}
-
-#[cfg(feature = "wasm-engine-core")]
-async fn baker_engine_resolve_choreofs_loop<C, const ROLE: u8>(
-    ctx: &mut appkit::EngineCtx<'_, '_, C, ROLE>,
-) where
-    C: BakerCapsuleFacts,
-{
-    record_choreofs_engine_status(CHOREOFS_ENGINE_LOOP_CONTINUE_BEGIN);
-    let flow = match ctx.endpoint().flow::<BakerChoreoFsRouteContinue>() {
-        Ok(flow) => flow,
-        Err(error) => {
-            core::hint::black_box(error);
-            record_choreofs_engine_error_code(0x5745_6000);
-            runtime_fail(STAGE_WASI_ENGINE_ERROR);
-        }
-    };
-    if let Err(error) = flow.send(()).await {
-        core::hint::black_box(error);
-        record_choreofs_engine_error_code(0x5745_7000);
-        runtime_fail(STAGE_WASI_ENGINE_ERROR);
-    };
-    record_choreofs_engine_status(CHOREOFS_ENGINE_LOOP_CONTINUE_DONE);
-}
-
-pub async fn baker_choreofs_driver<C, const ROLE: u8>(
-    mut ctx: appkit::DriverCtx<'_, C, ROLE>,
-) -> core::convert::Infallible
-where
-    C: BakerCapsuleFacts,
-{
-    reset_choreofs_markers();
-    record_choreofs_engine_status(CHOREOFS_DRIVER_STARTED);
-    init_baker_led_outputs();
-    record_choreofs_engine_status(CHOREOFS_GPIO_READY);
-
-    baker_driver_path_open(&mut ctx, 3, appkit::ObjectId(1)).await;
-    baker_driver_path_open(&mut ctx, 4, appkit::ObjectId(2)).await;
-    baker_driver_path_open(&mut ctx, 5, appkit::ObjectId(3)).await;
-    let expected = [
-        (3u8, b"1".as_slice()),
-        (4u8, b"0".as_slice()),
-        (5u8, b"0".as_slice()),
-        (3u8, b"0".as_slice()),
-        (4u8, b"1".as_slice()),
-        (5u8, b"0".as_slice()),
-        (4u8, b"0".as_slice()),
-        (4u8, b"1".as_slice()),
-        (4u8, b"0".as_slice()),
-        (4u8, b"1".as_slice()),
-        (3u8, b"0".as_slice()),
-        (4u8, b"0".as_slice()),
-        (5u8, b"1".as_slice()),
-    ];
-    let visual_loop = C::CHOREOFS_VISUAL_LOOP;
-    let mut cycle = 0u32;
-    loop {
-        let mut index = 0usize;
-        while index < expected.len() {
-            let (expected_fd, expected_payload) = expected[index];
-            baker_driver_fd_write(&mut ctx, expected_fd, expected_payload).await;
-            baker_driver_poll_oneoff(&mut ctx).await;
-            index += 1;
-        }
-        cycle += 1;
-        if visual_loop && cycle == CHOREOFS_VISUAL_READY_CYCLES {
-            record_stack_high_water();
-            mark_stage(STAGE_RUNTIME_READY);
-            mark_result(C::SUCCESS_RESULT);
-        }
-        if !visual_loop && cycle >= CHOREOFS_REENTRY_CYCLES {
-            break;
-        }
-    }
-
-    baker_driver_assert_choreofs_counts();
-    record_stack_high_water();
-    mark_stage(STAGE_RUNTIME_READY);
-    mark_result(C::SUCCESS_RESULT);
-    core::future::pending::<core::convert::Infallible>().await
-}
-
-async fn baker_recv_engine_req<C, const ROLE: u8, const LABEL: u8>(
-    ctx: &mut appkit::DriverCtx<'_, C, ROLE>,
-) -> EngineReq
-where
-    C: BakerCapsuleFacts,
-{
-    match ctx.endpoint().recv::<g::Msg<LABEL, EngineReq>>().await {
-        Ok(request) => request,
-        Err(error) => {
-            #[cfg(feature = "wasm-engine-core")]
-            record_choreofs_engine_error_code(choreofs_recv_error_code(&error));
-            core::hint::black_box(error);
-            runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-        }
-    }
-}
-
-async fn baker_offer_engine_req<C, const ROLE: u8, const LABEL: u8>(
-    ctx: &mut appkit::DriverCtx<'_, C, ROLE>,
-) -> EngineReq
-where
-    C: BakerCapsuleFacts,
-{
-    record_choreofs_driver_trace(0x5745_c000 | LABEL as u32);
-    let branch = match ctx.endpoint().offer().await {
-        Ok(branch) => branch,
-        Err(error) => {
-            #[cfg(feature = "wasm-engine-core")]
-            record_choreofs_engine_error_code(choreofs_recv_error_code(&error));
-            core::hint::black_box(error);
-            runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-        }
-    };
-    record_choreofs_driver_trace(0x5745_c100 | branch.label() as u32);
-    if branch.label() != LABEL {
-        #[cfg(feature = "wasm-engine-core")]
-        record_choreofs_engine_error_code(0x5745_c000 | branch.label() as u32);
-        core::hint::black_box(branch.label());
-        runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-    }
-    let request = match branch.decode::<g::Msg<LABEL, EngineReq>>().await {
-        Ok(request) => request,
-        Err(error) => {
-            #[cfg(feature = "wasm-engine-core")]
-            record_choreofs_engine_error_code(choreofs_recv_error_code(&error));
-            core::hint::black_box(error);
-            runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-        }
-    };
-    record_choreofs_driver_trace(0x5745_c200 | LABEL as u32);
-    request
-}
-
-async fn baker_send_engine_ret<C, const ROLE: u8, const LABEL: u8>(
-    ctx: &mut appkit::DriverCtx<'_, C, ROLE>,
-    reply: EngineRet,
-) where
-    C: BakerCapsuleFacts,
-{
-    let flow = match ctx.endpoint().flow::<g::Msg<LABEL, EngineRet>>() {
-        Ok(flow) => flow,
-        Err(error) => {
-            core::hint::black_box(error);
-            runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-        }
-    };
-    if let Err(error) = flow.send(&reply).await {
-        core::hint::black_box(error);
-        runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-    }
-}
-
-async fn baker_driver_path_open<C, const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, C, ROLE>,
-    expected_fd: u8,
-    expected_object: appkit::ObjectId,
-) -> appkit::LedgerFdFact
-where
-    C: BakerCapsuleFacts,
-{
-    let request = match baker_recv_engine_req::<C, ROLE, LABEL_WASI_PATH_OPEN>(ctx).await {
-        EngineReq::PathOpen(request) => request,
-        other => {
-            core::hint::black_box(other);
-            runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-        }
-    };
-    baker_driver_path_open_from_request(ctx, request, expected_fd, expected_object).await
-}
-
-async fn baker_driver_path_open_from_request<C, const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, C, ROLE>,
-    request: PathOpen,
-    expected_fd: u8,
-    expected_object: appkit::ObjectId,
-) -> appkit::LedgerFdFact
-where
-    C: BakerCapsuleFacts,
-{
-    if request.preopen_fd() != BAKER_LED_PREOPEN_FD || request.rights_base() != FD_WRITE_RIGHT {
-        core::hint::black_box(request);
-        runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-    }
-    let object = match ctx.choreofs().resolve(request.path()) {
-        Some(object) => object,
-        None => {
-            core::hint::black_box(request);
-            runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-        }
-    };
-    let fact = match baker_find_ledger_fd(ctx.ledger(), object, request.rights_base()) {
-        Some(fact) => fact,
-        None => {
-            core::hint::black_box((object, request.rights_base()));
-            runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-        }
-    };
-    if fact.fd() != expected_fd as u32 || fact.object() != expected_object {
-        core::hint::black_box(fact);
-        runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-    }
-    record_choreofs_path_open(object);
-    baker_send_engine_ret::<C, ROLE, LABEL_WASI_PATH_OPEN_RET>(
-        ctx,
-        EngineRet::PathOpened(PathOpened::new(fact.fd() as u8, 0)),
-    )
-    .await;
-    fact
-}
-
-async fn baker_driver_fd_write<C, const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, C, ROLE>,
-    expected_fd: u8,
-    expected_payload: &[u8],
-) where
-    C: BakerCapsuleFacts,
-{
-    let request = match baker_offer_engine_req::<C, ROLE, LABEL_WASI_FD_WRITE>(ctx).await {
-        EngineReq::FdWrite(request) => request,
-        other => {
-            core::hint::black_box(other);
-            runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-        }
-    };
-    baker_handle_fd_write(ctx, request, expected_fd, expected_payload).await;
-}
-
-async fn baker_handle_fd_write<C, const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, C, ROLE>,
-    request: FdWrite,
-    expected_fd: u8,
-    expected_payload: &[u8],
-) where
-    C: BakerCapsuleFacts,
-{
-    if request.fd() != expected_fd || request.as_bytes() != expected_payload {
-        core::hint::black_box((request, expected_fd));
-        runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-    }
-    let fact = match ctx.ledger().fd(request.fd() as u32) {
-        Some(fact) if fact.rights() == FD_WRITE_RIGHT => fact,
-        Some(fact) => {
-            core::hint::black_box(fact);
-            runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-        }
-        None => {
-            core::hint::black_box(request);
-            runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-        }
-    };
-    let high = match request.as_bytes() {
-        b"1" => true,
-        b"0" => false,
-        other => {
-            core::hint::black_box(other);
-            runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-        }
-    };
-    write_baker_led_object(fact.object(), high);
-    record_choreofs_fd_write(fact.object());
-    baker_send_engine_ret::<C, ROLE, LABEL_WASI_FD_WRITE_RET>(
-        ctx,
-        EngineRet::FdWriteDone(FdWriteDone::new(request.fd(), request.len() as u8)),
-    )
-    .await;
-}
-
-async fn baker_driver_poll_oneoff<C, const ROLE: u8>(ctx: &mut appkit::DriverCtx<'_, C, ROLE>)
-where
-    C: BakerCapsuleFacts,
-{
-    let request = match baker_recv_engine_req::<C, ROLE, LABEL_WASI_POLL_ONEOFF>(ctx).await {
-        EngineReq::PollOneoff(request) => request,
-        other => {
-            core::hint::black_box(other);
-            runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-        }
-    };
-    baker_poll_delay(request.timeout_tick());
-    record_choreofs_poll();
-    baker_send_engine_ret::<C, ROLE, LABEL_WASI_POLL_ONEOFF_RET>(
-        ctx,
-        EngineRet::PollReady(PollReady::new(1)),
-    )
-    .await;
-}
-
-fn baker_find_ledger_fd(
-    ledger: appkit::LedgerFacts<'_>,
-    object: appkit::ObjectId,
-    rights: u64,
-) -> Option<appkit::LedgerFdFact> {
-    let facts = ledger.fds();
-    let mut index = 0usize;
-    while index < facts.len() {
-        let fact = facts[index];
-        if fact.object() == object && fact.rights() == rights {
-            return Some(fact);
-        }
-        index += 1;
-    }
-    None
-}
-
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-fn baker_poll_delay(timeout_ms: u64) {
+pub fn baker_poll_delay(timeout_ms: u64) {
     let delay_ticks = core::cmp::min(
         timeout_ms.saturating_mul(BAKER_TIMER_TICKS_PER_MS),
         u32::MAX as u64,
@@ -1386,24 +750,7 @@ fn baker_poll_delay(timeout_ms: u64) {
 }
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
-fn baker_poll_delay(_timeout_ms: u64) {}
-
-fn baker_driver_assert_choreofs_counts() {
-    let path_opens = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_PATH_OPEN_COUNT));
-    let writes = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_FD_WRITE_COUNT));
-    let polls = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_POLL_COUNT));
-    let led_mask = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_LED_MASK));
-    let seen_led_mask = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_SEEN_LED_MASK));
-    if path_opens != CHOREOFS_EXPECTED_PATH_OPENS
-        || writes != CHOREOFS_EXPECTED_FD_WRITES
-        || polls != CHOREOFS_EXPECTED_POLLS
-        || led_mask != CHOREOFS_LED_RED
-        || seen_led_mask != (CHOREOFS_LED_GREEN | CHOREOFS_LED_YELLOW | CHOREOFS_LED_RED)
-    {
-        core::hint::black_box((path_opens, writes, polls, led_mask, seen_led_mask));
-        runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-    }
-}
+pub fn baker_poll_delay(_timeout_ms: u64) {}
 
 fn park() -> ! {
     loop {
@@ -1481,7 +828,7 @@ fn marker_stack_slot() -> *mut u32 {
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-fn record_stack_high_water() {
+pub fn record_stack_high_water() {
     let sp: u32;
     unsafe {
         asm!("mov {0}, sp", out(reg) sp, options(nomem, nostack, preserves_flags));
@@ -1511,7 +858,7 @@ fn record_stack_high_water() {
 }
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
-fn record_stack_high_water() {}
+pub fn record_stack_high_water() {}
 
 fn mark_stage(stage: u32) {
     record_stack_high_water();
@@ -1575,7 +922,7 @@ fn increment_marker(slot: *mut u32) -> u32 {
     next
 }
 
-fn reset_choreofs_markers() {
+pub fn reset_choreofs_markers() {
     write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_STATUS), 0);
     write_marker(
         core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_ERROR_CODE),
@@ -1601,7 +948,7 @@ fn reset_choreofs_markers() {
     write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SEEN_LED_MASK), 0);
 }
 
-fn record_choreofs_engine_status(status: u32) {
+pub fn record_choreofs_engine_status(status: u32) {
     write_marker(
         core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_STATUS),
         status,
@@ -1609,19 +956,19 @@ fn record_choreofs_engine_status(status: u32) {
 }
 
 #[cfg(feature = "wasm-engine-core")]
-fn record_choreofs_engine_error_code(code: u32) {
+pub fn record_choreofs_engine_error_code(code: u32) {
     write_marker(
         core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_ERROR_CODE),
         code,
     );
 }
 
-fn record_choreofs_driver_trace(trace: u32) {
+pub fn record_choreofs_driver_trace(trace: u32) {
     write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_DRIVER_TRACE), trace);
 }
 
 #[cfg(feature = "wasm-engine-core")]
-fn choreofs_recv_error_code(error: &hibana::RecvError) -> u32 {
+pub fn choreofs_recv_error_code(error: &hibana::RecvError) -> u32 {
     match error {
         hibana::RecvError::Transport(_) => 0x5745_6101,
         hibana::RecvError::Binding(_) => 0x5745_6102,
@@ -1634,7 +981,7 @@ fn choreofs_recv_error_code(error: &hibana::RecvError) -> u32 {
     }
 }
 
-fn record_choreofs_path_open(object: appkit::ObjectId) {
+pub fn record_choreofs_path_open(object: appkit::ObjectId) {
     increment_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_PATH_OPEN_COUNT));
     write_marker(
         core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_OBJECT),
@@ -1642,7 +989,7 @@ fn record_choreofs_path_open(object: appkit::ObjectId) {
     );
 }
 
-fn record_choreofs_fd_write(object: appkit::ObjectId) {
+pub fn record_choreofs_fd_write(object: appkit::ObjectId) {
     increment_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_FD_WRITE_COUNT));
     write_marker(
         core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_OBJECT),
@@ -1650,20 +997,12 @@ fn record_choreofs_fd_write(object: appkit::ObjectId) {
     );
 }
 
-fn record_choreofs_poll() {
+pub fn record_choreofs_poll() {
     increment_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_POLL_COUNT));
 }
 
-fn record_choreofs_led_mask(object: appkit::ObjectId, high: bool) {
-    let bit = match object.0 {
-        1 => CHOREOFS_LED_GREEN,
-        2 => CHOREOFS_LED_YELLOW,
-        3 => CHOREOFS_LED_RED,
-        other => {
-            core::hint::black_box(other);
-            runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR)
-        }
-    };
+pub fn record_choreofs_led_mask(mask: u32, high: bool) {
+    let bit = mask;
     let slot = core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LED_MASK);
     let current = read_marker(slot);
     let next = if high { current | bit } else { current & !bit };
@@ -1675,11 +1014,41 @@ fn record_choreofs_led_mask(object: appkit::ObjectId, high: bool) {
 }
 
 #[cold]
-fn runtime_fail(stage: u32) -> ! {
+pub fn runtime_fail(stage: u32) -> ! {
     record_failure_stage(stage);
     record_choreofs_engine_status(CHOREOFS_ENGINE_ERROR);
     mark_result(RESULT_FAILURE);
     park()
+}
+
+pub fn mark_runtime_ready() {
+    mark_stage(STAGE_RUNTIME_READY);
+}
+
+pub fn mark_success(result: u32) {
+    mark_result(result);
+}
+
+pub fn assert_choreofs_markers(
+    expected_path_opens: u32,
+    expected_writes: u32,
+    expected_final_led_mask: u32,
+    expected_seen_led_mask: u32,
+) {
+    let path_opens = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_PATH_OPEN_COUNT));
+    let writes = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_FD_WRITE_COUNT));
+    let polls = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_POLL_COUNT));
+    let led_mask = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_LED_MASK));
+    let seen_led_mask = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_SEEN_LED_MASK));
+    if path_opens != expected_path_opens
+        || writes != expected_writes
+        || polls != expected_writes
+        || led_mask != expected_final_led_mask
+        || seen_led_mask != expected_seen_led_mask
+    {
+        core::hint::black_box((path_opens, writes, polls, led_mask, seen_led_mask));
+        runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
+    }
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -1708,7 +1077,7 @@ fn baker_gpio_bank_init() {
 fn baker_gpio_bank_init() {}
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-fn baker_gpio_init_output(pin: u8) {
+pub fn baker_gpio_init_output(pin: u8) {
     baker_gpio_bank_init();
     unsafe {
         write_volatile(gpio_pad(pin), GPIO_PAD_DEFAULT);
@@ -1719,19 +1088,21 @@ fn baker_gpio_init_output(pin: u8) {
 }
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
-fn baker_gpio_init_output(pin: u8) {
+pub fn baker_gpio_init_output(pin: u8) {
     baker_gpio_bank_init();
     core::hint::black_box(pin);
 }
 
-fn init_baker_led_outputs() {
-    baker_gpio_init_output(GREEN_LED_PIN);
-    baker_gpio_init_output(YELLOW_LED_PIN);
-    baker_gpio_init_output(RED_LED_PIN);
+fn init_baker_safe_state_outputs() {
+    let mut index = 0usize;
+    while index < BAKER_SAFE_STATE_LED_PINS.len() {
+        baker_gpio_init_output(BAKER_SAFE_STATE_LED_PINS[index]);
+        index += 1usize;
+    }
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-fn baker_gpio_write(pin: u8, high: bool) {
+pub fn baker_gpio_write(pin: u8, high: bool) {
     let bit = 1u32 << pin;
     unsafe {
         if high {
@@ -1743,28 +1114,21 @@ fn baker_gpio_write(pin: u8, high: bool) {
 }
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
-fn baker_gpio_write(pin: u8, high: bool) {
+pub fn baker_gpio_write(pin: u8, high: bool) {
     core::hint::black_box((pin, high));
 }
 
-fn write_baker_led_object(object: appkit::ObjectId, high: bool) {
-    match object.0 {
-        1 => baker_gpio_write(GREEN_LED_PIN, high),
-        2 => baker_gpio_write(YELLOW_LED_PIN, high),
-        3 => baker_gpio_write(RED_LED_PIN, high),
-        other => {
-            core::hint::black_box(other);
-            runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-        }
+fn write_baker_safe_state_leds() {
+    let mut index = 0usize;
+    while index < BAKER_SAFE_STATE_LED_PINS.len() {
+        baker_gpio_write(BAKER_SAFE_STATE_LED_PINS[index], false);
+        index += 1usize;
     }
-    record_choreofs_led_mask(object, high);
 }
 
-fn mark_safe_state() {
-    init_baker_led_outputs();
-    write_baker_led_object(appkit::ObjectId(1), false);
-    write_baker_led_object(appkit::ObjectId(2), false);
-    write_baker_led_object(appkit::ObjectId(3), false);
+pub fn mark_safe_state() {
+    init_baker_safe_state_outputs();
+    write_baker_safe_state_leds();
     record_stack_high_water();
 }
 

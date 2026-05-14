@@ -8,7 +8,8 @@ use hibana::g;
 use hibana_pico::{
     appkit,
     choreography::protocol::{
-        EngineAbortAckControl, EngineAbortBeginControl, EngineAbortFenceControl, EngineAbortMsg,
+        EngineAbort, EngineAbortAckControl, EngineAbortBeginControl, EngineAbortFenceControl,
+        EngineAbortMsg, EngineAbortReason,
     },
 };
 
@@ -46,22 +47,102 @@ impl BakerCapsuleFacts for FailSafe {
 
 impl appkit::Localside<FailSafe> for FailSafeLocal {
     fn engine<'endpoint, 'guest, const ROLE: u8>(
-        ctx: appkit::EngineCtx<'endpoint, 'guest, FailSafe, ROLE>,
+        mut ctx: appkit::EngineCtx<'endpoint, 'guest, FailSafe, ROLE>,
     ) -> impl core::future::Future<Output = Infallible> {
         async move {
             if ROLE == 1 {
-                return baker_firmware::baker_control_engine_one_cycle(ctx).await;
+                let begin = match ctx.endpoint().flow::<EngineAbortBeginControl>() {
+                    Ok(flow) => flow,
+                    Err(_) => {
+                        baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR)
+                    }
+                };
+                if begin.send(()).await.is_err() {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                let abort = EngineAbort::new(EngineAbortReason::FuelExhausted, 1);
+                let abort_flow = match ctx.endpoint().flow::<EngineAbortMsg>() {
+                    Ok(flow) => flow,
+                    Err(_) => {
+                        baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR)
+                    }
+                };
+                if abort_flow.send(&abort).await.is_err() {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                if ctx
+                    .endpoint()
+                    .recv::<EngineAbortFenceControl>()
+                    .await
+                    .is_err()
+                {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                let ack = match ctx.endpoint().flow::<EngineAbortAckControl>() {
+                    Ok(flow) => flow,
+                    Err(_) => {
+                        baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR)
+                    }
+                };
+                if ack.send(()).await.is_err() {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                baker_firmware::mark_runtime_ready();
+                return core::future::pending().await;
             }
             ctx.pending().await
         }
     }
 
     fn driver<'a, const ROLE: u8>(
-        ctx: appkit::DriverCtx<'a, FailSafe, ROLE>,
+        mut ctx: appkit::DriverCtx<'a, FailSafe, ROLE>,
     ) -> impl core::future::Future<Output = Infallible> {
         async move {
             if ROLE == 0 {
-                return baker_firmware::baker_control_driver_one_cycle(ctx).await;
+                if ctx
+                    .endpoint()
+                    .recv::<EngineAbortBeginControl>()
+                    .await
+                    .is_err()
+                {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                match ctx.endpoint().recv::<EngineAbortMsg>().await {
+                    Ok(abort) if abort.reason() == EngineAbortReason::FuelExhausted => {}
+                    Ok(_) | Err(_) => {
+                        baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR)
+                    }
+                }
+
+                baker_firmware::mark_safe_state();
+
+                let fence = match ctx.endpoint().flow::<EngineAbortFenceControl>() {
+                    Ok(flow) => flow,
+                    Err(_) => {
+                        baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR)
+                    }
+                };
+                if fence.send(()).await.is_err() {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                if ctx
+                    .endpoint()
+                    .recv::<EngineAbortAckControl>()
+                    .await
+                    .is_err()
+                {
+                    baker_firmware::runtime_fail(baker_firmware::STAGE_CONTROL_FLOW_ERROR);
+                }
+
+                baker_firmware::mark_runtime_ready();
+                baker_firmware::mark_success(<FailSafe as BakerCapsuleFacts>::SUCCESS_RESULT);
+                return core::future::pending().await;
             }
             ctx.pending().await
         }

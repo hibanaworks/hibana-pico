@@ -13,9 +13,10 @@ members = [
     "examples/heterogeneous-split-example",
 ]
 exclude = [
-    "apps/wasip1/hibana-wasi-guest",
-    "apps/wasip1/swarm-node-apps",
-    "apps/wasip1/wasip1-smoke-apps",
+    "examples/baker-firmware/wasip1/traffic",
+    "examples/wasip1-guests/hibana-wasi-guest",
+    "examples/wasip1-guests/swarm-node-apps",
+    "examples/wasip1-guests/wasip1-smoke-apps",
 ]
 resolver = "3"
 

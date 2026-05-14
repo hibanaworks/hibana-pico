@@ -530,27 +530,6 @@ fn reset_live_carrier_evidence() {
     EXAMPLE_FRAME_2_TO_0.clear();
 }
 
-pub fn run_linux_control()
--> appkit::RunReport<core::convert::Infallible, site::Local<image::LinuxControl>> {
-    appkit::run::<site::Local<image::LinuxControl>, Control>(
-        ARTIFACTS.for_image::<site::Local<image::LinuxControl>>(),
-    )
-}
-
-pub fn run_m33_realtime()
--> appkit::RunReport<core::convert::Infallible, site::Local<image::M33Realtime>> {
-    appkit::run::<site::Local<image::M33Realtime>, Control>(
-        ARTIFACTS.for_image::<site::Local<image::M33Realtime>>(),
-    )
-}
-
-pub fn run_rp2040_io() -> appkit::RunReport<core::convert::Infallible, site::Local<image::Rp2040Io>>
-{
-    appkit::run::<site::Local<image::Rp2040Io>, Control>(
-        ARTIFACTS.for_image::<site::Local<image::Rp2040Io>>(),
-    )
-}
-
 pub fn assert_single_role_image<R, I>(
     report: &appkit::RunReport<R, I>,
     image_id: appkit::ImageId,
@@ -580,15 +559,21 @@ pub fn assert_single_role_image<R, I>(
 
 pub fn assert_peer_manifests() {
     reset_live_carrier_evidence();
-    let linux = run_linux_control();
+    let linux = appkit::run::<site::Local<image::LinuxControl>, Control>(
+        ARTIFACTS.for_image::<site::Local<image::LinuxControl>>(),
+    );
     assert_eq!(ROLE0_PHASE.load(Ordering::Acquire), 1);
     assert_eq!(ROLE0_TO_ROLE1_SENT.load(Ordering::Acquire), 1);
     assert_eq!(ROLE0_TO_ROLE1_RECV.load(Ordering::Acquire), 0);
-    let m33 = run_m33_realtime();
+    let m33 = appkit::run::<site::Local<image::M33Realtime>, Control>(
+        ARTIFACTS.for_image::<site::Local<image::M33Realtime>>(),
+    );
     assert_eq!(ROLE0_TO_ROLE1_RECV.load(Ordering::Acquire), 1);
     assert_eq!(ROLE1_TO_ROLE2_SENT.load(Ordering::Acquire), 1);
     assert_eq!(ROLE1_TO_ROLE2_RECV.load(Ordering::Acquire), 0);
-    let rp2040 = run_rp2040_io();
+    let rp2040 = appkit::run::<site::Local<image::Rp2040Io>, Control>(
+        ARTIFACTS.for_image::<site::Local<image::Rp2040Io>>(),
+    );
     assert_eq!(ROLE1_TO_ROLE2_RECV.load(Ordering::Acquire), 1);
     assert_eq!(ROLE2_TO_ROLE0_SENT.load(Ordering::Acquire), 1);
     assert_eq!(

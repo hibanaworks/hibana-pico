@@ -1,0 +1,21 @@
+[package]
+name = "baker-wasip1-traffic"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+hibana-wasi-guest = { path = "../../../wasip1-guests/hibana-wasi-guest" }
+
+[[bin]]
+name = "wasip1-led-choreofs-traffic-cycle"
+path = "src/bin/wasip1-led-choreofs-traffic-cycle.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "debuginfo"

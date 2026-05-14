@@ -15,7 +15,7 @@ wasip1_rustflags="${RUSTFLAGS:-} -C link-arg=--initial-memory=65536 -C link-arg=
 RUSTFLAGS="$wasip1_rustflags" \
 CARGO_TARGET_DIR="$target_dir" \
   cargo build \
-    --manifest-path apps/wasip1/swarm-node-apps/Cargo.toml \
+    --manifest-path examples/wasip1-guests/swarm-node-apps/Cargo.toml \
     --target wasm32-wasip1 \
     --release \
     --bins
@@ -23,7 +23,15 @@ CARGO_TARGET_DIR="$target_dir" \
 RUSTFLAGS="$wasip1_rustflags" \
 CARGO_TARGET_DIR="$target_dir" \
   cargo build \
-    --manifest-path apps/wasip1/wasip1-smoke-apps/Cargo.toml \
+    --manifest-path examples/wasip1-guests/wasip1-smoke-apps/Cargo.toml \
+    --target wasm32-wasip1 \
+    --release \
+    --bins
+
+RUSTFLAGS="$wasip1_rustflags" \
+CARGO_TARGET_DIR="$target_dir" \
+  cargo build \
+    --manifest-path examples/baker-firmware/wasip1/traffic/Cargo.toml \
     --target wasm32-wasip1 \
     --release \
     --bins
