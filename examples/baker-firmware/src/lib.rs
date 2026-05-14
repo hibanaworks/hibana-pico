@@ -449,16 +449,26 @@ pub static BOOT_LOADER: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 type Handler = unsafe extern "C" fn() -> !;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
+type IrqHandler = unsafe extern "C" fn();
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
 #[repr(C)]
 struct VectorTable {
     initial_stack_pointer: *const u32,
     reset: Handler,
     exceptions: [Handler; 14],
-    external_irqs: [Handler; 32],
+    external_irqs: [IrqHandler; 32],
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 unsafe impl Sync for VectorTable {}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const fn external_irqs() -> [IrqHandler; 32] {
+    let mut handlers = [default_irq_handler as IrqHandler; 32];
+    handlers[0] = timer_alarm0_irq_handler;
+    handlers
+}
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 global_asm!(
@@ -475,6 +485,32 @@ hard_fault_trampoline:
     .word hard_fault_handler_with_sp + 1
 "#
 );
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TIMER_BASE: usize = 0x4005_4000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TIMER_ALARM0: *mut u32 = (TIMER_BASE + 0x10) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TIMER_TIMERAWL: *const u32 = (TIMER_BASE + 0x28) as *const u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TIMER_DBGPAUSE: *mut u32 = (TIMER_BASE + 0x2c) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TIMER_INTR: *mut u32 = (TIMER_BASE + 0x34) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TIMER_INTE: *mut u32 = (TIMER_BASE + 0x38) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TIMER_ALARM0_BIT: u32 = 1 << 0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const NVIC_ISER: *mut u32 = 0xe000_e100 as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const NVIC_ICPR: *mut u32 = 0xe000_e280 as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const NVIC_TIMER_IRQ0_BIT: u32 = 1 << 0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const BAKER_TIMER_TICKS_PER_MS: u64 = 12;
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+static mut BAKER_TIMER_ALARM0_READY: u32 = 0;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 unsafe extern "C" {
@@ -516,7 +552,7 @@ static VECTOR_TABLE: VectorTable = VectorTable {
         default_handler,
         default_handler,
     ],
-    external_irqs: [default_handler; 32],
+    external_irqs: external_irqs(),
 };
 
 pub const RESULT_SUCCESS: u32 = 0x4849_4f4b;
@@ -1324,15 +1360,33 @@ fn baker_find_ledger_fd(
     None
 }
 
-fn baker_poll_delay(timeout_tick: u64) {
-    let capped = core::cmp::min(timeout_tick / 50_000, 80_000);
-    let mut spin = 0u64;
-    while spin < capped {
-        core::hint::black_box(spin);
-        core::hint::spin_loop();
-        spin += 1;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn baker_poll_delay(timeout_ms: u64) {
+    let delay_ticks = core::cmp::min(
+        timeout_ms.saturating_mul(BAKER_TIMER_TICKS_PER_MS),
+        u32::MAX as u64,
+    );
+    let delay_ticks = core::cmp::max(delay_ticks as u32, 1);
+    let alarm = unsafe { read_volatile(TIMER_TIMERAWL) }.wrapping_add(delay_ticks);
+    unsafe {
+        write_volatile(TIMER_DBGPAUSE, 0);
+        write_volatile(core::ptr::addr_of_mut!(BAKER_TIMER_ALARM0_READY), 0);
+        write_volatile(TIMER_INTR, TIMER_ALARM0_BIT);
+        write_volatile(NVIC_ICPR, NVIC_TIMER_IRQ0_BIT);
+        write_volatile(TIMER_INTE, read_volatile(TIMER_INTE) | TIMER_ALARM0_BIT);
+        write_volatile(NVIC_ISER, NVIC_TIMER_IRQ0_BIT);
+        write_volatile(TIMER_ALARM0, alarm);
+        asm!("cpsie i", options(nomem, nostack, preserves_flags));
+        while read_volatile(core::ptr::addr_of!(BAKER_TIMER_ALARM0_READY)) == 0 {
+            asm!("wfi", options(nomem, nostack, preserves_flags));
+        }
+        write_volatile(TIMER_INTE, read_volatile(TIMER_INTE) & !TIMER_ALARM0_BIT);
+        write_volatile(TIMER_INTR, TIMER_ALARM0_BIT);
     }
 }
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+fn baker_poll_delay(_timeout_ms: u64) {}
 
 fn baker_driver_assert_choreofs_counts() {
     let path_opens = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_PATH_OPEN_COUNT));
@@ -1362,6 +1416,22 @@ unsafe extern "C" fn default_handler() -> ! {
     record_failure_stage(STAGE_HARD_PANIC);
     mark_result(RESULT_FAILURE);
     park()
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+unsafe extern "C" fn default_irq_handler() {
+    unsafe {
+        default_handler();
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+unsafe extern "C" fn timer_alarm0_irq_handler() {
+    unsafe {
+        write_volatile(TIMER_INTR, TIMER_ALARM0_BIT);
+        write_volatile(core::ptr::addr_of_mut!(BAKER_TIMER_ALARM0_READY), 1);
+        asm!("sev", options(nomem, nostack, preserves_flags));
+    }
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]

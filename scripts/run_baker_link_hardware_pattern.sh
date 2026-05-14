@@ -13,6 +13,7 @@ expected_core1_stage="48490004"
 allow_core1_ready="1"
 bin_name="baker-traffic"
 timeout_seconds="${HIBANA_BAKER_TIMEOUT_SECONDS:-45}"
+poll_seconds="${HIBANA_BAKER_POLL_SECONDS:-1}"
 
 case "$pattern" in
   traffic) ;;
@@ -20,13 +21,15 @@ case "$pattern" in
     bin_name="baker-choreofs-traffic"
     expected_core1_stage="4849000a"
     allow_core1_ready="0"
-    timeout_seconds="${HIBANA_BAKER_TIMEOUT_SECONDS:-90}"
+    timeout_seconds="${HIBANA_BAKER_TIMEOUT_SECONDS:-120}"
+    poll_seconds="${HIBANA_BAKER_POLL_SECONDS:-5}"
     ;;
   choreofs-traffic-loop)
     bin_name="baker-choreofs-traffic-loop"
     expected_core1_stage="4849000a"
     allow_core1_ready="0"
-    timeout_seconds="${HIBANA_BAKER_TIMEOUT_SECONDS:-90}"
+    timeout_seconds="${HIBANA_BAKER_TIMEOUT_SECONDS:-120}"
+    poll_seconds="${HIBANA_BAKER_POLL_SECONDS:-5}"
     ;;
   fail-safe)
     bin_name="baker-fail-safe"
@@ -123,7 +126,7 @@ while :; do
   if (( SECONDS >= deadline )); then
     break
   fi
-  sleep "${HIBANA_BAKER_POLL_SECONDS:-1}"
+  sleep "$poll_seconds"
 done
 
 printf 'pattern=%s\n' "$pattern"
