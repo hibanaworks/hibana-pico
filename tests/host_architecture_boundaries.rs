@@ -589,7 +589,7 @@ fn cargo_uses_published_hibana_release_and_no_demo_meaning_features() {
     assert_present(
         "Cargo.toml",
         cargo,
-        &["hibana = { version = \"0.4.0\", default-features = false }"],
+        &["hibana = { version = \"0.4.1\", default-features = false }"],
     );
     assert_absent(
         "Cargo.toml",
