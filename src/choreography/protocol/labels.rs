@@ -1,4 +1,4 @@
-use hibana::substrate::runtime::LabelUniverse;
+use hibana::integration::runtime::LabelUniverse;
 
 pub const LABEL_ENGINE_REQ: u8 = 1;
 pub const LABEL_ENGINE_RET: u8 = 2;
@@ -72,10 +72,6 @@ pub const LABEL_ENGINE_ABORT_BEGIN_CONTROL: u8 = 129;
 pub const LABEL_ENGINE_ABORT_REASON: u8 = 130;
 pub const LABEL_ENGINE_ABORT_FENCE_CONTROL: u8 = 131;
 pub const LABEL_ENGINE_ABORT_ACK_CONTROL: u8 = 132;
-pub const LABEL_ACTIVATION_AUTHORITY_CONTROL: u8 = 133;
-pub const LABEL_ACTIVATION_CONTROL: u8 = 134;
-pub const LABEL_REENTRY_PERMIT_CONTROL: u8 = LABEL_ACTIVATION_AUTHORITY_CONTROL;
-pub const LABEL_ACTIVATION_PERMIT_CONTROL: u8 = LABEL_ACTIVATION_CONTROL;
 pub const LABEL_TOPOLOGY_BEGIN_CONTROL: u8 = 138;
 pub const LABEL_TOPOLOGY_ACK_CONTROL: u8 = 139;
 pub const LABEL_TOPOLOGY_COMMIT_CONTROL: u8 = 140;
@@ -177,7 +173,7 @@ pub type AbortControlWireHandle = (u32, u16);
 pub type LifecycleControlWireHandle = (u8, u64);
 pub type TopologyControlWireHandle = (u8, u64);
 pub type TransactionControlWireHandle = (u8, u64);
-pub type StateControlWireHandle = (u8, u64);
+pub type StateControlWireHandle = (u32, u16);
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BuiltInLabelUniverse;

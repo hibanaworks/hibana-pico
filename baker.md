@@ -38,7 +38,7 @@ The current source map is:
 
 | Layer | File |
 | --- | --- |
-| AppKit capsule/logical-image substrate | `src/appkit.rs` |
+| AppKit capsule/logical-image integration | `src/appkit.rs` |
 | Generic site marker | `src/site.rs` |
 | Baker-local RP2040 SIO carrier | `examples/baker-firmware/src/lib.rs` |
 | Baker logical-image/reset support | `examples/baker-firmware/src/lib.rs` |

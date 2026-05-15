@@ -11,25 +11,25 @@ use hibana_pico::{
     },
 };
 
-pub struct FailSafe;
-pub struct FailSafeLocal;
+pub struct PreviewProbe;
+pub struct PreviewProbeLocal;
 
 #[derive(Debug)]
-pub enum FailSafeError {
+pub enum PreviewProbeError {
     Endpoint(hibana::EndpointError),
     RuntimeViolation,
 }
 
-impl From<hibana::EndpointError> for FailSafeError {
+impl From<hibana::EndpointError> for PreviewProbeError {
     fn from(error: hibana::EndpointError) -> Self {
         Self::Endpoint(error)
     }
 }
 
-impl appkit::Capsule for FailSafe {
+impl appkit::Capsule for PreviewProbe {
     type Universe = appkit::BuiltInUniverse;
     type Placement = BakerPlacement;
-    type Local = FailSafeLocal;
+    type Local = PreviewProbeLocal;
     type Report = core::convert::Infallible;
 
     fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
@@ -46,23 +46,26 @@ impl appkit::Capsule for FailSafe {
     }
 }
 
-impl BakerCapsuleFacts for FailSafe {
-    const SUCCESS_RESULT: u32 = baker_firmware::RESULT_FAIL_SAFE_OK;
+impl BakerCapsuleFacts for PreviewProbe {
     type DriverArtifact = appkit::NoWasi;
     type EngineArtifact = appkit::NoWasi;
 
-    const DRIVER_IMAGE_ID: appkit::ImageId = appkit::ImageId(20);
-    const ENGINE_IMAGE_ID: appkit::ImageId = appkit::ImageId(21);
+    const DRIVER_IMAGE_ID: appkit::ImageId = appkit::ImageId(52);
+    const ENGINE_IMAGE_ID: appkit::ImageId = appkit::ImageId(53);
+    const SUCCESS_RESULT: u32 = baker_firmware::RESULT_PREVIEW_PROBE_OK;
 }
 
-impl appkit::Localside<FailSafe> for FailSafeLocal {
-    type Error = FailSafeError;
+impl appkit::Localside<PreviewProbe> for PreviewProbeLocal {
+    type Error = PreviewProbeError;
 
     fn engine<'endpoint, 'guest, const ROLE: u8>(
-        mut ctx: appkit::EngineCtx<'endpoint, 'guest, FailSafe, ROLE>,
+        mut ctx: appkit::EngineCtx<'endpoint, 'guest, PreviewProbe, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 1 {
+                let preview = ctx.endpoint().flow::<EngineAbortBeginControl>()?;
+                core::mem::drop(preview);
+
                 let begin = ctx.endpoint().flow::<EngineAbortBeginControl>()?;
                 begin.send(()).await?;
 
@@ -83,7 +86,7 @@ impl appkit::Localside<FailSafe> for FailSafeLocal {
     }
 
     fn driver<'a, const ROLE: u8>(
-        mut ctx: appkit::DriverCtx<'a, FailSafe, ROLE>,
+        mut ctx: appkit::DriverCtx<'a, PreviewProbe, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 0 {
@@ -91,7 +94,7 @@ impl appkit::Localside<FailSafe> for FailSafeLocal {
 
                 let abort = ctx.endpoint().recv::<EngineAbortMsg>().await?;
                 if abort.reason() != EngineAbortReason::FuelExhausted {
-                    return Err(FailSafeError::RuntimeViolation);
+                    return Err(PreviewProbeError::RuntimeViolation);
                 }
 
                 baker_firmware::mark_safe_state();
@@ -102,7 +105,7 @@ impl appkit::Localside<FailSafe> for FailSafeLocal {
                 ctx.endpoint().recv::<EngineAbortAckControl>().await?;
 
                 baker_firmware::mark_runtime_ready();
-                baker_firmware::mark_success(<FailSafe as BakerCapsuleFacts>::SUCCESS_RESULT);
+                baker_firmware::mark_success(<PreviewProbe as BakerCapsuleFacts>::SUCCESS_RESULT);
                 return ctx.pending().await;
             }
             ctx.pending().await
@@ -110,27 +113,27 @@ impl appkit::Localside<FailSafe> for FailSafeLocal {
     }
 
     fn boundary<'a, const ROLE: u8>(
-        ctx: appkit::BoundaryCtx<'a, FailSafe, ROLE>,
+        ctx: appkit::BoundaryCtx<'a, PreviewProbe, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn link<'a, const ROLE: u8>(
-        ctx: appkit::LinkCtx<'a, FailSafe, ROLE>,
+        ctx: appkit::LinkCtx<'a, PreviewProbe, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn supervisor<'a, const ROLE: u8>(
-        ctx: appkit::SupervisorCtx<'a, FailSafe, ROLE>,
+        ctx: appkit::SupervisorCtx<'a, PreviewProbe, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 }
 
-impl<I> appkit::ArtifactForImage<FailSafe, I> for BakerArtifacts
+impl<I> appkit::ArtifactForImage<PreviewProbe, I> for BakerArtifacts
 where
-    I: appkit::LogicalImage<FailSafe, Artifact = appkit::NoWasi>,
+    I: appkit::LogicalImage<PreviewProbe, Artifact = appkit::NoWasi>,
 {
     fn artifact_for_image(&self) -> I::Artifact {
         appkit::NoWasi
@@ -146,16 +149,16 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn baker_selected_run() -> ! {
-    baker_firmware::run::<FailSafe>()
+    baker_firmware::run::<PreviewProbe>()
 }
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
 fn main() {
-    baker_firmware::run::<FailSafe>()
+    baker_firmware::run::<PreviewProbe>()
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> ! {
-    baker_firmware::run::<FailSafe>()
+    baker_firmware::run::<PreviewProbe>()
 }

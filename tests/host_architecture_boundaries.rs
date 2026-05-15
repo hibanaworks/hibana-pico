@@ -56,7 +56,7 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
         appkit,
         &[
             "pub trait Capsule",
-            "fn choreography() -> impl hibana::substrate::program::Projectable<Self::Universe>;",
+            "fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe>;",
             "pub trait LogicalImage",
             "const REQUESTED_ROLES: RoleSet;",
             "fn wasi_guest_storage<'guest, const ROLE: u8>() -> WasiGuestStorage<'guest>;",
@@ -68,7 +68,7 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
             "Guest::init_in_place(ptr, module)?;",
             "pub struct CarrierKind",
             "pub struct PeerImageSet",
-            "type Carrier<'a>: hibana::substrate::Transport + 'a",
+            "type Carrier<'a>: hibana::integration::Transport + 'a",
             "fn carrier<'a>() -> Self::Carrier<'a>;",
             "fn visit_requested_projected_roles<C, V>",
             "pub trait Placement",
@@ -141,7 +141,6 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
             "BoardRuntime",
             "BoardRun",
             "appkit::Program",
-            "fragment::Fragment",
             "pub trait ProjectedRoleVisitor",
             "pub fn visit_projected_role",
             "fn visit_projected_roles<V>(",
@@ -185,25 +184,22 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
 }
 
 #[test]
-fn choreography_is_protocol_vocabulary_and_optional_raw_helpers() {
+fn choreography_is_protocol_vocabulary_only() {
     let choreography_mod = include_str!("../src/choreography/mod.rs");
-    let fragment = include_str!("../src/choreography/fragment.rs");
     let protocol_mod = include_str!("../src/choreography/protocol/mod.rs");
 
     assert_present(
         "src/choreography/mod.rs",
         choreography_mod,
-        &["pub mod fragment;", "pub mod protocol;"],
+        &["pub mod protocol;"],
     );
     assert_absent(
         "src/choreography/mod.rs",
         choreography_mod,
-        &["pub mod local;", "pub mod proof;"],
-    );
-    assert_absent(
-        "src/choreography/fragment.rs",
-        fragment,
         &[
+            "pub mod fragment;",
+            "pub mod local;",
+            "pub mod proof;",
             "appkit::Choreo",
             "appkit::Program",
             "trait Fragment",
@@ -232,7 +228,7 @@ fn choreography_is_protocol_vocabulary_and_optional_raw_helpers() {
 }
 
 #[test]
-fn site_exposes_substrate_facts_not_protocol_authority() {
+fn site_exposes_site_facts_not_protocol_authority() {
     let site = include_str!("../src/site.rs");
 
     assert_present("src/site.rs", site, &["pub struct Local<Image>"]);
@@ -348,6 +344,7 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
     let fail_safe_bin = include_str!("../examples/baker-firmware/src/bin/fail_safe.rs");
     let recovery_bin = include_str!("../examples/baker-firmware/src/bin/recovery.rs");
     let many_reentry_bin = include_str!("../examples/baker-firmware/src/bin/many_reentry.rs");
+    let endpoint_poison_bin = include_str!("../examples/baker-firmware/src/bin/endpoint_poison.rs");
 
     assert_present(
         "examples/baker-firmware/src/lib.rs",
@@ -493,9 +490,22 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         many_reentry_bin,
         &[
             "impl appkit::Capsule for ManyReentry",
-            "g::Msg<LABEL_MEM_FENCE, MemFence>",
+            "EngineAbortBeginControl",
+            "EngineAbortFenceControl",
+            "EngineAbortAckControl",
             "impl appkit::Localside<ManyReentry> for ManyReentryLocal",
             "baker_firmware::run::<ManyReentry>()",
+        ],
+    );
+    assert_present(
+        "examples/baker-firmware/src/bin/endpoint_poison.rs",
+        endpoint_poison_bin,
+        &[
+            "impl appkit::Capsule for EndpointPoison",
+            "impl appkit::Localside<EndpointPoison> for EndpointPoisonLocal",
+            "record_endpoint_error(&error)",
+            "poisoned generation must not produce a flow continuation",
+            "baker_firmware::run::<EndpointPoison>()",
         ],
     );
 }
@@ -573,19 +583,20 @@ fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
 }
 
 #[test]
-fn cargo_uses_crates_io_hibana_and_no_demo_meaning_features() {
+fn cargo_uses_published_hibana_release_and_no_demo_meaning_features() {
     let cargo = include_str!("../Cargo.toml");
 
     assert_present(
         "Cargo.toml",
         cargo,
-        &["hibana = { version = \"0.3.0\", default-features = false }"],
+        &["hibana = { version = \"0.4.0\", default-features = false }"],
     );
-    assert_absent("Cargo.toml", cargo, &["hibana = { path ="]);
     assert_absent(
         "Cargo.toml",
         cargo,
         &[
+            "hibana = { path = \"../hibana\"",
+            "[patch.crates-io]",
             "baker-choreofs-demo",
             "baker-choreofs-bad-path-demo",
             "baker-choreofs-bad-payload-demo",
@@ -599,4 +610,77 @@ fn cargo_uses_crates_io_hibana_and_no_demo_meaning_features() {
             "platform-cortex-m",
         ],
     );
+}
+
+#[test]
+fn plan_fixes_failure_deadline_cancellation_as_fail_closed_evidence() {
+    let plan = include_str!("../plan.md");
+    let lib = include_str!("../src/lib.rs");
+    let appkit = include_str!("../src/appkit.rs");
+
+    assert_present(
+        "plan.md",
+        plan,
+        &[
+            "### Failure / Deadline / Cancellation Constitution",
+            "Committed Hibana wait semantics are `Progress | Fault`.",
+            "Rust public APIs expose committed progress as `Ok(progress) | Err(domain evidence)`.",
+            "Committed Fault is terminal evidence, not a route arm.",
+            "Hibana also has non-consuming preview/probe points.",
+            "A preview/probe mismatch is not protocol progress",
+            "Timeout is not a public API.",
+            "Deadline is an operational fuse.",
+            "A protocol-visible timeout must be written as choreography: Timer / clock /",
+            "Public Hibana exposes only these error evidence envelopes:",
+            "EndpointError",
+            "ResolverError",
+            "AttachError",
+            "There is no wide `HibanaError` for localside.",
+            "Retry after an operational fault is a new choreography instance / new session generation.",
+            "Failure never authorizes hidden progress.",
+        ],
+    );
+    assert_present(
+        "plan.md",
+        plan,
+        &[
+            "### Failure / Deadline / Cancellation Gate",
+            "wait semantics are `Progress | Fault`",
+            "no public timeout API",
+            "no public cancel / reconnect / same-generation recovery API",
+            "no public wide `HibanaError`",
+            "no public `EndpointErrorKind` / `ResolverErrorKind` / `AttachErrorKind` decision surface",
+            "preview/probe `Err` is non-progress and cannot select hidden progress",
+            "operational deadline expiry poisons the current session generation",
+            "protocol-visible timeout uses resolver-selected explicit route arm",
+        ],
+    );
+
+    for (path, source) in [("src/lib.rs", lib), ("src/appkit.rs", appkit)] {
+        assert_absent(
+            path,
+            source,
+            &[
+                "HibanaError",
+                "pub enum EndpointErrorKind",
+                "pub struct EndpointErrorKind",
+                "pub type EndpointErrorKind",
+                "pub enum ResolverErrorKind",
+                "pub struct ResolverErrorKind",
+                "pub type ResolverErrorKind",
+                "pub enum AttachErrorKind",
+                "pub struct AttachErrorKind",
+                "pub type AttachErrorKind",
+                "recv_timeout",
+                "send_timeout",
+                "offer_timeout",
+                "decode_timeout",
+                "try_recover",
+                "ignore_fault",
+                "reconnect",
+                "pub fn cancel",
+                "pub async fn cancel",
+            ],
+        );
+    }
 }

@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-hibana = { version = "0.3.0", default-features = false }
+hibana = { version = "0.4.0", default-features = false }
 hibana-pico = { path = "../.." }
 rp2040-boot2 = "0.3.0"
 
@@ -42,3 +42,27 @@ path = "src/bin/recovery.rs"
 [[bin]]
 name = "baker-many-reentry"
 path = "src/bin/many_reentry.rs"
+
+[[bin]]
+name = "baker-panic-marker"
+path = "src/bin/panic_marker.rs"
+
+[[bin]]
+name = "baker-endpoint-fault"
+path = "src/bin/endpoint_fault.rs"
+
+[[bin]]
+name = "baker-endpoint-poison"
+path = "src/bin/endpoint_poison.rs"
+
+[[bin]]
+name = "baker-preview-probe"
+path = "src/bin/preview_probe.rs"
+
+[[bin]]
+name = "baker-deadline-fault"
+path = "src/bin/deadline_fault.rs"
+
+[[bin]]
+name = "baker-timer-route"
+path = "src/bin/timer_route.rs"

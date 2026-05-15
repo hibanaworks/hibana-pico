@@ -7,7 +7,7 @@ hibana-pico の完成形はこれです。
 ```text
 hibana-pico
   = projectable な raw hibana choreography を、複数 WASI P1 engine と複数 logical site image に attach し、
-    Rust/Cargo の通常 build artifact として出力する projection / attach / run substrate
+    Rust/Cargo の通常 build artifact として出力する projection / attach / run integration layer
 ```
 
 最短定義はこれです。
@@ -154,7 +154,7 @@ site
   generic site contract only
   one built-in logical image marker: site::Local<Image>
   carrier facts
-  substrate facts
+  site facts
   may host engine implementation capacity
   must not complete or authorize WASI P1 imports
 
@@ -248,25 +248,24 @@ choreography = hibana::g
 ユーザーに `g::steps` や `Program<steps::...>` の具体型を書かせません。
 
 ```rust
-fn choreography() -> impl hibana::substrate::program::Projectable<Self::Universe> {
+fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
     use hibana::g::{self, Role};
     g::seq(
         g::send::<Role<0>, Role<1>, BudgetRunMsg, 1>(),
         g::seq(
-            choreography::fragment::path_open_cycle::<1, 0>(),
+            g::send::<Role<1>, Role<0>, PathOpenMsg, 1>(),
             g::seq(
-                choreography::fragment::fd_write_gpio_cycle::<1, 0, 2>(),
-                choreography::fragment::poll_timer_cycle::<1, 0, 3>(),
+                g::send::<Role<1>, Role<0>, FdWriteMsg, 2>(),
+                g::send::<Role<1>, Role<0>, PollOneoffMsg, 3>(),
             ),
         ),
     )
 }
 ```
 
-`choreography::fragment::*` はただの helper function。
-raw hibana::g term を返すだけです。
-使わなくてもよい。
-helper を使ったか直書きしたかで意味は変わりません。
+`choreography::fragment` は public concept にしません。
+helper 名や fragment trait から capacity を推測しません。
+必要なら各 Capsule/example が普通の Rust 関数として raw `hibana::g` term を組み立てます。
 
 ---
 
@@ -278,12 +277,12 @@ projection 可能性は `choreography()` の戻り値境界で要求します。
 
 ```rust
 pub trait Capsule {
-    type Universe: hibana::substrate::runtime::LabelUniverse;
+    type Universe: hibana::integration::runtime::LabelUniverse;
     type Placement: appkit::Placement<Self>;
     type Local: appkit::Localside<Self>;
     type Report;
 
-    fn choreography() -> impl hibana::substrate::program::Projectable<Self::Universe>;
+    fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe>;
 }
 ```
 
@@ -368,7 +367,7 @@ current typed hibana role domain:
 - stack 使用量を target ごとに測る
 
 したがって現時点では、`LogicalImage::REQUESTED_ROLES` は current typed hibana role domain 内にあることを gate します。
-これは最終理想の任意 role 数対応ではなく、現行 hibana substrate の正直な implementation capacity です。
+これは最終理想の任意 role 数対応ではなく、現行 hibana integration surface の正直な implementation capacity です。
 
 ---
 
@@ -631,7 +630,7 @@ Localside future / scheduler storage も同じです。
 - appkit scheduler storage は bounded in-place slot だけを使う
 - std/no_std の差分で protocol path / storage policy を分岐しない
 
-host / linux site は richer substrate を持ってよい。
+host / linux site は richer integration layer を持ってよい。
 ただし appkit の projection / attach / scheduler / guest initialization path は
 RP2040 と同じ bounded in-place 方針から外れない。
 
@@ -764,7 +763,7 @@ Cargo だけ。
 ```rust
 pub trait LogicalImage<C: appkit::Capsule> {
     type Exit<R>;
-    type Carrier<'a>: hibana::substrate::Transport + 'a
+    type Carrier<'a>: hibana::integration::Transport + 'a
     where
         Self: 'a;
 
@@ -832,11 +831,27 @@ Localside に raw site / raw device / raw host authority を渡しません。
 
 ```rust
 pub trait Localside<C: appkit::Capsule> {
-    async fn engine<const ROLE: u8>(ctx: appkit::EngineCtx<'_, C, ROLE>) -> !;
-    async fn driver<const ROLE: u8>(ctx: appkit::DriverCtx<'_, C, ROLE>) -> !;
-    async fn boundary<const ROLE: u8>(ctx: appkit::BoundaryCtx<'_, C, ROLE>) -> !;
-    async fn link<const ROLE: u8>(ctx: appkit::LinkCtx<'_, C, ROLE>) -> !;
-    async fn supervisor<const ROLE: u8>(ctx: appkit::SupervisorCtx<'_, C, ROLE>) -> !;
+    type Error;
+
+    fn engine<const ROLE: u8>(
+        ctx: appkit::EngineCtx<'_, C, ROLE>,
+    ) -> impl Future<Output = Result<Infallible, Self::Error>>;
+
+    fn driver<const ROLE: u8>(
+        ctx: appkit::DriverCtx<'_, C, ROLE>,
+    ) -> impl Future<Output = Result<Infallible, Self::Error>>;
+
+    fn boundary<const ROLE: u8>(
+        ctx: appkit::BoundaryCtx<'_, C, ROLE>,
+    ) -> impl Future<Output = Result<Infallible, Self::Error>>;
+
+    fn link<const ROLE: u8>(
+        ctx: appkit::LinkCtx<'_, C, ROLE>,
+    ) -> impl Future<Output = Result<Infallible, Self::Error>>;
+
+    fn supervisor<const ROLE: u8>(
+        ctx: appkit::SupervisorCtx<'_, C, ROLE>,
+    ) -> impl Future<Output = Result<Infallible, Self::Error>>;
 }
 ```
 
@@ -885,6 +900,200 @@ SupervisorCtx:
   image attestation
 ```
 
+Localside failure is propagated with `?`.
+The top-level logical image runner is the only place allowed to unwrap / panic.
+Project code must be able to write the normal hibana shape directly:
+
+```rust
+let flow = endpoint.flow::<Msg>()?;
+flow.send(&msg).await?;
+
+let reply = endpoint.recv::<ReplyMsg>().await?;
+```
+
+That `recv` shape is only for the next deterministic message in the projected
+role program. If the choreography point is a route choice, the hibana shape is
+`offer` followed by branch-local `decode`:
+
+```rust
+let branch = endpoint.offer().await?;
+let decoded = branch.decode::<Msg>().await?;
+```
+
+Do not require Baker-specific wrappers, appkit wrappers, `map_err` at every call
+site, or stage-code helper functions around `flow` / `send` / `recv` / `offer`
+/ `decode`.
+
+To preserve origin evidence while still using plain `?`, hibana must expose a
+domain-specific error family with caller location captured by the public
+fallible API itself.
+
+```rust
+pub struct EndpointError {
+    pub fn operation(&self) -> &'static str;
+    pub fn file(&self) -> &'static str;
+    pub fn line(&self) -> u32;
+    pub fn column(&self) -> u32;
+}
+
+pub struct ResolverError { /* same public shape, resolver domain only */ }
+pub struct AttachError { /* same public shape, attach domain only */ }
+```
+
+This is intentionally not one wide `HibanaError`.
+Endpoint progress, resolver policy, and attach/runtime assembly are different
+domains. A single enum would only reintroduce a domain switch inside the error.
+The shared abstraction is only the caller-location rule. `ErrorLocation`,
+operation enums, and error-kind enums do not need to become public concepts;
+`EndpointError` / `ResolverError` / `AttachError` may expose only small getters
+and `Debug`. Endpoint error-kind accessors must not become a public decision
+surface. Appkit may attempt an optional loop-control `flow`; if the endpoint
+does not admit that control, appkit must not infer why from error internals and
+must let the immediately following real WASI import be validated by the
+projected endpoint frontier.
+
+For async endpoint operations, the callsite must be captured when constructing
+the future, not after the future is polled. If necessary, hibana should expose
+`fn send(...) -> impl Future<Output = Result<_, EndpointError>>`-style entry
+points internally rather than losing caller location inside `async fn`.
+
+App / firmware crates may define their own aggregate error type with `From`
+impls:
+
+```rust
+enum AppError {
+    Endpoint(hibana::EndpointError),
+    Resolver(hibana::ResolverError),
+    Attach(hibana::AttachError),
+}
+```
+
+but that aggregation belongs to the app. hibana's public error surface remains
+domain-specific.
+
+appkit must not add a public failure-hook trait just to support one firmware
+marker strategy. `Localside::Error` only needs `Debug`; firmware-specific panic
+marker recording belongs in the firmware panic handler or in the firmware's
+own error representation, not in appkit's public contract.
+
+### Failure / Deadline / Cancellation Constitution
+
+Committed Hibana wait semantics are `Progress | Fault`.
+Rust public APIs expose committed progress as `Ok(progress) | Err(domain evidence)`.
+Committed Fault is terminal evidence, not a route arm.
+Timeout is not a public API.
+Deadline is an operational fuse.
+A protocol-visible timeout must be written as choreography: Timer / clock /
+interrupt fact at an explicit route point, with a resolver choosing the route
+arm. It is not the same proof as operational deadline failure.
+
+Hibana wait sites have only two semantic outcomes:
+
+```text
+Progress
+Fault
+```
+
+The Rust surface is:
+
+```text
+Ok(progress)
+Err(domain evidence)
+```
+
+`Err` is not a branch. For committed progress, `Err` is terminal evidence for
+the current session generation. Failure never authorizes alternate progress.
+
+Hibana also has non-consuming preview/probe points. `flow` previews a send,
+`offer` previews a branch, and `decode` may validate the selected branch before
+committing endpoint progress. A preview/probe mismatch is not protocol progress
+and must not become route authority. It may leave the endpoint on the same
+frontier so the same projected branch can be decoded correctly, but it must not
+select a fallback arm, infer a retry policy, or hide transport failure.
+
+```text
+Failure never authorizes alternate progress.
+Failure never authorizes hidden progress.
+Timeout is not a public API.
+Deadline is an operational fuse.
+Committed Fault poisons the current session generation.
+Retry requires a new session generation.
+`?` is the normal failure propagation path.
+```
+
+Time may choose a typed branch only when time appears in the choreography. A
+protocol-visible timeout is therefore an ordinary projected route, for example
+a Timer / clock / interrupt fact consumed by a resolver at an explicit route
+point. The resolver may choose the `Expired` arm only at that route point.
+Operational deadline expiry is different: it is a committed wait-site fault,
+poisons the current generation, and wakes the affected waiters with domain
+evidence. It must not select a route arm.
+
+Public endpoint progress remains only:
+
+```text
+flow
+send
+recv
+offer
+decode
+```
+
+Do not add:
+
+```text
+recv_timeout
+send_timeout
+offer_timeout
+decode_timeout
+cancel
+try_recover
+reconnect
+ignore_fault
+same-generation retry
+```
+
+Public Hibana exposes only these error evidence envelopes:
+
+```text
+EndpointError
+ResolverError
+AttachError
+```
+
+There is no wide `HibanaError` for localside.
+
+`EndpointError` / `ResolverError` / `AttachError` are evidence envelopes, not
+recovery handles. Error kind may exist internally for `Debug`, diagnostics,
+fault sinks, or tests, but public `EndpointErrorKind` / `ResolverErrorKind` /
+`AttachErrorKind` must not become user decision surfaces. User code must not be
+expected to match `DeadlineExceeded` or `TransportClosed` and continue the same
+generation.
+
+The public API boundary determines the error domain:
+
+```text
+endpoint.flow/send/recv/offer/decode -> EndpointError
+resolver decision / policy registration -> ResolverError
+rendezvous / role enter -> AttachError
+```
+
+Lower-layer causes are mapped into the boundary's domain evidence. For example,
+if `offer()` fails because a resolver or transport invariant failed inside the
+endpoint, the public result is still `EndpointError`.
+
+User computation errors are not `EndpointError`. A role future may return its
+own app error. If that error escapes while the session is still live, the
+runner / role guard must terminally fault the current generation; the user error
+itself remains a user error.
+
+Retry after an operational fault is a new choreography instance / new session generation.
+
+Drop is a backstop, not the authority. It may poison a live generation when an
+endpoint is abandoned, but hard reset, panic-abort, hard fault, disabled
+interrupts, or process kill require the runner / supervisor / integration owner /
+watchdog to provide the terminal fault boundary.
+
 ---
 
 ## 14. Site の責務
@@ -913,7 +1122,7 @@ site がしてよいこと。
 - provide CPU/core/process facts
 - provide physical/electrical facts
 - provide typed boundary handles
-- provide memory/link substrate facts
+- provide memory/link site facts
 - host one or more logical images
 - host linked engine implementation capacity
 These facts live in the `LogicalImage` implementation, user/example site-local
@@ -1148,9 +1357,9 @@ Guest::resume(BudgetRun)
 - no stale guest memory view after `memory.grow`
 - WASI errno lowering in one place
 
-### WASI VM Substrate Shape
+### WASI VM Machine Shape
 
-`kernel::engine::wasm` は private façade、実装は private substrate です。
+`kernel::engine::wasm` は private façade、実装は private machine です。
 外から見える engine route を増やしません。
 
 ```text
@@ -1158,7 +1367,7 @@ src/kernel/engine/
   mod.rs
   wasm/
     mod.rs       // private crate façade
-    substrate.rs // private VM implementation
+    machine.rs // private VM implementation
 ```
 
 `tiny`, `core`, `wasip1` は public-facing route 名として残しません。
@@ -1488,6 +1697,13 @@ Network disconnect / reconnect handling:
   `RouteDecision`, `TopologyBegin`, `TopologyAck`, `TopologyCommit`, `AbortBegin`,
   `AbortAck`, `Fence`, `StateSnapshot`, `StateRestore`, `TxCommit`, `TxAbort`,
   `LoopContinue`, and `LoopBreak`.
+- `CapDelegate` is not an app-authored `g::send` control message. It is the
+  lower-layer endpoint token delegation path. Examples must not fake
+  activation or re-entry by wrapping `CapDelegate` in ordinary choreography
+  messages.
+- `StateSnapshot` / `StateRestore` are state-generation controls for the role
+  endpoint that owns the state. They are not a cross-site transfer shortcut and
+  must not be used as "snapshot on one core, restore on another" proof.
 - ledger route witness generation changes only after the projected choreography admits the corresponding control transition.
 - ledger fd views hold the object generation and derived route witness generation observed at mint time.
 - `fd_read` / `fd_write` / `poll_oneoff` must validate the current generation/reachability before progress.
@@ -1613,7 +1829,7 @@ policy::<ID>()                           -> resolver capacity
 g::par                                   -> parallel capacity
 ```
 
-`fragment::fd_write()` helper を使っても、`g::send` を直書きしても同じ意味です。
+capacity は helper 関数名ではなく、raw `hibana::g` term / projected RoleProgram metadata からだけ導きます。
 
 ---
 
@@ -1622,7 +1838,7 @@ g::par                                   -> parallel capacity
 固定 universe を強制しません。
 
 ```rust
-type Universe: hibana::substrate::runtime::LabelUniverse;
+type Universe: hibana::integration::runtime::LabelUniverse;
 ```
 
 built-in vocabulary は予約領域を持つ。
@@ -1676,13 +1892,13 @@ Carrier cannot:
 
 SIO FIFO, mailbox, RTOS queue, UART, USB, TCP, UDP mesh, in-process queue は全部 carrier。
 
-これらの名前は `site` の substrate facts であり、`appkit` の public enum variant ではありません。
+これらの名前は `site` の site facts であり、`appkit` の public enum variant ではありません。
 `appkit` は carrier identity の照合と manifest 化だけを行い、site 固有 carrier の意味を知りません。
 
 RP2040 Baker example では example-local `rp2040_sio::SIO` が core0/core1 logical images を接続する
 materialized carrier です。
 `appkit` は SIO FIFO register / RP2040 core id / RP2040 carrier semantics を知りません。
-SIO carrier は Baker example の local module が `hibana::substrate::Transport` として提供します。
+SIO carrier は Baker example の local module が `hibana::integration::Transport` として提供します。
 この carrier は protocol authority ではなく、typed frame を運ぶだけです。
 
 ---
@@ -2043,7 +2259,7 @@ Forbidden:
 
 Required:
 
-- example-local `rp2040_sio::SIO` is implemented as `hibana::substrate::Transport`
+- example-local `rp2040_sio::SIO` is implemented as `hibana::integration::Transport`
 - core0 and core1 logical images attach their own role slices independently
 - both peer images for one Capsule/site use a shared site-local session identity
 - SIO only moves typed choreography frames
@@ -2152,6 +2368,18 @@ The engine side must not synthesize the repetition. The only loop on the WASI si
 appkit canonical resume loop that keeps executing the guest until it exits, traps, or parks
 after terminal completion.
 
+Canonical WASI loop control is not a heuristic. If a `WasiImage` capsule has no
+projected `WasiImportLoopContinue` / `WasiImportLoopBreak` control labels,
+appkit must fail closed. If those controls are projected, appkit may send
+`LoopContinue` only when the current endpoint frontier admits that control. If
+the optional loop-control `flow` is not admitted, appkit must not inspect
+endpoint error internals to recover. It must fall through to the real WASI
+import, and that import must then succeed or fail through the projected
+endpoint frontier. This preserves straight-line phases such as ChoreoFS
+`path_open` and mid-iteration phases such as `fd_write -> poll_oneoff`, while
+keeping repeated visible behavior under explicit route / loop / reentry
+choreography.
+
 ### WASI P1 VM Boundary Gate
 
 hibana-pico executes only WASI Preview 1 artifacts.
@@ -2217,7 +2445,7 @@ Allowed:
 - linked engine implementation capacity
 - carrier facts
 - typed boundary handles
-- site-local substrate facts
+- site-local facts
 
 Forbidden:
 
@@ -2251,6 +2479,76 @@ Localside must not receive:
 - raw host filesystem
 - raw socket authority
 - raw MMIO outside typed BoundaryCtx
+
+### Hibana Error Evidence Gate
+
+Project localside code must propagate hibana failures with plain `?`.
+
+Required hibana error domains:
+
+- `EndpointError` for `flow` / `send` / `recv` / `offer` / `decode`
+- `ResolverError` for resolver decisions and policy registration
+- `AttachError` for rendezvous / role enter
+
+Each error must carry:
+
+- domain-specific operation identity
+- error kind for `Debug` / diagnostics
+- caller location captured at the public fallible API boundary
+
+Forbidden:
+
+- one wide `HibanaError` as the primary public error type
+- public `EndpointErrorKind` / `ResolverErrorKind` / `AttachErrorKind` as user decision surfaces
+- Baker-specific wrappers around `flow` / `send` / `recv` / `offer` / `decode`
+- appkit wrappers around hibana endpoint progress only to record callsite
+- public appkit failure-hook traits for firmware-specific RAM markers
+- repeated `map_err` / stage-code plumbing at project call sites
+- losing async callsite location by capturing location only after polling
+- public timeout APIs such as `recv_timeout` / `send_timeout` / `offer_timeout`
+- public cancel / reconnect / same-generation recovery APIs
+
+The top-level logical image entry may unwrap / panic after recording the
+propagated error evidence. Intermediate localside code must return `Result` and
+use `?`.
+
+Firmware panic evidence must have its own verification artifact. Do not prove
+panic marker behavior by corrupting a normal choreography/WASI demo. A dedicated
+panic-marker binary may intentionally panic; the firmware panic handler must
+record file hash, line, column, message hash, message length, and message bytes
+into RAM markers, and the hardware script must verify those markers as an
+expected failure result with no hardfault marker.
+
+### Failure / Deadline / Cancellation Gate
+
+Required:
+
+- wait semantics are `Progress | Fault`
+- public Rust result is `Ok(progress) | Err(domain evidence)`
+- committed-progress `Err` is terminal evidence, not a protocol branch
+- preview/probe `Err` is non-progress and cannot select hidden progress
+- operational deadline expiry poisons the current session generation
+- retry starts a new session generation
+- operational timeout/fuse proof is the `deadline-fault` kind of proof
+- protocol-visible timeout is a separate Timer / clock / interrupt route proof
+- protocol-visible timeout uses resolver-selected explicit route arm
+- `?` is the ordinary localside propagation path
+
+Forbidden:
+
+- `recv_timeout` / `send_timeout` / `offer_timeout` / `decode_timeout`
+- public `cancel`
+- same-generation `try_recover` / `reconnect` / `ignore_fault`
+- no public timeout API
+- no public cancel / reconnect / same-generation recovery API
+- no public wide `HibanaError`
+- no public `EndpointErrorKind` / `ResolverErrorKind` / `AttachErrorKind` decision surface
+- matching public error kind to choose an alternate branch
+- treating `DeadlineExceeded` / transport close / peer reset as route authority
+- transport or appkit selecting fallback progress after operational failure
+- treating preview/probe mismatch as permission to infer a route or policy
+- calling a resolver-selected Timer / clock / interrupt route proof an
+  operational timeout fault proof
 
 ### WASI Gate
 
@@ -2322,13 +2620,14 @@ Forbidden:
 17. attached engine invariant
 18. same-artifact boundary preservation
 19. sealed Localside contexts
-20. raw hibana helper functions only
-21. projection-derived logical images
-22. `RouteKey` unification
-23. ChoreoFS as fact resolver
-24. site families
-25. heterogeneous example
-26. deletion / hygiene
+20. domain-specific hibana error evidence for `?` propagation
+21. raw hibana helper functions only
+22. projection-derived logical images
+23. `RouteKey` unification
+24. ChoreoFS as fact resolver
+25. site families
+26. heterogeneous example
+27. deletion / hygiene
 
 No custom CLI phase.
 No codegen phase.
@@ -2492,9 +2791,22 @@ Different target triples.
 - RouteDecision stays on the choreography side; ChoreoFS does not select routes.
 - Ledger materializes fd / rights / resource identity / object generation / derived route witness / route witness generation.
 - Link/carrier facts materialize reachability / peer generation / observed epoch; no hidden reconnect or route repair.
-- Site provides substrate facts only.
+- Site provides site facts only.
 - Placement decides location, not legality.
 - Localside receives sealed contexts only.
+- Localside propagates failures with `?`; top-level logical image entry is the only unwrap / panic boundary.
+- Hibana error evidence is domain-specific: `EndpointError`, `ResolverError`, and `AttachError`, sharing only caller-location evidence.
+- `EndpointError` covers `flow` / `send` / `recv` / `offer` / `decode`; project code must not need wrappers or repeated `map_err` to preserve origin.
+- Endpoint error internals are not an appkit decision surface; optional WASI loop-control preview failure falls through to the real import, which remains the authority check.
+- Hibana wait outcomes are only `Progress | Fault`.
+- committed-progress `Err(domain evidence)` is terminal evidence for the current generation, not a protocol branch.
+- preview/probe `Err(domain evidence)` is non-progress and must not infer fallback progress.
+- Operational deadlines are internal fuses that poison the generation; they are not public timeout APIs.
+- Protocol timeout must be written as choreography with a Timer role / explicit route arm.
+- Retry / recovery after operational fault starts a new session generation.
+- Public timeout, cancel, reconnect, and same-generation recovery APIs do not exist.
+- Public error-kind matching must not become route authority.
+- Firmware panic marker behavior is verified by a separate panic-marker artifact, not by bending a successful choreography/WASI demo into failure.
 - Capacity derives from hibana/projection metadata, not appkit DSL.
 - Metadata derivation is a blocking item.
 - Cargo features select implementation capacity, not Capsule meaning.
@@ -2531,7 +2843,7 @@ every WASI P1 import completion through Endpoint/carrier
 
 appkit は choreography を包まない。
 appkit は projectable raw hibana choreography を project / attach / run する。
-site は substrate facts だけを持つ。ただし engine capacity を含んでもよい。
+site は site facts だけを持つ。ただし engine capacity を含んでもよい。
 site は WASI P1 import を完了も authorize もしない。
 kernel は private WASI P1 VM / appkit service implementation。
 machine/port/projects は空 placeholder として置かない。
@@ -2540,6 +2852,9 @@ build は Cargo だけ。
 domain semantics は examples / user Capsules だけ。
 capacity は hibana/projection metadata から導く。
 metadata visitor は blocking item。
+hibana の fallible boundary error は domain-specific family にする。
+`EndpointError` / `ResolverError` / `AttachError` が caller location を持ち、
+project localside は wrapper なしで `?` 伝播する。
 Wasm execution は private WASI P1 VM boundary に閉じる。
 VM construction は in-place のみで、`Guest::new(bytes)` を runtime path にしない。
 VM hot path は decoded IR 必須で、raw opcode decode / block scan / allocation を置かない。

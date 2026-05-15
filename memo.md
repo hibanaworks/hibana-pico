@@ -101,7 +101,7 @@ mod projects;
 
 - host / linux / mcu / rp2040 / swarm site families
 - carrier facts
-- substrate facts
+- site facts
 - may host engine implementation capacity
 - must not complete or authorize WASI imports
 
@@ -140,12 +140,12 @@ Capsule は associated Program を持たない。
 
 ```rust
 pub trait Capsule {
-    type Universe: hibana::substrate::runtime::LabelUniverse;
+    type Universe: hibana::integration::runtime::LabelUniverse;
     type Placement: appkit::Placement<Self>;
     type Local: appkit::Localside<Self>;
     type Report;
 
-    fn choreography() -> impl hibana::substrate::program::Projectable<Self::Universe>;
+    fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe>;
 }
 ```
 
@@ -431,7 +431,7 @@ No macro DSL phase.
 - `RouteKey<Target>` is a derived witness, not app-level authority.
 - ChoreoFS resolves facts; it does not own progress authority.
 - Ledger materializes fd/lease/session facts.
-- Site provides substrate facts only.
+- Site provides site facts only.
 - Placement decides location, not legality.
 - Localside receives sealed contexts only.
 - Capacity derives from hibana/projection metadata, not appkit DSL.

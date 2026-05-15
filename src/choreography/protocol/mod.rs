@@ -1,6 +1,6 @@
 use hibana::{
     g::Msg,
-    substrate::{
+    integration::{
         cap::{
             CapShot, ControlResourceKind, GenericCapToken, ResourceKind,
             advanced::{
@@ -44,7 +44,7 @@ mod tests {
         PathOpened, PollOneoff, PollReady, ProcExitStatus, RandomDone, RandomGet, RandomSeed,
         StderrChunk, StdinChunk, StdinRequest, StdoutChunk, Wasip1ExitStatus,
     };
-    use hibana::substrate::{
+    use hibana::integration::{
         cap::{
             CapShot, ControlResourceKind, ResourceKind,
             advanced::{ControlOp, ControlPath, ControlScopeKind, ScopeId},
@@ -104,7 +104,7 @@ mod tests {
             assert_ne!(label, 57);
             assert!(
                 label
-                    <= <super::BuiltInLabelUniverse as hibana::substrate::runtime::LabelUniverse>::MAX_LABEL
+                    <= <super::BuiltInLabelUniverse as hibana::integration::runtime::LabelUniverse>::MAX_LABEL
             );
         }
     }
@@ -209,38 +209,6 @@ mod tests {
     }
 
     #[test]
-    fn activation_authority_and_activation_use_many_to_one_cap_delegate() {
-        let scope = ScopeId::generic(13);
-        let sid = SessionId::new(12);
-        let lane = Lane::new(1);
-
-        assert_eq!(
-            <super::ActivationAuthorityKind as ControlResourceKind>::OP,
-            ControlOp::CapDelegate
-        );
-        assert_eq!(
-            <super::ActivationAuthorityKind as ControlResourceKind>::SHOT,
-            CapShot::Many
-        );
-        assert_eq!(
-            <super::ActivationKind as ControlResourceKind>::OP,
-            ControlOp::CapDelegate
-        );
-        assert_eq!(
-            <super::ActivationKind as ControlResourceKind>::SHOT,
-            CapShot::One
-        );
-        assert_eq!(
-            <super::ActivationAuthorityKind as ControlResourceKind>::mint_handle(sid, lane, scope),
-            (0, scope.raw())
-        );
-        assert_eq!(
-            <super::ActivationKind as ControlResourceKind>::mint_handle(sid, lane, scope),
-            (1, scope.raw())
-        );
-    }
-
-    #[test]
     fn topology_transaction_and_state_controls_use_hibana_control_ops() {
         let scope = ScopeId::generic(21);
         let sid = SessionId::new(22);
@@ -306,11 +274,11 @@ mod tests {
         );
         assert_eq!(
             <super::StateSnapshotKind as ControlResourceKind>::mint_handle(sid, lane, scope),
-            (0, scope.raw())
+            (sid.raw(), lane.raw() as u16)
         );
         assert_eq!(
             <super::StateRestoreKind as ControlResourceKind>::mint_handle(sid, lane, scope),
-            (1, scope.raw())
+            (sid.raw(), lane.raw() as u16)
         );
     }
 

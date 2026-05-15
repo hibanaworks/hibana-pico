@@ -1,8 +1,6 @@
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_std)]
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_main)]
 
-use core::convert::Infallible;
-
 use baker_firmware::{BakerArtifacts, BakerCapsuleFacts, BakerPlacement, DriverImage, EngineImage};
 use hibana::g;
 use hibana_pico::{
@@ -23,6 +21,7 @@ const YELLOW_LED_MASK: u32 = 1 << 1;
 const RED_LED_MASK: u32 = 1 << 2;
 const LED_PREOPEN_FD: u8 = 9;
 const FD_WRITE_RIGHT: u64 = 1 << 6;
+const EXPECTED_POLL_TIMEOUT_MS: u64 = 80;
 const REENTRY_CYCLES: u32 = 3;
 
 #[derive(Clone, Copy)]
@@ -116,13 +115,25 @@ static FD_WRITE_CYCLE: [FdWriteStep; 13] = [
 pub struct ChoreoFsTraffic;
 pub struct ChoreoFsTrafficLocal;
 
+#[derive(Debug)]
+pub enum ChoreoFsTrafficError {
+    Endpoint(hibana::EndpointError),
+    RuntimeViolation,
+}
+
+impl From<hibana::EndpointError> for ChoreoFsTrafficError {
+    fn from(error: hibana::EndpointError) -> Self {
+        Self::Endpoint(error)
+    }
+}
+
 impl appkit::Capsule for ChoreoFsTraffic {
     type Universe = appkit::BuiltInUniverse;
     type Placement = BakerPlacement;
     type Local = ChoreoFsTrafficLocal;
-    type Report = Infallible;
+    type Report = core::convert::Infallible;
 
-    fn choreography() -> impl hibana::substrate::program::Projectable<Self::Universe> {
+    fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
         let path_open = || {
             g::seq(
                 g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>, 1>(),
@@ -182,15 +193,17 @@ impl BakerCapsuleFacts for ChoreoFsTraffic {
 }
 
 impl appkit::Localside<ChoreoFsTraffic> for ChoreoFsTrafficLocal {
+    type Error = ChoreoFsTrafficError;
+
     fn engine<'endpoint, 'guest, const ROLE: u8>(
         ctx: appkit::EngineCtx<'endpoint, 'guest, ChoreoFsTraffic, ROLE>,
-    ) -> impl core::future::Future<Output = Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn driver<'a, const ROLE: u8>(
         mut ctx: appkit::DriverCtx<'a, ChoreoFsTraffic, ROLE>,
-    ) -> impl core::future::Future<Output = Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 0 && !ctx.choreofs().entries().is_empty() {
                 baker_firmware::reset_choreofs_markers();
@@ -203,7 +216,7 @@ impl appkit::Localside<ChoreoFsTraffic> for ChoreoFsTrafficLocal {
                 let mut path_index = 0usize;
                 while path_index < PATH_OPEN_STEPS.len() {
                     let step = PATH_OPEN_STEPS[path_index];
-                    driver_path_open(&mut ctx, step.fd, step.object).await;
+                    driver_path_open(&mut ctx, step.fd, step.object).await?;
                     path_index += 1usize;
                 }
 
@@ -212,8 +225,8 @@ impl appkit::Localside<ChoreoFsTraffic> for ChoreoFsTrafficLocal {
                     let mut index = 0usize;
                     while index < FD_WRITE_CYCLE.len() {
                         let step = FD_WRITE_CYCLE[index];
-                        driver_fd_write(&mut ctx, step.fd, step.payload).await;
-                        driver_poll_oneoff(&mut ctx).await;
+                        driver_fd_write(&mut ctx, step.fd, step.payload).await?;
+                        driver_poll_oneoff(&mut ctx).await?;
                         index += 1usize;
                     }
                     cycle += 1;
@@ -233,7 +246,7 @@ impl appkit::Localside<ChoreoFsTraffic> for ChoreoFsTrafficLocal {
                 baker_firmware::mark_success(
                     <ChoreoFsTraffic as BakerCapsuleFacts>::SUCCESS_RESULT,
                 );
-                return core::future::pending().await;
+                return ctx.pending().await;
             }
             ctx.pending().await
         }
@@ -241,106 +254,68 @@ impl appkit::Localside<ChoreoFsTraffic> for ChoreoFsTrafficLocal {
 
     fn boundary<'a, const ROLE: u8>(
         ctx: appkit::BoundaryCtx<'a, ChoreoFsTraffic, ROLE>,
-    ) -> impl core::future::Future<Output = Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn link<'a, const ROLE: u8>(
         ctx: appkit::LinkCtx<'a, ChoreoFsTraffic, ROLE>,
-    ) -> impl core::future::Future<Output = Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn supervisor<'a, const ROLE: u8>(
         ctx: appkit::SupervisorCtx<'a, ChoreoFsTraffic, ROLE>,
-    ) -> impl core::future::Future<Output = Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 }
 
 async fn recv_engine_req<const ROLE: u8, const LABEL: u8>(
     ctx: &mut appkit::DriverCtx<'_, ChoreoFsTraffic, ROLE>,
-) -> EngineReq {
-    match ctx.endpoint().recv::<g::Msg<LABEL, EngineReq>>().await {
-        Ok(request) => request,
-        Err(error) => {
-            #[cfg(feature = "wasm-engine-core")]
-            baker_firmware::record_choreofs_engine_error_code(
-                baker_firmware::choreofs_recv_error_code(&error),
-            );
-            core::hint::black_box(error);
-            baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
-        }
-    }
+) -> Result<EngineReq, ChoreoFsTrafficError> {
+    Ok(ctx.endpoint().recv::<g::Msg<LABEL, EngineReq>>().await?)
 }
 
 async fn offer_engine_req<const ROLE: u8, const LABEL: u8>(
     ctx: &mut appkit::DriverCtx<'_, ChoreoFsTraffic, ROLE>,
-) -> EngineReq {
+) -> Result<EngineReq, ChoreoFsTrafficError> {
     baker_firmware::record_choreofs_driver_trace(0x5745_c000 | LABEL as u32);
-    let branch = match ctx.endpoint().offer().await {
-        Ok(branch) => branch,
-        Err(error) => {
-            #[cfg(feature = "wasm-engine-core")]
-            baker_firmware::record_choreofs_engine_error_code(
-                baker_firmware::choreofs_recv_error_code(&error),
-            );
-            core::hint::black_box(error);
-            baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
-        }
-    };
+    let branch = ctx.endpoint().offer().await?;
     baker_firmware::record_choreofs_driver_trace(0x5745_c100 | branch.label() as u32);
     if branch.label() != LABEL {
         #[cfg(feature = "wasm-engine-core")]
         baker_firmware::record_choreofs_engine_error_code(0x5745_c000 | branch.label() as u32);
         core::hint::black_box(branch.label());
-        baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
+        return Err(ChoreoFsTrafficError::RuntimeViolation);
     }
-    let request = match branch.decode::<g::Msg<LABEL, EngineReq>>().await {
-        Ok(request) => request,
-        Err(error) => {
-            #[cfg(feature = "wasm-engine-core")]
-            baker_firmware::record_choreofs_engine_error_code(
-                baker_firmware::choreofs_recv_error_code(&error),
-            );
-            core::hint::black_box(error);
-            baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
-        }
-    };
+    let request = branch.decode::<g::Msg<LABEL, EngineReq>>().await?;
     baker_firmware::record_choreofs_driver_trace(0x5745_c200 | LABEL as u32);
-    request
+    Ok(request)
 }
 
 async fn send_engine_ret<const ROLE: u8, const LABEL: u8>(
     ctx: &mut appkit::DriverCtx<'_, ChoreoFsTraffic, ROLE>,
     reply: EngineRet,
-) {
-    let flow = match ctx.endpoint().flow::<g::Msg<LABEL, EngineRet>>() {
-        Ok(flow) => flow,
-        Err(error) => {
-            core::hint::black_box(error);
-            baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
-        }
-    };
-    if let Err(error) = flow.send(&reply).await {
-        core::hint::black_box(error);
-        baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
-    }
+) -> Result<(), ChoreoFsTrafficError> {
+    let flow = ctx.endpoint().flow::<g::Msg<LABEL, EngineRet>>()?;
+    flow.send(&reply).await?;
+    Ok(())
 }
 
 async fn driver_path_open<const ROLE: u8>(
     ctx: &mut appkit::DriverCtx<'_, ChoreoFsTraffic, ROLE>,
     expected_fd: u8,
     expected_object: appkit::ObjectId,
-) {
-    let request = match recv_engine_req::<ROLE, LABEL_WASI_PATH_OPEN>(ctx).await {
+) -> Result<(), ChoreoFsTrafficError> {
+    let request = match recv_engine_req::<ROLE, LABEL_WASI_PATH_OPEN>(ctx).await? {
         EngineReq::PathOpen(request) => request,
         other => {
             core::hint::black_box(other);
-            baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
+            return Err(ChoreoFsTrafficError::RuntimeViolation);
         }
     };
-    handle_path_open(ctx, request, expected_fd, expected_object).await;
+    handle_path_open(ctx, request, expected_fd, expected_object).await
 }
 
 async fn handle_path_open<const ROLE: u8>(
@@ -348,50 +323,50 @@ async fn handle_path_open<const ROLE: u8>(
     request: PathOpen,
     expected_fd: u8,
     expected_object: appkit::ObjectId,
-) {
+) -> Result<(), ChoreoFsTrafficError> {
     if request.preopen_fd() != LED_PREOPEN_FD || request.rights_base() != FD_WRITE_RIGHT {
         core::hint::black_box(request);
-        baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
+        return Err(ChoreoFsTrafficError::RuntimeViolation);
     }
     let object = match ctx.choreofs().resolve(request.path()) {
         Some(object) => object,
         None => {
             core::hint::black_box(request);
-            baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
+            return Err(ChoreoFsTrafficError::RuntimeViolation);
         }
     };
     let fact = match find_ledger_fd(ctx.ledger(), object, request.rights_base()) {
         Some(fact) => fact,
         None => {
             core::hint::black_box((object, request.rights_base()));
-            baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
+            return Err(ChoreoFsTrafficError::RuntimeViolation);
         }
     };
     if fact.fd() != expected_fd as u32 || fact.object() != expected_object {
         core::hint::black_box(fact);
-        baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
+        return Err(ChoreoFsTrafficError::RuntimeViolation);
     }
     baker_firmware::record_choreofs_path_open(object);
     send_engine_ret::<ROLE, LABEL_WASI_PATH_OPEN_RET>(
         ctx,
         EngineRet::PathOpened(PathOpened::new(fact.fd() as u8, 0)),
     )
-    .await;
+    .await
 }
 
 async fn driver_fd_write<const ROLE: u8>(
     ctx: &mut appkit::DriverCtx<'_, ChoreoFsTraffic, ROLE>,
     expected_fd: u8,
     expected_payload: &[u8],
-) {
-    let request = match offer_engine_req::<ROLE, LABEL_WASI_FD_WRITE>(ctx).await {
+) -> Result<(), ChoreoFsTrafficError> {
+    let request = match offer_engine_req::<ROLE, LABEL_WASI_FD_WRITE>(ctx).await? {
         EngineReq::FdWrite(request) => request,
         other => {
             core::hint::black_box(other);
-            baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
+            return Err(ChoreoFsTrafficError::RuntimeViolation);
         }
     };
-    handle_fd_write(ctx, request, expected_fd, expected_payload).await;
+    handle_fd_write(ctx, request, expected_fd, expected_payload).await
 }
 
 async fn handle_fd_write<const ROLE: u8>(
@@ -399,20 +374,20 @@ async fn handle_fd_write<const ROLE: u8>(
     request: FdWrite,
     expected_fd: u8,
     expected_payload: &[u8],
-) {
+) -> Result<(), ChoreoFsTrafficError> {
     if request.fd() != expected_fd || request.as_bytes() != expected_payload {
         core::hint::black_box((request, expected_fd));
-        baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
+        return Err(ChoreoFsTrafficError::RuntimeViolation);
     }
     let fact = match ctx.ledger().fd(request.fd() as u32) {
         Some(fact) if fact.rights() == FD_WRITE_RIGHT => fact,
         Some(fact) => {
             core::hint::black_box(fact);
-            baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
+            return Err(ChoreoFsTrafficError::RuntimeViolation);
         }
         None => {
             core::hint::black_box(request);
-            baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
+            return Err(ChoreoFsTrafficError::RuntimeViolation);
         }
     };
     let high = match request.as_bytes() {
@@ -420,35 +395,42 @@ async fn handle_fd_write<const ROLE: u8>(
         b"0" => false,
         other => {
             core::hint::black_box(other);
-            baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
+            return Err(ChoreoFsTrafficError::RuntimeViolation);
         }
     };
-    write_led_object(fact.object(), high);
+    write_led_object(fact.object(), high)?;
     baker_firmware::record_choreofs_fd_write(fact.object());
     send_engine_ret::<ROLE, LABEL_WASI_FD_WRITE_RET>(
         ctx,
         EngineRet::FdWriteDone(FdWriteDone::new(request.fd(), request.len() as u8)),
     )
-    .await;
+    .await
 }
 
 async fn driver_poll_oneoff<const ROLE: u8>(
     ctx: &mut appkit::DriverCtx<'_, ChoreoFsTraffic, ROLE>,
-) {
-    let request = match recv_engine_req::<ROLE, LABEL_WASI_POLL_ONEOFF>(ctx).await {
+) -> Result<(), ChoreoFsTrafficError> {
+    let request = match recv_engine_req::<ROLE, LABEL_WASI_POLL_ONEOFF>(ctx).await? {
         EngineReq::PollOneoff(request) => request,
         other => {
             core::hint::black_box(other);
-            baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
+            return Err(ChoreoFsTrafficError::RuntimeViolation);
         }
     };
+    baker_firmware::record_choreofs_poll_timeout(request.timeout_tick());
+    if request.timeout_tick() != EXPECTED_POLL_TIMEOUT_MS {
+        #[cfg(feature = "wasm-engine-core")]
+        baker_firmware::record_choreofs_engine_error_code(0x5745_d000);
+        core::hint::black_box(request);
+        return Err(ChoreoFsTrafficError::RuntimeViolation);
+    }
     baker_firmware::baker_poll_delay(request.timeout_tick());
     baker_firmware::record_choreofs_poll();
     send_engine_ret::<ROLE, LABEL_WASI_POLL_ONEOFF_RET>(
         ctx,
         EngineRet::PollReady(PollReady::new(1)),
     )
-    .await;
+    .await
 }
 
 fn find_ledger_fd(
@@ -488,16 +470,17 @@ fn led_for_object(object: appkit::ObjectId) -> Option<LedObject> {
     None
 }
 
-fn write_led_object(object: appkit::ObjectId, high: bool) {
+fn write_led_object(object: appkit::ObjectId, high: bool) -> Result<(), ChoreoFsTrafficError> {
     let led = match led_for_object(object) {
         Some(led) => led,
         None => {
             core::hint::black_box(object);
-            baker_firmware::runtime_fail(baker_firmware::STAGE_CHOREOFS_DRIVER_ERROR);
+            return Err(ChoreoFsTrafficError::RuntimeViolation);
         }
     };
     baker_firmware::baker_gpio_write(led.pin, high);
     baker_firmware::record_choreofs_led_mask(led.mask, high);
+    Ok(())
 }
 
 impl appkit::ArtifactForImage<ChoreoFsTraffic, DriverImage> for BakerArtifacts {

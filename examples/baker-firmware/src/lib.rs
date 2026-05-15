@@ -57,8 +57,8 @@ mod rp2040_sio {
         session_id: u32,
         requeued: bool,
         delivered: bool,
-        frame_label: Option<hibana::substrate::transport::FrameLabel>,
-        hint_frame_label: Cell<Option<hibana::substrate::transport::FrameLabel>>,
+        frame_label: Option<hibana::integration::transport::FrameLabel>,
+        hint_frame_label: Cell<Option<hibana::integration::transport::FrameLabel>>,
         len: usize,
         bytes: [u8; SIO_FRAME_BYTES],
     }
@@ -160,7 +160,7 @@ mod rp2040_sio {
     fn encode_meta(
         sender_role: u8,
         peer_role: u8,
-        frame_label: hibana::substrate::transport::FrameLabel,
+        frame_label: hibana::integration::transport::FrameLabel,
         len: usize,
     ) -> u32 {
         ((frame_label.raw() as u32) << 24)
@@ -169,8 +169,8 @@ mod rp2040_sio {
             | (len as u32)
     }
 
-    fn decode_meta(word: u32) -> (u8, u8, hibana::substrate::transport::FrameLabel, usize) {
-        let frame_label = hibana::substrate::transport::FrameLabel::new((word >> 24) as u8);
+    fn decode_meta(word: u32) -> (u8, u8, hibana::integration::transport::FrameLabel, usize) {
+        let frame_label = hibana::integration::transport::FrameLabel::new((word >> 24) as u8);
         let peer_role = ((word >> 16) & 0xff) as u8;
         let sender_role = ((word >> 8) & 0xff) as u8;
         let len = (word & 0xff) as usize;
@@ -201,8 +201,8 @@ mod rp2040_sio {
         }
     }
 
-    impl hibana::substrate::Transport for SioTransport {
-        type Error = hibana::substrate::transport::TransportError;
+    impl hibana::integration::Transport for SioTransport {
+        type Error = hibana::integration::transport::TransportError;
         type Tx<'a>
             = SioTx
         where
@@ -228,27 +228,34 @@ mod rp2040_sio {
         fn poll_send<'a, 'f>(
             &'a self,
             tx: &'a mut Self::Tx<'a>,
-            outgoing: hibana::substrate::transport::Outgoing<'f>,
+            outgoing: hibana::integration::transport::Outgoing<'f>,
             cx: &mut core::task::Context<'_>,
         ) -> core::task::Poll<Result<(), Self::Error>>
         where
             'a: 'f,
         {
             let bytes = outgoing.payload().as_bytes();
-            if bytes.len() > SIO_FRAME_BYTES {
-                return core::task::Poll::Ready(Err(
-                    hibana::substrate::transport::TransportError::Failed,
-                ));
-            }
-            #[cfg(feature = "wasm-engine-core")]
-            {
-                let code = 0x5350_0000
+            if outgoing.peer() == tx.local_role {
+                let code = 0x5355_0000
                     | ((tx.local_role as u32) << 20)
-                    | ((outgoing.peer() as u32) << 16)
                     | (((bytes.len() as u32) & 0xff) << 8)
                     | outgoing.frame_label().raw() as u32;
                 super::record_choreofs_sio_trace(code);
+                tx.sent_frames = tx.sent_frames.saturating_add(1);
+                cx.waker().wake_by_ref();
+                return core::task::Poll::Ready(Ok(()));
             }
+            if bytes.len() > SIO_FRAME_BYTES {
+                return core::task::Poll::Ready(Err(
+                    hibana::integration::transport::TransportError::Failed,
+                ));
+            }
+            let code = 0x5350_0000
+                | ((tx.local_role as u32) << 20)
+                | ((outgoing.peer() as u32) << 16)
+                | (((bytes.len() as u32) & 0xff) << 8)
+                | outgoing.frame_label().raw() as u32;
+            super::record_choreofs_sio_trace(code);
             fifo::push_blocking(SIO_FRAME_MAGIC);
             fifo::push_blocking(tx.session_id);
             fifo::push_blocking(encode_meta(
@@ -275,20 +282,17 @@ mod rp2040_sio {
             &'a self,
             rx: &'a mut Self::Rx<'a>,
             cx: &mut core::task::Context<'_>,
-        ) -> core::task::Poll<Result<hibana::substrate::wire::Payload<'a>, Self::Error>> {
+        ) -> core::task::Poll<Result<hibana::integration::wire::Payload<'a>, Self::Error>> {
             if rx.frame_label.is_some() && (rx.requeued || !rx.delivered) {
                 rx.requeued = false;
                 rx.delivered = true;
                 rx.hint_frame_label.set(None);
-                #[cfg(feature = "wasm-engine-core")]
-                {
-                    let code = 0x5353_0000
-                        | ((rx.local_role as u32) << 20)
-                        | (((rx.len as u32) & 0xff) << 8)
-                        | rx.frame_label.map(|label| label.raw() as u32).unwrap_or(0);
-                    super::record_choreofs_sio_trace(code);
-                }
-                return core::task::Poll::Ready(Ok(hibana::substrate::wire::Payload::new(
+                let code = 0x5353_0000
+                    | ((rx.local_role as u32) << 20)
+                    | (((rx.len as u32) & 0xff) << 8)
+                    | rx.frame_label.map(|label| label.raw() as u32).unwrap_or(0);
+                super::record_choreofs_sio_trace(code);
+                return core::task::Poll::Ready(Ok(hibana::integration::wire::Payload::new(
                     &rx.bytes[..rx.len],
                 )));
             }
@@ -304,7 +308,7 @@ mod rp2040_sio {
             }
             if fifo::pop_blocking() != SIO_FRAME_MAGIC {
                 return core::task::Poll::Ready(Err(
-                    hibana::substrate::transport::TransportError::Failed,
+                    hibana::integration::transport::TransportError::Failed,
                 ));
             }
             let session_id = fifo::pop_blocking();
@@ -315,29 +319,26 @@ mod rp2040_sio {
                 || len > SIO_FRAME_BYTES
             {
                 return core::task::Poll::Ready(Err(
-                    hibana::substrate::transport::TransportError::Failed,
+                    hibana::integration::transport::TransportError::Failed,
                 ));
             }
             rx.frame_label = Some(frame_label);
             rx.hint_frame_label.set(Some(frame_label));
             rx.len = len;
             rx.delivered = true;
-            #[cfg(feature = "wasm-engine-core")]
-            {
-                let code = 0x5351_0000
-                    | ((rx.local_role as u32) << 20)
-                    | ((sender_role as u32) << 16)
-                    | (((len as u32) & 0xff) << 8)
-                    | frame_label.raw() as u32;
-                super::record_choreofs_sio_trace(code);
-            }
+            let code = 0x5351_0000
+                | ((rx.local_role as u32) << 20)
+                | ((sender_role as u32) << 16)
+                | (((len as u32) & 0xff) << 8)
+                | frame_label.raw() as u32;
+            super::record_choreofs_sio_trace(code);
             let mut offset = 0usize;
             while offset < len {
                 unpack_payload_word(fifo::pop_blocking(), &mut rx.bytes[..len], offset);
                 offset += 4;
             }
             cx.waker().wake_by_ref();
-            core::task::Poll::Ready(Ok(hibana::substrate::wire::Payload::new(
+            core::task::Poll::Ready(Ok(hibana::integration::wire::Payload::new(
                 &rx.bytes[..rx.len],
             )))
         }
@@ -347,28 +348,24 @@ mod rp2040_sio {
             if rx.requeued {
                 rx.delivered = false;
             }
-            #[cfg(feature = "wasm-engine-core")]
-            {
-                let code = 0x5352_0000
-                    | ((rx.local_role as u32) << 20)
-                    | (((rx.len as u32) & 0xff) << 8)
-                    | rx.frame_label.map(|label| label.raw() as u32).unwrap_or(0);
-                super::record_choreofs_sio_trace(code);
-            }
+            let code = 0x5352_0000
+                | ((rx.local_role as u32) << 20)
+                | (((rx.len as u32) & 0xff) << 8)
+                | rx.frame_label.map(|label| label.raw() as u32).unwrap_or(0);
+            super::record_choreofs_sio_trace(code);
         }
 
         fn drain_events(
             &self,
-            _emit: &mut dyn FnMut(hibana::substrate::transport::advanced::TransportEvent),
+            _emit: &mut dyn FnMut(hibana::integration::transport::advanced::TransportEvent),
         ) {
         }
 
         fn recv_frame_hint<'a>(
             &'a self,
             rx: &'a Self::Rx<'a>,
-        ) -> Option<hibana::substrate::transport::FrameLabel> {
-            let hint = rx.hint_frame_label.take();
-            #[cfg(feature = "wasm-engine-core")]
+        ) -> Option<hibana::integration::transport::FrameLabel> {
+            let hint = rx.hint_frame_label.get();
             if let Some(frame_label) = hint {
                 let code = 0x5354_0000
                     | ((rx.local_role as u32) << 20)
@@ -469,6 +466,42 @@ hard_fault_trampoline:
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const TIMER_BASE: usize = 0x4005_4000;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
+const WATCHDOG_BASE: usize = 0x4005_8000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const WATCHDOG_TICK: *mut u32 = (WATCHDOG_BASE + 0x2c) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const WATCHDOG_TICK_ENABLE: u32 = 1 << 9;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const XOSC_BASE: usize = 0x4002_4000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const XOSC_CTRL: *mut u32 = XOSC_BASE as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const XOSC_STATUS: *const u32 = (XOSC_BASE + 0x04) as *const u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const XOSC_STARTUP: *mut u32 = (XOSC_BASE + 0x0c) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const XOSC_CTRL_FREQ_RANGE_1_15MHZ: u32 = 0x0000_0aa0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const XOSC_CTRL_ENABLE: u32 = 0x00fa_b000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const XOSC_STATUS_STABLE: u32 = 1 << 31;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const XOSC_STARTUP_12MHZ_CONSERVATIVE: u32 = 0x0000_0b80;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_BASE: usize = 0x4000_8000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_REF_CTRL: *mut u32 = (CLOCKS_BASE + 0x30) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_REF_DIV: *mut u32 = (CLOCKS_BASE + 0x34) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_REF_SELECTED: *const u32 = (CLOCKS_BASE + 0x38) as *const u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_REF_SRC_XOSC: u32 = 2;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_REF_SELECTED_XOSC: u32 = 1 << CLOCKS_CLK_REF_SRC_XOSC;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_REF_DIV_1: u32 = 1 << 8;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
 const TIMER_ALARM0: *mut u32 = (TIMER_BASE + 0x10) as *mut u32;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const TIMER_TIMERAWL: *const u32 = (TIMER_BASE + 0x28) as *const u32;
@@ -487,7 +520,11 @@ const NVIC_ICPR: *mut u32 = 0xe000_e280 as *mut u32;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const NVIC_TIMER_IRQ0_BIT: u32 = 1 << 0;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-const BAKER_TIMER_TICKS_PER_MS: u64 = 12;
+const BAKER_XOSC_HZ: u32 = 12_000_000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const BAKER_TIMER_TICK_CYCLES: u32 = BAKER_XOSC_HZ / 1_000_000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const BAKER_TIMER_TICKS_PER_MS: u64 = 1_000;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 static mut BAKER_TIMER_ALARM0_READY: u32 = 0;
@@ -536,10 +573,13 @@ static VECTOR_TABLE: VectorTable = VectorTable {
 };
 
 pub const RESULT_SUCCESS: u32 = 0x4849_4f4b;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
 const RESULT_FAILURE: u32 = 0x4849_4641;
 pub const RESULT_FAIL_SAFE_OK: u32 = 0x4849_4653;
 pub const RESULT_RECOVERY_OK: u32 = 0x4849_5243;
 pub const RESULT_MANY_REENTRY_OK: u32 = 0x4849_524d;
+pub const RESULT_PREVIEW_PROBE_OK: u32 = 0x4849_5050;
+pub const RESULT_TIMER_ROUTE_OK: u32 = 0x4849_5452;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const STAGE_CORE0_START: u32 = 0x4849_0001;
@@ -564,7 +604,8 @@ pub const STAGE_CONTROL_FLOW_ERROR: u32 = 0x4849_0f12;
 
 pub const CHOREOFS_DRIVER_STARTED: u32 = 0x5741_0010;
 pub const CHOREOFS_GPIO_READY: u32 = 0x5741_0020;
-const CHOREOFS_ENGINE_ERROR: u32 = 0x5741_4641;
+const PANIC_MESSAGE_BYTES: usize = 384;
+
 #[unsafe(no_mangle)]
 static mut HIBANA_DEMO_RESULT: u32 = 0;
 #[used]
@@ -590,6 +631,27 @@ static mut HIBANA_DEMO_CORE0_STAGE: u32 = 0;
 static mut HIBANA_DEMO_CORE1_STAGE: u32 = 0;
 #[used]
 #[unsafe(no_mangle)]
+static mut HIBANA_DEMO_PANIC_FILE_HASH: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_PANIC_LINE: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_PANIC_COLUMN: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_PANIC_MESSAGE_HASH: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_PANIC_MESSAGE_LEN: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_PANIC_MESSAGE_TOTAL_LEN: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_PANIC_MESSAGE: [u8; PANIC_MESSAGE_BYTES] = [0; PANIC_MESSAGE_BYTES];
+#[used]
+#[unsafe(no_mangle)]
 static mut HIBANA_CHOREOFS_ENGINE_STATUS: u32 = 0;
 #[used]
 #[unsafe(no_mangle)]
@@ -612,6 +674,12 @@ static mut HIBANA_CHOREOFS_FD_WRITE_COUNT: u32 = 0;
 #[used]
 #[unsafe(no_mangle)]
 static mut HIBANA_CHOREOFS_POLL_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_LAST_POLL_TICKS_LO: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_LAST_POLL_TICKS_HI: u32 = 0;
 #[used]
 #[unsafe(no_mangle)]
 static mut HIBANA_CHOREOFS_LAST_OBJECT: u32 = 0;
@@ -682,6 +750,7 @@ pub trait BakerCapsuleFacts: appkit::Capsule<Placement = BakerPlacement> {
     const DRIVER_IMAGE_ID: appkit::ImageId;
     const ENGINE_IMAGE_ID: appkit::ImageId;
     const SUCCESS_RESULT: u32 = RESULT_SUCCESS;
+    const OPERATIONAL_DEADLINE_TICKS: u32 = 0;
 
     fn driver_facts() -> appkit::DriverFacts<'static> {
         appkit::DriverFacts::EMPTY
@@ -728,7 +797,9 @@ pub fn baker_poll_delay(timeout_ms: u64) {
 }
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
-pub fn baker_poll_delay(_timeout_ms: u64) {}
+pub fn baker_poll_delay(timeout_ms: u64) {
+    core::hint::black_box(timeout_ms);
+}
 
 fn park() -> ! {
     loop {
@@ -863,18 +934,112 @@ fn record_failure_stage(stage: u32) {
     }
 }
 
-#[cfg(not(all(target_arch = "arm", target_os = "none")))]
-fn record_failure_stage(stage: u32) {
-    core::hint::black_box(stage);
-}
-
 fn write_marker(slot: *mut u32, value: u32) {
     unsafe {
         core::ptr::write_volatile(slot, value);
     }
 }
 
-#[cfg(feature = "wasm-engine-core")]
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn panic_hash_byte(hash: u32, byte: u8) -> u32 {
+    (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn panic_hash_str(text: &str) -> u32 {
+    let mut hash = 0x811c_9dc5;
+    for byte in text.as_bytes() {
+        hash = panic_hash_byte(hash, *byte);
+    }
+    hash
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+struct PanicMessageRecorder {
+    stored: usize,
+    total: usize,
+    hash: u32,
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+impl PanicMessageRecorder {
+    fn new() -> Self {
+        let mut index = 0usize;
+        while index < PANIC_MESSAGE_BYTES {
+            unsafe {
+                let base = core::ptr::addr_of_mut!(HIBANA_DEMO_PANIC_MESSAGE).cast::<u8>();
+                core::ptr::write_volatile(base.add(index), 0);
+            }
+            index += 1;
+        }
+        Self {
+            stored: 0,
+            total: 0,
+            hash: 0x811c_9dc5,
+        }
+    }
+
+    fn finish(self) {
+        write_marker(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_PANIC_MESSAGE_LEN),
+            self.stored as u32,
+        );
+        write_marker(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_PANIC_MESSAGE_TOTAL_LEN),
+            self.total as u32,
+        );
+        write_marker(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_PANIC_MESSAGE_HASH),
+            self.hash,
+        );
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+impl core::fmt::Write for PanicMessageRecorder {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        for byte in text.as_bytes() {
+            self.hash = panic_hash_byte(self.hash, *byte);
+            if self.stored < PANIC_MESSAGE_BYTES {
+                unsafe {
+                    let base = core::ptr::addr_of_mut!(HIBANA_DEMO_PANIC_MESSAGE).cast::<u8>();
+                    core::ptr::write_volatile(base.add(self.stored), *byte);
+                }
+                self.stored += 1;
+            }
+            self.total = self.total.saturating_add(1);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn record_panic_info(info: &core::panic::PanicInfo<'_>) {
+    if let Some(location) = info.location() {
+        write_marker(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_PANIC_FILE_HASH),
+            panic_hash_str(location.file()),
+        );
+        write_marker(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_PANIC_LINE),
+            location.line(),
+        );
+        write_marker(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_PANIC_COLUMN),
+            location.column(),
+        );
+    }
+
+    let mut recorder = PanicMessageRecorder::new();
+    match core::fmt::Write::write_fmt(&mut recorder, format_args!("{info}")) {
+        Ok(()) => {}
+        Err(error) => {
+            core::hint::black_box(error);
+        }
+    }
+    recorder.finish();
+}
+
 fn record_choreofs_sio_trace(code: u32) {
     unsafe {
         let count = core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_CHOREOFS_SIO_TRACE_COUNT));
@@ -921,6 +1086,14 @@ pub fn reset_choreofs_markers() {
     write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_PATH_OPEN_COUNT), 0);
     write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_FD_WRITE_COUNT), 0);
     write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_POLL_COUNT), 0);
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_POLL_TICKS_LO),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_POLL_TICKS_HI),
+        0,
+    );
     write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_OBJECT), 0);
     write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LED_MASK), 0);
     write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SEEN_LED_MASK), 0);
@@ -933,7 +1106,6 @@ pub fn record_choreofs_engine_status(status: u32) {
     );
 }
 
-#[cfg(feature = "wasm-engine-core")]
 pub fn record_choreofs_engine_error_code(code: u32) {
     write_marker(
         core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_ERROR_CODE),
@@ -945,18 +1117,20 @@ pub fn record_choreofs_driver_trace(trace: u32) {
     write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_DRIVER_TRACE), trace);
 }
 
-#[cfg(feature = "wasm-engine-core")]
-pub fn choreofs_recv_error_code(error: &hibana::RecvError) -> u32 {
-    match error {
-        hibana::RecvError::Transport(_) => 0x5745_6101,
-        hibana::RecvError::Binding(_) => 0x5745_6102,
-        hibana::RecvError::Codec(_) => 0x5745_6103,
-        hibana::RecvError::PhaseInvariant => 0x5745_6104,
-        hibana::RecvError::LabelMismatch { .. } => 0x5745_6105,
-        hibana::RecvError::PeerMismatch { .. } => 0x5745_6106,
-        hibana::RecvError::SessionMismatch { .. } => 0x5745_6107,
-        hibana::RecvError::PolicyAbort { reason } => 0x5745_7000 | (*reason as u32),
-    }
+pub fn choreofs_endpoint_error_code(error: &hibana::EndpointError) -> u32 {
+    let op = match error.operation() {
+        "flow" => 0x1000,
+        "send" => 0x2000,
+        "recv" => 0x3000,
+        "offer" => 0x4000,
+        "decode" => 0x5000,
+        _ => 0x0f00,
+    };
+    0x5745_0000 | op | (error.line() & 0x0fff)
+}
+
+pub fn record_endpoint_error(error: &hibana::EndpointError) {
+    record_choreofs_engine_error_code(choreofs_endpoint_error_code(error));
 }
 
 pub fn record_choreofs_path_open(object: appkit::ObjectId) {
@@ -979,6 +1153,17 @@ pub fn record_choreofs_poll() {
     increment_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_POLL_COUNT));
 }
 
+pub fn record_choreofs_poll_timeout(timeout_ticks: u64) {
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_POLL_TICKS_LO),
+        timeout_ticks as u32,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_POLL_TICKS_HI),
+        (timeout_ticks >> 32) as u32,
+    );
+}
+
 pub fn record_choreofs_led_mask(mask: u32, high: bool) {
     let bit = mask;
     let slot = core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LED_MASK);
@@ -989,14 +1174,6 @@ pub fn record_choreofs_led_mask(mask: u32, high: bool) {
         let seen_slot = core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SEEN_LED_MASK);
         write_marker(seen_slot, read_marker(seen_slot) | bit);
     }
-}
-
-#[cold]
-pub fn runtime_fail(stage: u32) -> ! {
-    record_failure_stage(stage);
-    record_choreofs_engine_status(CHOREOFS_ENGINE_ERROR);
-    mark_result(RESULT_FAILURE);
-    park()
 }
 
 pub fn mark_runtime_ready() {
@@ -1018,15 +1195,11 @@ pub fn assert_choreofs_markers(
     let polls = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_POLL_COUNT));
     let led_mask = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_LED_MASK));
     let seen_led_mask = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_SEEN_LED_MASK));
-    if path_opens != expected_path_opens
-        || writes != expected_writes
-        || polls != expected_writes
-        || led_mask != expected_final_led_mask
-        || seen_led_mask != expected_seen_led_mask
-    {
-        core::hint::black_box((path_opens, writes, polls, led_mask, seen_led_mask));
-        runtime_fail(STAGE_CHOREOFS_DRIVER_ERROR);
-    }
+    assert!(path_opens == expected_path_opens);
+    assert!(writes == expected_writes);
+    assert!(polls == expected_writes);
+    assert!(led_mask == expected_final_led_mask);
+    assert!(seen_led_mask == expected_seen_led_mask);
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -1131,6 +1304,7 @@ where
     const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(0);
     const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
     const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(C::ENGINE_IMAGE_ID);
+    const OPERATIONAL_DEADLINE_TICKS: u32 = C::OPERATIONAL_DEADLINE_TICKS;
 
     fn init() -> Self {
         Self::new()
@@ -1172,6 +1346,7 @@ where
     const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(1);
     const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
     const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(C::DRIVER_IMAGE_ID);
+    const OPERATIONAL_DEADLINE_TICKS: u32 = C::OPERATIONAL_DEADLINE_TICKS;
 
     fn init() -> Self {
         Self::new()
@@ -1225,6 +1400,7 @@ where
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 pub fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
+    record_panic_info(info);
     let stage = info
         .location()
         .map(|location| 0x4c00_0000 | (location.line() & 0x0000_ffff))
@@ -1247,6 +1423,28 @@ fn init_ram() {
         let bss_end = core::ptr::addr_of_mut!(__bss_end);
         let bss_len = bss_end as usize - bss_start as usize;
         core::ptr::write_bytes(bss_start, 0, bss_len);
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn init_baker_clock_tick() {
+    unsafe {
+        write_volatile(XOSC_STARTUP, XOSC_STARTUP_12MHZ_CONSERVATIVE);
+        write_volatile(XOSC_CTRL, XOSC_CTRL_FREQ_RANGE_1_15MHZ | XOSC_CTRL_ENABLE);
+        while read_volatile(XOSC_STATUS) & XOSC_STATUS_STABLE == 0 {
+            core::hint::spin_loop();
+        }
+
+        write_volatile(CLOCKS_CLK_REF_DIV, CLOCKS_CLK_REF_DIV_1);
+        write_volatile(CLOCKS_CLK_REF_CTRL, CLOCKS_CLK_REF_SRC_XOSC);
+        while read_volatile(CLOCKS_CLK_REF_SELECTED) & CLOCKS_CLK_REF_SELECTED_XOSC == 0 {
+            core::hint::spin_loop();
+        }
+
+        write_volatile(
+            WATCHDOG_TICK,
+            WATCHDOG_TICK_ENABLE | (BAKER_TIMER_TICK_CYCLES & 0x01ff),
+        );
     }
 }
 
@@ -1400,6 +1598,7 @@ unsafe extern "C" fn core1_entry() -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Reset() -> ! {
     init_ram();
+    init_baker_clock_tick();
     mark_stage(STAGE_CORE0_START);
     ensure_core1_launched();
     mark_stage(STAGE_PROGRAM_READY);

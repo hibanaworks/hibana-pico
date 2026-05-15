@@ -5,9 +5,12 @@
 //! or complete WASI P1 imports outside projected endpoint/carrier progress.
 
 use core::{
+    convert::Infallible,
+    fmt::Debug,
     marker::PhantomData,
-    mem::{align_of, size_of},
+    mem::{MaybeUninit, align_of, size_of},
     pin::Pin,
+    slice,
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
 
@@ -28,6 +31,7 @@ use crate::choreography::protocol::{
     LABEL_WASI_FD_CLOSE, LABEL_WASI_FD_CLOSE_RET, LABEL_WASI_FD_FDSTAT_GET,
     LABEL_WASI_FD_FDSTAT_GET_RET, LABEL_WASI_FD_READ, LABEL_WASI_FD_READ_RET,
     LABEL_WASI_FD_READDIR, LABEL_WASI_FD_READDIR_RET, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET,
+    LABEL_WASI_IMPORT_LOOP_BREAK_CONTROL, LABEL_WASI_IMPORT_LOOP_CONTINUE_CONTROL,
     LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF,
     LABEL_WASI_POLL_ONEOFF_RET, LABEL_WASI_PROC_EXIT, LABEL_WASI_RANDOM_GET,
     LABEL_WASI_RANDOM_GET_RET, LABEL_WASIP1_CLOCK_NOW, LABEL_WASIP1_CLOCK_NOW_RET,
@@ -69,6 +73,9 @@ const APPKIT_WASI_GUEST_ARENA_ALIGN: usize = 16;
 const APPKIT_WASI_GUEST_BYTES: usize = size_of::<crate::kernel::engine::wasm::Guest<'static>>();
 #[cfg(feature = "wasm-engine-core")]
 const APPKIT_DEFAULT_WASI_FUEL_PER_ACTIVATION: u32 = 1_000_000;
+// A logical image owns one carrier rendezvous. Larger rendezvous sets are a
+// different site/artifact composition, not implicit appkit capacity.
+const APPKIT_SESSION_RV_SLOTS: usize = 1;
 /// Current typed hibana role domain: `Role<0>` through `Role<15>`.
 ///
 /// Raising this is a hibana representation change, not an appkit knob. The
@@ -78,16 +85,90 @@ pub const HIBANA_TYPED_ROLE_DOMAIN_SIZE: u8 = 16;
 #[cfg(any(test, not(target_os = "none")))]
 const APPKIT_CARRIER_ROLES: usize = HIBANA_TYPED_ROLE_DOMAIN_SIZE as usize;
 
+/// Result shape for a localside role task.
+///
+/// Role tasks normally run forever. Returning `Err` is a top-level image
+/// failure; appkit turns it into one panic at the scheduler boundary instead of
+/// forcing example localsides to scatter panic sites through protocol code.
+pub type RoleResult<E> = Result<Infallible, E>;
+
+struct PendingRole<T, E> {
+    context: T,
+    error: PhantomData<fn() -> E>,
+}
+
+impl<T, E> PendingRole<T, E> {
+    const fn new(context: T) -> Self {
+        Self {
+            context,
+            error: PhantomData,
+        }
+    }
+}
+
+impl<T, E> Unpin for PendingRole<T, E> {}
+
+impl<T, E> core::future::Future for PendingRole<T, E> {
+    type Output = RoleResult<E>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let state = self.get_mut();
+        core::hint::black_box(&state.context);
+        core::hint::black_box(cx.waker());
+        Poll::Pending
+    }
+}
+
+enum RoleTaskError<E> {
+    Local(E),
+    #[cfg(feature = "wasm-engine-core")]
+    Wasi(WasiGuestError),
+}
+
+impl<E> Debug for RoleTaskError<E>
+where
+    E: Debug,
+{
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Local(error) => formatter.debug_tuple("Local").field(error).finish(),
+            #[cfg(feature = "wasm-engine-core")]
+            Self::Wasi(error) => formatter.debug_tuple("Wasi").field(error).finish(),
+        }
+    }
+}
+
+async fn local_role_task<F, E>(future: F) -> RoleResult<RoleTaskError<E>>
+where
+    F: core::future::Future<Output = RoleResult<E>>,
+{
+    match future.await {
+        Ok(done) => Ok(done),
+        Err(error) => Err(RoleTaskError::Local(error)),
+    }
+}
+
+#[cfg(feature = "wasm-engine-core")]
+async fn wasi_role_task<F, E>(future: F) -> RoleResult<RoleTaskError<E>>
+where
+    F: core::future::Future<Output = RoleResult<WasiGuestError>>,
+{
+    match future.await {
+        Ok(done) => Ok(done),
+        Err(error) => Err(RoleTaskError::Wasi(error)),
+    }
+}
+
 #[cfg(all(not(test), target_os = "none"))]
 #[repr(C, align(16))]
 pub struct EmbeddedAttachStorage<const SLAB_BYTES: usize> {
-    tap: UnsafeCell<[hibana::substrate::tap::TapEvent; APPKIT_ATTACH_TAP_EVENTS]>,
+    tap: UnsafeCell<[hibana::integration::tap::TapEvent; APPKIT_ATTACH_TAP_EVENTS]>,
     slab: UnsafeCell<[u8; SLAB_BYTES]>,
 }
 
 #[cfg(all(not(test), target_os = "none"))]
 pub struct EmbeddedAttachStorageRef<'a> {
-    tap: &'a mut [hibana::substrate::tap::TapEvent; APPKIT_ATTACH_TAP_EVENTS],
+    tap: &'a mut [hibana::integration::tap::TapEvent; APPKIT_ATTACH_TAP_EVENTS],
     slab: &'a mut [u8],
 }
 
@@ -96,7 +177,7 @@ impl<const SLAB_BYTES: usize> EmbeddedAttachStorage<SLAB_BYTES> {
     pub const fn empty() -> Self {
         Self {
             tap: UnsafeCell::new(
-                [hibana::substrate::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS],
+                [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS],
             ),
             slab: UnsafeCell::new([0; SLAB_BYTES]),
         }
@@ -105,7 +186,7 @@ impl<const SLAB_BYTES: usize> EmbeddedAttachStorage<SLAB_BYTES> {
     pub fn lease(&'static self) -> EmbeddedAttachStorageRef<'static> {
         let tap = unsafe { &mut *self.tap.get() };
         let slab = unsafe { &mut *self.slab.get() };
-        tap.fill(hibana::substrate::tap::TapEvent::zero());
+        tap.fill(hibana::integration::tap::TapEvent::zero());
         slab.fill(0);
         EmbeddedAttachStorageRef { tap, slab }
     }
@@ -113,6 +194,55 @@ impl<const SLAB_BYTES: usize> EmbeddedAttachStorage<SLAB_BYTES> {
 
 #[cfg(all(not(test), target_os = "none"))]
 unsafe impl<const SLAB_BYTES: usize> Sync for EmbeddedAttachStorage<SLAB_BYTES> {}
+
+fn align_storage_up(value: usize, align: usize) -> usize {
+    let mask = align.saturating_sub(1);
+    (value + mask) & !mask
+}
+
+fn carve_session_kit_storage<'a, TransportTy, UniverseTy, ClockTy, const MAX_RV: usize>(
+    slab: &'a mut [u8],
+) -> (
+    &'a mut MaybeUninit<
+        hibana::integration::SessionKit<'a, TransportTy, UniverseTy, ClockTy, MAX_RV>,
+    >,
+    &'a mut [u8],
+)
+where
+    TransportTy: hibana::integration::Transport + 'a,
+    UniverseTy: hibana::integration::runtime::LabelUniverse + 'a,
+    ClockTy: hibana::integration::runtime::Clock + 'a,
+{
+    type Kit<'a, TransportTy, UniverseTy, ClockTy, const MAX_RV: usize> =
+        hibana::integration::SessionKit<'a, TransportTy, UniverseTy, ClockTy, MAX_RV>;
+
+    let base = slab.as_mut_ptr() as usize;
+    let len = slab.len();
+    let end = base
+        .checked_add(len)
+        .expect("appkit attach slab address range overflow");
+    let kit_start = align_storage_up(
+        base,
+        align_of::<Kit<'a, TransportTy, UniverseTy, ClockTy, MAX_RV>>(),
+    );
+    let kit_end = kit_start
+        .checked_add(size_of::<Kit<'a, TransportTy, UniverseTy, ClockTy, MAX_RV>>())
+        .expect("appkit SessionKit storage address range overflow");
+    assert!(
+        kit_end <= end,
+        "appkit attach slab cannot fit in-place SessionKit"
+    );
+    let kit_offset = kit_start - base;
+    let rest_offset = kit_end - base;
+    unsafe {
+        let kit_storage = &mut *slab
+            .as_mut_ptr()
+            .add(kit_offset)
+            .cast::<MaybeUninit<Kit<'a, TransportTy, UniverseTy, ClockTy, MAX_RV>>>();
+        let rest = slice::from_raw_parts_mut(slab.as_mut_ptr().add(rest_offset), len - rest_offset);
+        (kit_storage, rest)
+    }
+}
 
 #[cfg(all(not(test), target_os = "none"))]
 #[repr(C, align(16))]
@@ -242,9 +372,10 @@ static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
 );
 
 #[cfg(all(not(test), target_os = "none"))]
-fn poll_localside_once<F>(future: F)
+fn poll_localside_once<F, E>(future: F)
 where
-    F: core::future::Future<Output = core::convert::Infallible>,
+    F: core::future::Future<Output = RoleResult<E>>,
+    E: Debug,
 {
     let raw = RawWaker::new(core::ptr::null(), &NOOP_WAKER_VTABLE);
     let waker = unsafe {
@@ -256,7 +387,10 @@ where
     let mut pinned = core::pin::pin!(future);
     match pinned.as_mut().poll(&mut cx) {
         Poll::Pending => {}
-        Poll::Ready(done) => match done {},
+        Poll::Ready(Ok(done)) => match done {},
+        Poll::Ready(Err(error)) => {
+            panic!("appkit role task failed: {error:?}");
+        }
     }
 }
 
@@ -276,9 +410,10 @@ fn embedded_future_arena_for_role<const ROLE: u8>() -> (*mut u8, usize) {
 }
 
 #[cfg(all(not(test), target_os = "none"))]
-fn poll_localside_forever<const ROLE: u8, F>(future: F) -> !
+fn poll_localside_forever<const ROLE: u8, F, E>(future: F) -> !
 where
-    F: core::future::Future<Output = core::convert::Infallible>,
+    F: core::future::Future<Output = RoleResult<E>>,
+    E: Debug,
 {
     let raw_waker = RawWaker::new(core::ptr::null(), &NOOP_WAKER_VTABLE);
     let waker = unsafe {
@@ -305,21 +440,25 @@ where
         loop {
             match pinned.as_mut().poll(&mut task_context) {
                 Poll::Pending => core::hint::spin_loop(),
-                Poll::Ready(done) => match done {},
+                Poll::Ready(Ok(done)) => match done {},
+                Poll::Ready(Err(error)) => {
+                    panic!("appkit embedded role {ROLE} task failed: {error:?}")
+                }
             }
         }
     }
 }
 
 #[cfg(all(not(test), target_os = "none"))]
-fn poll_embedded_role_future<const ROLE: u8, F>(requested_roles: RoleSet, future: F)
+fn poll_embedded_role_future<const ROLE: u8, F, E>(requested_roles: RoleSet, future: F)
 where
-    F: core::future::Future<Output = core::convert::Infallible>,
+    F: core::future::Future<Output = RoleResult<E>>,
+    E: Debug,
 {
     if requested_roles.count() == 1 {
-        poll_localside_forever::<ROLE, F>(future);
+        poll_localside_forever::<ROLE, F, E>(future);
     }
-    poll_localside_once(future);
+    poll_localside_once::<F, E>(future);
 }
 
 /// Compact logical image identifier.
@@ -615,10 +754,6 @@ impl<'a> WasiImage<'a> {
     }
 }
 
-/// Marker for the canonical WASI Preview 1 import surface.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct WasiP1;
-
 /// Marker for capsules whose selected logical image embeds no WASI P1 guest.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NoWasi;
@@ -688,18 +823,18 @@ pub trait Placement<C: Capsule> {
 pub trait ResolverRegistry<'cfg, C: Capsule> {
     fn policy<const POLICY: u16, const ROLE: u8>(
         &mut self,
-        resolver: hibana::substrate::policy::ResolverRef<'cfg>,
+        resolver: hibana::integration::policy::ResolverRef<'cfg>,
     );
 }
 
 /// A projectable raw hibana choreography plus its placement and localside code.
 pub trait Capsule: Sized {
-    type Universe: hibana::substrate::runtime::LabelUniverse + Default;
+    type Universe: hibana::integration::runtime::LabelUniverse + Default;
     type Placement: Placement<Self>;
     type Local: Localside<Self>;
     type Report;
 
-    fn choreography() -> impl hibana::substrate::program::Projectable<Self::Universe>;
+    fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe>;
 
     fn register_resolvers<'cfg, R>(_: &mut R)
     where
@@ -735,7 +870,7 @@ pub trait ArtifactForImage<C: Capsule, I: LogicalImage<C>> {
 pub trait LogicalImage<C: Capsule>: Sized {
     type Artifact;
     type Exit<R>: FromRunReport<R, Self>;
-    type Carrier<'a>: hibana::substrate::Transport + 'a
+    type Carrier<'a>: hibana::integration::Transport + 'a
     where
         Self: 'a;
 
@@ -744,6 +879,12 @@ pub trait LogicalImage<C: Capsule>: Sized {
     const REQUESTED_ROLES: RoleSet;
     const CARRIER: CarrierKind;
     const PEER_IMAGES: PeerImageSet = PeerImageSet::EMPTY;
+    /// Runtime-owned wait fuse for this logical image.
+    ///
+    /// `0` keeps the fuse disabled. This is an image/attach fact, not
+    /// a public timeout or protocol-branch API: endpoint methods still expose only
+    /// `flow`/`send`/`recv`/`offer`/`decode`.
+    const OPERATIONAL_DEADLINE_TICKS: u32 = 0;
 
     fn init() -> Self;
     fn safe_state(&mut self);
@@ -788,14 +929,14 @@ impl ProjectedRoles {
 
 /// Consumer of projected hibana role programs for one logical image.
 trait ProjectedRoleVisitor<C: Capsule> {
-    fn visit<const ROLE: u8>(&mut self, program: hibana::substrate::program::RoleProgram<ROLE>);
+    fn visit<const ROLE: u8>(&mut self, program: hibana::integration::program::RoleProgram<ROLE>);
 }
 
 impl<C> ProjectedRoleVisitor<C> for ProjectedRoles
 where
     C: Capsule,
 {
-    fn visit<const ROLE: u8>(&mut self, program: hibana::substrate::program::RoleProgram<ROLE>) {
+    fn visit<const ROLE: u8>(&mut self, program: hibana::integration::program::RoleProgram<ROLE>) {
         let role_program_size = core::mem::size_of_val(&program);
         assert!(
             role_program_size > 0,
@@ -807,7 +948,7 @@ where
 }
 
 fn visit_projected_role<C, V, const ROLE: u8>(
-    program: &impl hibana::substrate::program::Projectable<C::Universe>,
+    program: &impl hibana::integration::program::Projectable<C::Universe>,
     visitor: &mut V,
 ) where
     C: Capsule,
@@ -817,7 +958,7 @@ fn visit_projected_role<C, V, const ROLE: u8>(
 }
 
 fn visit_requested_projected_roles<C, V>(
-    program: &impl hibana::substrate::program::Projectable<C::Universe>,
+    program: &impl hibana::integration::program::Projectable<C::Universe>,
     requested_roles: RoleSet,
     visitor: &mut V,
 ) where
@@ -874,7 +1015,7 @@ fn visit_requested_projected_roles<C, V>(
     }
 }
 fn collect_projected_roles<C, I>(
-    program: &impl hibana::substrate::program::Projectable<C::Universe>,
+    program: &impl hibana::integration::program::Projectable<C::Universe>,
 ) -> ProjectedRoles
 where
     C: Capsule,
@@ -924,6 +1065,7 @@ pub struct EndpointCarrierFacts {
     carrier: CarrierKind,
     wasi_imports: WasiImports,
     wasi_completion_pair_count: u8,
+    has_wasi_import_loop_control: bool,
 }
 
 #[cfg(feature = "wasm-engine-core")]
@@ -935,39 +1077,50 @@ pub enum WasiGuestStatus {
 }
 
 #[cfg(feature = "wasm-engine-core")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum WasiGuestError {
     NoWasiArtifact,
-    GuestRejected(u32),
+    GuestRejected(crate::kernel::engine::wasm::Error),
     EndpointRejected(u32),
-    ProtocolRejected,
+    Endpoint {
+        code: u32,
+        source: hibana::EndpointError,
+    },
+    ProtocolRejected(hibana::integration::wire::CodecError),
     UnexpectedReply,
     UnsupportedGuestEvent,
 }
 
 #[cfg(feature = "wasm-engine-core")]
 impl WasiGuestError {
-    pub const fn diagnostic_code(self) -> u32 {
+    pub const fn diagnostic_code(&self) -> u32 {
         match self {
             Self::NoWasiArtifact => 0x5745_0001,
-            Self::GuestRejected(code) => code,
-            Self::EndpointRejected(code) => code,
-            Self::ProtocolRejected => 0x5745_0003,
+            Self::GuestRejected(error) => error.diagnostic_code(),
+            Self::EndpointRejected(code) => *code,
+            Self::Endpoint { code, .. } => *code,
+            Self::ProtocolRejected(_) => 0x5745_0003,
             Self::UnexpectedReply => 0x5745_0004,
             Self::UnsupportedGuestEvent => 0x5745_0005,
         }
     }
 
-    fn guest(error: crate::kernel::engine::wasm::Error) -> Self {
-        Self::GuestRejected(error.diagnostic_code())
+    fn endpoint(code: u32, source: hibana::EndpointError) -> Self {
+        Self::Endpoint { code, source }
     }
+}
 
-    fn endpoint<E>(code: u32, _: E) -> Self {
-        Self::EndpointRejected(code)
+#[cfg(feature = "wasm-engine-core")]
+impl From<crate::kernel::engine::wasm::Error> for WasiGuestError {
+    fn from(error: crate::kernel::engine::wasm::Error) -> Self {
+        Self::GuestRejected(error)
     }
+}
 
-    fn protocol<E>(_: E) -> Self {
-        Self::ProtocolRejected
+#[cfg(feature = "wasm-engine-core")]
+impl From<hibana::integration::wire::CodecError> for WasiGuestError {
+    fn from(error: hibana::integration::wire::CodecError) -> Self {
+        Self::ProtocolRejected(error)
     }
 }
 
@@ -989,6 +1142,13 @@ impl EndpointCarrierFacts {
             carrier,
             wasi_imports: projection.wasi_imports,
             wasi_completion_pair_count: projection.wasi_completion_pair_count,
+            has_wasi_import_loop_control: projection_has_label(
+                projection,
+                LABEL_WASI_IMPORT_LOOP_CONTINUE_CONTROL,
+            ) && projection_has_label(
+                projection,
+                LABEL_WASI_IMPORT_LOOP_BREAK_CONTROL,
+            ),
         }
     }
 
@@ -1027,6 +1187,17 @@ impl EndpointCarrierFacts {
     pub const fn wasi_completion_pair_count(self) -> u8 {
         self.wasi_completion_pair_count
     }
+}
+
+const fn projection_has_label(projection: ProjectionCaps, label: u8) -> bool {
+    let mut idx = 0usize;
+    while idx < projection.label_count as usize {
+        if projection.labels[idx] == label {
+            return true;
+        }
+        idx += 1;
+    }
+    false
 }
 
 const fn session_id_from_projection(projection: ProjectionCaps) -> u32 {
@@ -1508,32 +1679,8 @@ struct AttachSummary {
 
 #[cfg(all(not(test), target_os = "none"))]
 #[cold]
-fn panic_appkit_attach_role_error<const ROLE: u8>(error: hibana::substrate::AttachError) -> ! {
-    match error {
-        hibana::substrate::AttachError::Control(hibana::substrate::CpError::ResourceExhausted) => {
-            panic!("appkit embedded role {ROLE} attach exhausted hibana runtime storage")
-        }
-        hibana::substrate::AttachError::Control(
-            hibana::substrate::CpError::LabelOutOfUniverse { max, actual },
-        ) => {
-            panic!(
-                "appkit embedded role {ROLE} attach label out of universe: max={max} actual={actual}"
-            )
-        }
-        hibana::substrate::AttachError::Control(
-            hibana::substrate::CpError::RendezvousMismatch { expected, actual },
-        ) => {
-            panic!(
-                "appkit embedded role {ROLE} attach rendezvous mismatch: expected={expected} actual={actual}"
-            )
-        }
-        hibana::substrate::AttachError::Control(error) => {
-            panic!("appkit embedded role {ROLE} attach control error: {error:?}")
-        }
-        hibana::substrate::AttachError::Rendezvous(error) => {
-            panic!("appkit embedded role {ROLE} attach rendezvous error: {error:?}")
-        }
-    }
+fn panic_appkit_attach_role_error<const ROLE: u8>(error: hibana::integration::AttachError) -> ! {
+    panic!("appkit embedded role {ROLE} attach error: {error:?}")
 }
 
 #[cfg(any(test, not(target_os = "none")))]
@@ -1555,18 +1702,15 @@ impl ScheduledTaskArena {
 }
 
 #[cfg(any(test, not(target_os = "none")))]
-type ScheduledTaskPoll = unsafe fn(*mut u8, &mut Context<'_>) -> Poll<core::convert::Infallible>;
+type ScheduledTaskPoll<E> = unsafe fn(*mut u8, &mut Context<'_>) -> Poll<RoleResult<E>>;
 
 #[cfg(any(test, not(target_os = "none")))]
 type ScheduledTaskDrop = unsafe fn(*mut u8);
 
 #[cfg(any(test, not(target_os = "none")))]
-unsafe fn poll_scheduled_task<F>(
-    ptr: *mut u8,
-    cx: &mut Context<'_>,
-) -> Poll<core::convert::Infallible>
+unsafe fn poll_scheduled_task<F, E>(ptr: *mut u8, cx: &mut Context<'_>) -> Poll<RoleResult<E>>
 where
-    F: Future<Output = core::convert::Infallible>,
+    F: Future<Output = RoleResult<E>>,
 {
     let future = unsafe {
         // SAFETY: `ScheduledTaskSlot::push` wrote an initialized `F` into this
@@ -1584,7 +1728,7 @@ where
 #[cfg(any(test, not(target_os = "none")))]
 unsafe fn drop_scheduled_task<F>(ptr: *mut u8)
 where
-    F: Future<Output = core::convert::Infallible>,
+    F: Future,
 {
     unsafe {
         // SAFETY: `ScheduledTaskSlot::push` initialized this arena with an `F`
@@ -1630,16 +1774,16 @@ static WAKE_FLAG_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
 
 #[cfg(any(test, not(target_os = "none")))]
 #[derive(Clone, Copy)]
-struct ScheduledTaskSlot<'task> {
+struct ScheduledTaskSlot<'task, E> {
     arena: ScheduledTaskArena,
-    poll: Option<ScheduledTaskPoll>,
+    poll: Option<ScheduledTaskPoll<E>>,
     drop_task: Option<ScheduledTaskDrop>,
     active: bool,
     lifetime: PhantomData<&'task mut ()>,
 }
 
 #[cfg(any(test, not(target_os = "none")))]
-impl<'task> ScheduledTaskSlot<'task> {
+impl<'task, E> ScheduledTaskSlot<'task, E> {
     const EMPTY: Self = Self {
         arena: ScheduledTaskArena::EMPTY,
         poll: None,
@@ -1650,7 +1794,7 @@ impl<'task> ScheduledTaskSlot<'task> {
 
     fn push<F>(&mut self, future: F)
     where
-        F: Future<Output = core::convert::Infallible> + 'task,
+        F: Future<Output = RoleResult<E>> + 'task,
     {
         assert!(
             !self.active,
@@ -1670,12 +1814,12 @@ impl<'task> ScheduledTaskSlot<'task> {
             // slot records the matching poll/drop vtable immediately after.
             self.arena.as_mut_ptr().cast::<F>().write(future);
         }
-        self.poll = Some(poll_scheduled_task::<F>);
+        self.poll = Some(poll_scheduled_task::<F, E>);
         self.drop_task = Some(drop_scheduled_task::<F>);
         self.active = true;
     }
 
-    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<core::convert::Infallible> {
+    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<RoleResult<E>> {
         assert!(self.active, "appkit scheduler polled an inactive slot");
         let poll = self
             .poll
@@ -1706,13 +1850,16 @@ impl<'task> ScheduledTaskSlot<'task> {
 }
 
 #[cfg(any(test, not(target_os = "none")))]
-struct ScheduledTasks<'task> {
-    slots: [ScheduledTaskSlot<'task>; APPKIT_CARRIER_ROLES],
+struct ScheduledTasks<'task, E> {
+    slots: [ScheduledTaskSlot<'task, E>; APPKIT_CARRIER_ROLES],
     len: usize,
 }
 
 #[cfg(any(test, not(target_os = "none")))]
-impl<'task> ScheduledTasks<'task> {
+impl<'task, E> ScheduledTasks<'task, E>
+where
+    E: Debug,
+{
     fn new() -> Self {
         Self {
             slots: [ScheduledTaskSlot::EMPTY; APPKIT_CARRIER_ROLES],
@@ -1722,7 +1869,7 @@ impl<'task> ScheduledTasks<'task> {
 
     fn push<F>(&mut self, future: F)
     where
-        F: Future<Output = core::convert::Infallible> + 'task,
+        F: Future<Output = RoleResult<E>> + 'task,
     {
         assert!(
             self.len < self.slots.len(),
@@ -1750,7 +1897,10 @@ impl<'task> ScheduledTasks<'task> {
             while task_idx < self.len {
                 match self.slots[task_idx].poll(&mut task_context) {
                     Poll::Pending => {}
-                    Poll::Ready(done) => match done {},
+                    Poll::Ready(Ok(done)) => match done {},
+                    Poll::Ready(Err(error)) => {
+                        panic!("appkit role task failed: {error:?}");
+                    }
                 }
                 task_idx += 1;
             }
@@ -1759,7 +1909,7 @@ impl<'task> ScheduledTasks<'task> {
 }
 
 #[cfg(any(test, not(target_os = "none")))]
-impl Drop for ScheduledTasks<'_> {
+impl<E> Drop for ScheduledTasks<'_, E> {
     fn drop(&mut self) {
         let mut task_idx = 0usize;
         while task_idx < self.len {
@@ -1772,7 +1922,7 @@ impl Drop for ScheduledTasks<'_> {
 #[cfg(all(not(test), target_os = "none"))]
 #[cold]
 fn panic_appkit_resolver_error<const POLICY: u16, const ROLE: u8>(
-    error: hibana::substrate::CpError,
+    error: hibana::integration::policy::ResolverError,
 ) -> ! {
     panic!("appkit resolver registration failed: policy={POLICY} role={ROLE} error={error:?}")
 }
@@ -1789,13 +1939,13 @@ struct AttachResolverRegistry<
     const MAX_RV: usize,
 > where
     C: Capsule,
-    ProgramTy: hibana::substrate::program::Projectable<C::Universe> + ?Sized,
-    TransportTy: hibana::substrate::Transport + 'cfg,
-    UniverseTy: hibana::substrate::runtime::LabelUniverse + 'cfg,
-    ClockTy: hibana::substrate::runtime::Clock + 'cfg,
+    ProgramTy: hibana::integration::program::Projectable<C::Universe> + ?Sized,
+    TransportTy: hibana::integration::Transport + 'cfg,
+    UniverseTy: hibana::integration::runtime::LabelUniverse + 'cfg,
+    ClockTy: hibana::integration::runtime::Clock + 'cfg,
 {
-    kit: &'kit hibana::substrate::SessionKit<'cfg, TransportTy, UniverseTy, ClockTy, MAX_RV>,
-    rendezvous: hibana::substrate::ids::RendezvousId,
+    kit: &'kit hibana::integration::SessionKit<'cfg, TransportTy, UniverseTy, ClockTy, MAX_RV>,
+    rendezvous: hibana::integration::ids::RendezvousId,
     program: &'prog ProgramTy,
     requested_roles: RoleSet,
     capsule: PhantomData<C>,
@@ -1816,14 +1966,14 @@ impl<'kit, 'prog, 'cfg, C, ProgramTy, TransportTy, UniverseTy, ClockTy, const MA
     >
 where
     C: Capsule,
-    ProgramTy: hibana::substrate::program::Projectable<C::Universe> + ?Sized,
-    TransportTy: hibana::substrate::Transport + 'cfg,
-    UniverseTy: hibana::substrate::runtime::LabelUniverse + 'cfg,
-    ClockTy: hibana::substrate::runtime::Clock + 'cfg,
+    ProgramTy: hibana::integration::program::Projectable<C::Universe> + ?Sized,
+    TransportTy: hibana::integration::Transport + 'cfg,
+    UniverseTy: hibana::integration::runtime::LabelUniverse + 'cfg,
+    ClockTy: hibana::integration::runtime::Clock + 'cfg,
 {
     fn policy<const POLICY: u16, const ROLE: u8>(
         &mut self,
-        resolver: hibana::substrate::policy::ResolverRef<'cfg>,
+        resolver: hibana::integration::policy::ResolverRef<'cfg>,
     ) {
         if !self.requested_roles.contains(ROLE) {
             return;
@@ -1848,28 +1998,31 @@ struct AttachProjectedRoles<
     'tasks,
     'cfg,
     'guest,
+    C,
     ImageTy,
     TransportTy,
     UniverseTy,
     ClockTy,
     const MAX_RV: usize,
 > where
-    TransportTy: hibana::substrate::Transport + 'cfg,
-    UniverseTy: hibana::substrate::runtime::LabelUniverse + 'cfg,
-    ClockTy: hibana::substrate::runtime::Clock + 'cfg,
+    C: Capsule,
+    TransportTy: hibana::integration::Transport + 'cfg,
+    UniverseTy: hibana::integration::runtime::LabelUniverse + 'cfg,
+    ClockTy: hibana::integration::runtime::Clock + 'cfg,
 {
-    kit: &'kit hibana::substrate::SessionKit<'cfg, TransportTy, UniverseTy, ClockTy, MAX_RV>,
-    rendezvous: hibana::substrate::ids::RendezvousId,
-    session: hibana::substrate::ids::SessionId,
+    kit: &'kit hibana::integration::SessionKit<'cfg, TransportTy, UniverseTy, ClockTy, MAX_RV>,
+    rendezvous: hibana::integration::ids::RendezvousId,
+    session: hibana::integration::ids::SessionId,
     endpoint_carrier: EndpointCarrierFacts,
     wasi_guest_bytes: Option<&'guest [u8]>,
     driver_facts: DriverFacts<'static>,
     count: u8,
     role_kinds: RoleKindCounts,
     tasks_lifetime: PhantomData<&'tasks mut ()>,
+    capsule_lifetime: PhantomData<C>,
     image_lifetime: PhantomData<ImageTy>,
     #[cfg(any(test, not(target_os = "none")))]
-    tasks: &'tasks mut ScheduledTasks<'kit>,
+    tasks: &'tasks mut ScheduledTasks<'kit, RoleTaskError<<C::Local as Localside<C>>::Error>>,
 }
 
 impl<'kit, 'tasks, 'cfg, 'guest, C, ImageTy, TransportTy, UniverseTy, ClockTy, const MAX_RV: usize>
@@ -1879,6 +2032,7 @@ impl<'kit, 'tasks, 'cfg, 'guest, C, ImageTy, TransportTy, UniverseTy, ClockTy, c
         'tasks,
         'cfg,
         'guest,
+        C,
         ImageTy,
         TransportTy,
         UniverseTy,
@@ -1889,18 +2043,18 @@ where
     C: Capsule + 'kit,
     C::Local: 'kit,
     ImageTy: LogicalImage<C> + 'kit,
-    TransportTy: hibana::substrate::Transport + 'cfg,
-    UniverseTy: hibana::substrate::runtime::LabelUniverse + 'cfg,
-    ClockTy: hibana::substrate::runtime::Clock + 'cfg,
+    TransportTy: hibana::integration::Transport + 'cfg,
+    UniverseTy: hibana::integration::runtime::LabelUniverse + 'cfg,
+    ClockTy: hibana::integration::runtime::Clock + 'cfg,
     'cfg: 'kit,
     'guest: 'kit,
 {
-    fn visit<const ROLE: u8>(&mut self, program: hibana::substrate::program::RoleProgram<ROLE>) {
+    fn visit<const ROLE: u8>(&mut self, program: hibana::integration::program::RoleProgram<ROLE>) {
         let endpoint = match self.kit.enter::<ROLE, _>(
             self.rendezvous,
             self.session,
             &program,
-            hibana::substrate::binding::NoBinding,
+            hibana::integration::binding::NoBinding,
         ) {
             Ok(endpoint) => endpoint,
             #[cfg(any(test, not(target_os = "none")))]
@@ -1933,20 +2087,33 @@ where
                     if self.wasi_guest_bytes.is_some() {
                         #[cfg(any(test, not(target_os = "none")))]
                         self.tasks
-                            .push(drive_canonical_wasi_engine::<C, ImageTy, ROLE>(ctx));
+                            .push(wasi_role_task::<_, <C::Local as Localside<C>>::Error>(
+                                drive_canonical_wasi_engine::<C, ImageTy, ROLE>(ctx),
+                            ));
                         #[cfg(all(not(test), target_os = "none"))]
-                        poll_embedded_role_future::<ROLE, _>(
+                        poll_embedded_role_future::<
+                            ROLE,
+                            _,
+                            RoleTaskError<<C::Local as Localside<C>>::Error>,
+                        >(
                             ImageTy::REQUESTED_ROLES,
-                            drive_canonical_wasi_engine::<C, ImageTy, ROLE>(ctx),
+                            wasi_role_task::<_, <C::Local as Localside<C>>::Error>(
+                                drive_canonical_wasi_engine::<C, ImageTy, ROLE>(ctx),
+                            ),
                         );
                     } else {
                         #[cfg(any(test, not(target_os = "none")))]
-                        self.tasks
-                            .push(<C::Local as Localside<C>>::engine::<ROLE>(ctx));
-                        #[cfg(all(not(test), target_os = "none"))]
-                        poll_embedded_role_future::<ROLE, _>(
-                            ImageTy::REQUESTED_ROLES,
+                        self.tasks.push(local_role_task(
                             <C::Local as Localside<C>>::engine::<ROLE>(ctx),
+                        ));
+                        #[cfg(all(not(test), target_os = "none"))]
+                        poll_embedded_role_future::<
+                            ROLE,
+                            _,
+                            RoleTaskError<<C::Local as Localside<C>>::Error>,
+                        >(
+                            ImageTy::REQUESTED_ROLES,
+                            local_role_task(<C::Local as Localside<C>>::engine::<ROLE>(ctx)),
                         );
                     }
                 }
@@ -1958,11 +2125,17 @@ where
                     );
                     #[cfg(any(test, not(target_os = "none")))]
                     self.tasks
-                        .push(<C::Local as Localside<C>>::engine::<ROLE>(ctx));
+                        .push(local_role_task(<C::Local as Localside<C>>::engine::<ROLE>(
+                            ctx,
+                        )));
                     #[cfg(all(not(test), target_os = "none"))]
-                    poll_embedded_role_future::<ROLE, _>(
+                    poll_embedded_role_future::<
+                        ROLE,
+                        _,
+                        RoleTaskError<<C::Local as Localside<C>>::Error>,
+                    >(
                         ImageTy::REQUESTED_ROLES,
-                        <C::Local as Localside<C>>::engine::<ROLE>(ctx),
+                        local_role_task(<C::Local as Localside<C>>::engine::<ROLE>(ctx)),
                     );
                 }
             }
@@ -1970,44 +2143,67 @@ where
                 let ctx = DriverCtx::new(endpoint_ctx, self.endpoint_carrier, self.driver_facts);
                 #[cfg(any(test, not(target_os = "none")))]
                 self.tasks
-                    .push(<C::Local as Localside<C>>::driver::<ROLE>(ctx));
+                    .push(local_role_task(<C::Local as Localside<C>>::driver::<ROLE>(
+                        ctx,
+                    )));
                 #[cfg(all(not(test), target_os = "none"))]
-                poll_embedded_role_future::<ROLE, _>(
+                poll_embedded_role_future::<
+                    ROLE,
+                    _,
+                    RoleTaskError<<C::Local as Localside<C>>::Error>,
+                >(
                     ImageTy::REQUESTED_ROLES,
-                    <C::Local as Localside<C>>::driver::<ROLE>(ctx),
+                    local_role_task(<C::Local as Localside<C>>::driver::<ROLE>(ctx)),
                 );
             }
             RoleKind::Boundary => {
                 let ctx = BoundaryCtx::new(endpoint_ctx, self.endpoint_carrier);
                 #[cfg(any(test, not(target_os = "none")))]
-                self.tasks
-                    .push(<C::Local as Localside<C>>::boundary::<ROLE>(ctx));
-                #[cfg(all(not(test), target_os = "none"))]
-                poll_embedded_role_future::<ROLE, _>(
-                    ImageTy::REQUESTED_ROLES,
+                self.tasks.push(local_role_task(
                     <C::Local as Localside<C>>::boundary::<ROLE>(ctx),
+                ));
+                #[cfg(all(not(test), target_os = "none"))]
+                poll_embedded_role_future::<
+                    ROLE,
+                    _,
+                    RoleTaskError<<C::Local as Localside<C>>::Error>,
+                >(
+                    ImageTy::REQUESTED_ROLES,
+                    local_role_task(<C::Local as Localside<C>>::boundary::<ROLE>(ctx)),
                 );
             }
             RoleKind::Link => {
                 let ctx = LinkCtx::new(endpoint_ctx, self.endpoint_carrier);
                 #[cfg(any(test, not(target_os = "none")))]
                 self.tasks
-                    .push(<C::Local as Localside<C>>::link::<ROLE>(ctx));
+                    .push(local_role_task(<C::Local as Localside<C>>::link::<ROLE>(
+                        ctx,
+                    )));
                 #[cfg(all(not(test), target_os = "none"))]
-                poll_embedded_role_future::<ROLE, _>(
+                poll_embedded_role_future::<
+                    ROLE,
+                    _,
+                    RoleTaskError<<C::Local as Localside<C>>::Error>,
+                >(
                     ImageTy::REQUESTED_ROLES,
-                    <C::Local as Localside<C>>::link::<ROLE>(ctx),
+                    local_role_task(<C::Local as Localside<C>>::link::<ROLE>(ctx)),
                 );
             }
             RoleKind::Supervisor => {
                 let ctx = SupervisorCtx::new(endpoint_ctx, self.endpoint_carrier);
                 #[cfg(any(test, not(target_os = "none")))]
                 self.tasks
-                    .push(<C::Local as Localside<C>>::supervisor::<ROLE>(ctx));
+                    .push(local_role_task(<C::Local as Localside<C>>::supervisor::<
+                        ROLE,
+                    >(ctx)));
                 #[cfg(all(not(test), target_os = "none"))]
-                poll_embedded_role_future::<ROLE, _>(
+                poll_embedded_role_future::<
+                    ROLE,
+                    _,
+                    RoleTaskError<<C::Local as Localside<C>>::Error>,
+                >(
                     ImageTy::REQUESTED_ROLES,
-                    <C::Local as Localside<C>>::supervisor::<ROLE>(ctx),
+                    local_role_task(<C::Local as Localside<C>>::supervisor::<ROLE>(ctx)),
                 );
             }
         }
@@ -2025,7 +2221,7 @@ where
 }
 
 fn attach_projected_roles<C, I>(
-    program: &impl hibana::substrate::program::Projectable<C::Universe>,
+    program: &impl hibana::integration::program::Projectable<C::Universe>,
     endpoint_carrier: EndpointCarrierFacts,
     wasi_guest_bytes: Option<&[u8]>,
 ) -> AttachSummary
@@ -2034,48 +2230,51 @@ where
     I: LogicalImage<C>,
 {
     #[cfg(any(test, not(target_os = "none")))]
-    let mut tap_buf = [hibana::substrate::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+    let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
     #[cfg(any(test, not(target_os = "none")))]
-    let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
+    let mut slab_storage = [0u8; APPKIT_ATTACH_SLAB_BYTES];
     #[cfg(all(not(test), target_os = "none"))]
     let embedded_storage = embedded_attach_storage::<C, I>();
     #[cfg(all(not(test), target_os = "none"))]
-    let tap_buf = embedded_storage.tap;
+    let attach_tap = embedded_storage.tap;
     #[cfg(all(not(test), target_os = "none"))]
-    let slab = embedded_storage.slab;
-    let clock = hibana::substrate::runtime::CounterClock::new();
+    let attach_slab = embedded_storage.slab;
+    #[cfg(any(test, not(target_os = "none")))]
+    let attach_tap = &mut tap_buf;
+    #[cfg(any(test, not(target_os = "none")))]
+    let attach_slab = &mut slab_storage[..];
+    let clock = hibana::integration::runtime::CounterClock::new();
     let carrier = I::carrier();
-    let kit = hibana::substrate::SessionKit::<
+    let (kit_storage, rendezvous_slab) = carve_session_kit_storage::<
         I::Carrier<'_>,
         C::Universe,
-        hibana::substrate::runtime::CounterClock,
-        2,
-    >::new(&clock);
-    #[cfg(any(test, not(target_os = "none")))]
+        hibana::integration::runtime::CounterClock,
+        APPKIT_SESSION_RV_SLOTS,
+    >(attach_slab);
+    let kit = hibana::integration::SessionKit::<
+        I::Carrier<'_>,
+        C::Universe,
+        hibana::integration::runtime::CounterClock,
+        APPKIT_SESSION_RV_SLOTS,
+    >::init_in_place(kit_storage, &clock);
     let lane_range_end = endpoint_carrier.lanes().configured_range_end();
     let endpoint_slots: usize = I::REQUESTED_ROLES.count().into();
-    #[cfg(any(test, not(target_os = "none")))]
-    let config = hibana::substrate::runtime::Config::new(
-        &mut tap_buf,
-        &mut slab,
+    let config = hibana::integration::runtime::Config::new(
+        attach_tap,
+        rendezvous_slab,
         0..lane_range_end,
         endpoint_slots,
-        hibana::substrate::runtime::CounterClock::new(),
-    );
-    #[cfg(all(not(test), target_os = "none"))]
-    let lane_range_end = endpoint_carrier.lanes().configured_range_end();
-    #[cfg(all(not(test), target_os = "none"))]
-    let config = hibana::substrate::runtime::Config::new(
-        tap_buf,
-        slab,
-        0..lane_range_end,
-        endpoint_slots,
-        hibana::substrate::runtime::CounterClock::new(),
+        hibana::integration::runtime::CounterClock::new(),
+        if I::OPERATIONAL_DEADLINE_TICKS == 0 {
+            None
+        } else {
+            Some(I::OPERATIONAL_DEADLINE_TICKS)
+        },
     );
     let rendezvous = kit
         .add_rendezvous_from_config(config, carrier)
         .expect("appkit attach carrier must register rendezvous");
-    let session = hibana::substrate::ids::SessionId::new(endpoint_carrier.session_id());
+    let session = hibana::integration::ids::SessionId::new(endpoint_carrier.session_id());
     {
         let mut resolver_registry = AttachResolverRegistry::<
             '_,
@@ -2085,8 +2284,8 @@ where
             _,
             I::Carrier<'_>,
             C::Universe,
-            hibana::substrate::runtime::CounterClock,
-            2,
+            hibana::integration::runtime::CounterClock,
+            APPKIT_SESSION_RV_SLOTS,
         > {
             kit: &kit,
             rendezvous,
@@ -2109,6 +2308,7 @@ where
             count: 0,
             role_kinds: RoleKindCounts::default(),
             tasks_lifetime: PhantomData,
+            capsule_lifetime: PhantomData::<C>,
             image_lifetime: PhantomData::<I>,
             #[cfg(any(test, not(target_os = "none")))]
             tasks: &mut tasks,
@@ -2124,8 +2324,8 @@ where
     summary
 }
 
-impl hibana::substrate::program::ProjectionMetadataVisitor for ProjectionCapsVisitor {
-    fn visit_program(&mut self, facts: hibana::substrate::program::ProjectionProgramFacts) {
+impl hibana::integration::program::ProjectionMetadataVisitor for ProjectionCapsVisitor {
+    fn visit_program(&mut self, facts: hibana::integration::program::ProjectionProgramFacts) {
         self.caps.role_count = facts.role_count;
         self.caps.eff_count = facts.eff_count;
         self.caps.scope_count = facts.scope_count;
@@ -2134,7 +2334,7 @@ impl hibana::substrate::program::ProjectionMetadataVisitor for ProjectionCapsVis
         self.caps.has_parallel = facts.parallel_enter_count != 0;
     }
 
-    fn visit_atom(&mut self, spec: hibana::substrate::program::ProjectionAtomSpec) {
+    fn visit_atom(&mut self, spec: hibana::integration::program::ProjectionAtomSpec) {
         self.caps.roles = self
             .caps
             .roles
@@ -2148,9 +2348,9 @@ impl hibana::substrate::program::ProjectionMetadataVisitor for ProjectionCapsVis
         }
     }
 
-    fn visit_message(&mut self, spec: hibana::substrate::program::ProjectionMessageSpec) {
-        let engine_req = hibana::substrate::program::ProjectionTypeFingerprint::of::<EngineReq>();
-        let engine_ret = hibana::substrate::program::ProjectionTypeFingerprint::of::<EngineRet>();
+    fn visit_message(&mut self, spec: hibana::integration::program::ProjectionMessageSpec) {
+        let engine_req = hibana::integration::program::ProjectionTypeFingerprint::of::<EngineReq>();
+        let engine_ret = hibana::integration::program::ProjectionTypeFingerprint::of::<EngineRet>();
         if spec.payload_type == engine_req {
             self.push_engine_req_label(spec.label);
         }
@@ -2171,7 +2371,7 @@ impl hibana::substrate::program::ProjectionMetadataVisitor for ProjectionCapsVis
         }
     }
 
-    fn visit_policy(&mut self, spec: hibana::substrate::program::ProjectionPolicySpec) {
+    fn visit_policy(&mut self, spec: hibana::integration::program::ProjectionPolicySpec) {
         self.push_policy(spec.policy_id);
         self.caps.has_policy = true;
     }
@@ -2184,7 +2384,7 @@ pub fn derive_projection_caps<C: Capsule>() -> ProjectionCaps {
 }
 
 fn derive_projection_caps_from_program<C>(
-    program: &impl hibana::substrate::program::Projectable<C::Universe>,
+    program: &impl hibana::integration::program::Projectable<C::Universe>,
 ) -> ProjectionCaps
 where
     C: Capsule,
@@ -2196,7 +2396,7 @@ where
 }
 
 fn derive_projection_caps_for_roles_from_program<C>(
-    program: &impl hibana::substrate::program::Projectable<C::Universe>,
+    program: &impl hibana::integration::program::Projectable<C::Universe>,
     requested_roles: RoleSet,
 ) -> ProjectionCaps
 where
@@ -2284,11 +2484,11 @@ impl ImageManifest {
         C: Capsule,
     {
         let capsule_fingerprint =
-            hibana::substrate::program::ProjectionTypeFingerprint::of::<C>().words;
+            hibana::integration::program::ProjectionTypeFingerprint::of::<C>().words;
         let placement_fingerprint =
-            hibana::substrate::program::ProjectionTypeFingerprint::of::<C::Placement>().words;
+            hibana::integration::program::ProjectionTypeFingerprint::of::<C::Placement>().words;
         let label_universe_fingerprint =
-            hibana::substrate::program::ProjectionTypeFingerprint::of::<C::Universe>().words;
+            hibana::integration::program::ProjectionTypeFingerprint::of::<C::Universe>().words;
         Self {
             capsule_fingerprint,
             placement_fingerprint,
@@ -2814,7 +3014,7 @@ pub struct EngineCtx<'endpoint, 'guest, C: Capsule, const ROLE: u8> {
     #[cfg(feature = "wasm-engine-core")]
     guest_slot: Option<WasiGuestSlot<'guest>>,
     #[cfg(not(feature = "wasm-engine-core"))]
-    _guest: core::marker::PhantomData<&'guest ()>,
+    guest_lifetime: core::marker::PhantomData<&'guest ()>,
 }
 
 impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest, C, ROLE> {
@@ -2825,7 +3025,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         #[cfg(feature = "wasm-engine-core")] guest_storage: WasiGuestStorage<'guest>,
     ) -> Self {
         #[cfg(not(feature = "wasm-engine-core"))]
-        let _ = wasi_guest_bytes;
+        core::hint::black_box(wasi_guest_bytes);
         Self {
             endpoint,
             endpoint_carrier,
@@ -2836,7 +3036,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
             #[cfg(feature = "wasm-engine-core")]
             guest_slot: None,
             #[cfg(not(feature = "wasm-engine-core"))]
-            _guest: core::marker::PhantomData,
+            guest_lifetime: core::marker::PhantomData,
         }
     }
 
@@ -2857,12 +3057,16 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         &mut self,
         request: EngineReq,
     ) -> Result<(), WasiGuestError> {
-        self.endpoint()
-            .flow::<hibana::g::Msg<LABEL, EngineReq>>()
-            .map_err(|error| WasiGuestError::endpoint(0x5745_1000 | LABEL as u32, error))?
-            .send(&request)
-            .await
-            .map_err(|error| WasiGuestError::endpoint(0x5745_2000 | LABEL as u32, error))
+        let flow = match self.endpoint().flow::<hibana::g::Msg<LABEL, EngineReq>>() {
+            Ok(flow) => flow,
+            Err(error) => {
+                return Err(WasiGuestError::endpoint(0x5745_1000 | LABEL as u32, error));
+            }
+        };
+        match flow.send(&request).await {
+            Ok(()) => Ok(()),
+            Err(error) => Err(WasiGuestError::endpoint(0x5745_2000 | LABEL as u32, error)),
+        }
     }
 
     #[cfg(feature = "wasm-engine-core")]
@@ -2871,30 +3075,47 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         request: EngineReq,
     ) -> Result<EngineRet, WasiGuestError> {
         self.endpoint_send::<REQUEST_LABEL>(request).await?;
-        self.endpoint()
+        match self
+            .endpoint()
             .recv::<hibana::g::Msg<REPLY_LABEL, EngineRet>>()
             .await
-            .map_err(|error| WasiGuestError::endpoint(0x5745_3000 | REPLY_LABEL as u32, error))
+        {
+            Ok(reply) => Ok(reply),
+            Err(error) => Err(WasiGuestError::endpoint(
+                0x5745_3000 | REPLY_LABEL as u32,
+                error,
+            )),
+        }
     }
 
     #[cfg(feature = "wasm-engine-core")]
     async fn admit_wasi_import_loop_continue(&mut self) -> Result<(), WasiGuestError> {
-        let Ok(flow) = self.endpoint().flow::<WasiImportLoopContinue>() else {
-            return Ok(());
+        if !self.endpoint_carrier.has_wasi_import_loop_control {
+            return Err(WasiGuestError::EndpointRejected(0x5745_6000));
+        }
+        let flow = match self.endpoint().flow::<WasiImportLoopContinue>() {
+            Ok(flow) => flow,
+            Err(..) => return Ok(()),
         };
-        flow.send(())
-            .await
-            .map_err(|error| WasiGuestError::endpoint(0x5745_6100, error))
+        match flow.send(()).await {
+            Ok(()) => Ok(()),
+            Err(error) => Err(WasiGuestError::endpoint(0x5745_6100, error)),
+        }
     }
 
     #[cfg(feature = "wasm-engine-core")]
     async fn admit_wasi_import_loop_break(&mut self) -> Result<(), WasiGuestError> {
-        let Ok(flow) = self.endpoint().flow::<WasiImportLoopBreak>() else {
-            return Ok(());
+        if !self.endpoint_carrier.has_wasi_import_loop_control {
+            return Err(WasiGuestError::EndpointRejected(0x5745_6200));
+        }
+        let flow = match self.endpoint().flow::<WasiImportLoopBreak>() {
+            Ok(flow) => flow,
+            Err(error) => return Err(WasiGuestError::endpoint(0x5745_6200, error)),
         };
-        flow.send(())
-            .await
-            .map_err(|error| WasiGuestError::endpoint(0x5745_6200, error))
+        match flow.send(()).await {
+            Ok(()) => Ok(()),
+            Err(error) => Err(WasiGuestError::endpoint(0x5745_6300, error)),
+        }
     }
 
     #[cfg(feature = "wasm-engine-core")]
@@ -2927,7 +3148,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 let guest_storage = self.guest_storage.take().expect(
                     "WASI engine context must receive in-place guest storage from its logical image",
                 );
-                WasiGuestSlot::init(guest_storage, bytes).map_err(WasiGuestError::guest)?
+                WasiGuestSlot::init(guest_storage, bytes)?
             }
         };
         let result = loop {
@@ -2941,7 +3162,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 }
                 Ok(crate::kernel::engine::wasm::Event::Exit(exit)) => {
                     let Some(status) = exit.as_protocol_status() else {
-                        break Err(WasiGuestError::ProtocolRejected);
+                        break Err(WasiGuestError::UnexpectedReply);
                     };
                     if let Err(error) = self.admit_wasi_import_loop_break().await {
                         break Err(error);
@@ -2967,7 +3188,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                         break Err(error);
                     }
                 }
-                Err(error) => break Err(WasiGuestError::guest(error)),
+                Err(error) => break Err(error.into()),
             }
         };
         match result {
@@ -2990,10 +3211,8 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         match call {
             crate::kernel::engine::wasm::Call::FdWrite(pending) => {
                 let fd = pending.fd();
-                let payload = pending.payload().map_err(WasiGuestError::guest)?;
-                let request = EngineReq::FdWrite(
-                    FdWrite::new(fd, payload.as_bytes()).map_err(WasiGuestError::protocol)?,
-                );
+                let payload = pending.payload()?;
+                let request = EngineReq::FdWrite(FdWrite::new(fd, payload.as_bytes())?);
                 let reply = self
                     .endpoint_call::<LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET>(request)
                     .await?;
@@ -3003,19 +3222,16 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 if done.fd() != fd {
                     return Err(WasiGuestError::UnexpectedReply);
                 }
-                pending
-                    .complete(done.errno() as u32)
-                    .map_err(WasiGuestError::guest)
+                pending.complete(done.errno() as u32)?;
+                Ok(())
             }
             crate::kernel::engine::wasm::Call::FdRead(pending) => {
                 let fd = pending.fd();
-                let max_len = pending.max_len().map_err(WasiGuestError::guest)?;
+                let max_len = pending.max_len()?;
                 if max_len > u8::MAX as usize {
-                    return Err(WasiGuestError::ProtocolRejected);
+                    return Err(WasiGuestError::UnexpectedReply);
                 }
-                let request = EngineReq::FdRead(
-                    FdRead::new(fd, max_len as u8).map_err(WasiGuestError::protocol)?,
-                );
+                let request = EngineReq::FdRead(FdRead::new(fd, max_len as u8)?);
                 let reply = self
                     .endpoint_call::<LABEL_WASI_FD_READ, LABEL_WASI_FD_READ_RET>(request)
                     .await?;
@@ -3025,9 +3241,8 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 if done.fd() != fd {
                     return Err(WasiGuestError::UnexpectedReply);
                 }
-                pending
-                    .complete(done.as_bytes(), 0)
-                    .map_err(WasiGuestError::guest)
+                pending.complete(done.as_bytes(), 0)?;
+                Ok(())
             }
             crate::kernel::engine::wasm::Call::FdFdstatGet(pending) => {
                 let fd = pending.fd();
@@ -3042,9 +3257,8 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 if stat.fd() != fd {
                     return Err(WasiGuestError::UnexpectedReply);
                 }
-                pending
-                    .complete(Self::protocol_fdstat_to_vm(stat), 0)
-                    .map_err(WasiGuestError::guest)
+                pending.complete(Self::protocol_fdstat_to_vm(stat), 0)?;
+                Ok(())
             }
             crate::kernel::engine::wasm::Call::FdClose(pending) => {
                 let fd = pending.fd();
@@ -3059,12 +3273,13 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 if closed.fd() != fd {
                     return Err(WasiGuestError::UnexpectedReply);
                 }
-                pending.complete(0).map_err(WasiGuestError::guest)
+                pending.complete(0)?;
+                Ok(())
             }
             crate::kernel::engine::wasm::Call::ClockResGet(pending) => {
                 let clock_id = pending.clock_id();
                 if clock_id > u8::MAX as u32 {
-                    return Err(WasiGuestError::ProtocolRejected);
+                    return Err(WasiGuestError::UnexpectedReply);
                 }
                 let reply = self
                     .endpoint_call::<LABEL_WASI_CLOCK_RES_GET, LABEL_WASI_CLOCK_RES_GET_RET>(
@@ -3074,14 +3289,13 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 let EngineRet::ClockResolution(resolution) = reply else {
                     return Err(WasiGuestError::UnexpectedReply);
                 };
-                pending
-                    .complete(resolution.nanos(), 0)
-                    .map_err(WasiGuestError::guest)
+                pending.complete(resolution.nanos(), 0)?;
+                Ok(())
             }
             crate::kernel::engine::wasm::Call::ClockTimeGet(pending) => {
                 let clock_id = pending.clock_id();
                 if clock_id > u8::MAX as u32 {
-                    return Err(WasiGuestError::ProtocolRejected);
+                    return Err(WasiGuestError::UnexpectedReply);
                 }
                 let request =
                     EngineReq::ClockTimeGet(ClockTimeGet::new(clock_id as u8, pending.precision()));
@@ -3093,12 +3307,11 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 let EngineRet::ClockTime(now) = reply else {
                     return Err(WasiGuestError::UnexpectedReply);
                 };
-                pending
-                    .complete(now.nanos(), 0)
-                    .map_err(WasiGuestError::guest)
+                pending.complete(now.nanos(), 0)?;
+                Ok(())
             }
             crate::kernel::engine::wasm::Call::PollOneoff(pending) => {
-                let delay = pending.delay_ticks().map_err(WasiGuestError::guest)?;
+                let delay = pending.delay_ticks()?;
                 let reply = self
                     .endpoint_call::<LABEL_WASI_POLL_ONEOFF, LABEL_WASI_POLL_ONEOFF_RET>(
                         EngineReq::PollOneoff(PollOneoff::new(delay)),
@@ -3107,38 +3320,32 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 let EngineRet::PollReady(ready) = reply else {
                     return Err(WasiGuestError::UnexpectedReply);
                 };
-                pending
-                    .complete(ready.ready() as u32, 0)
-                    .map_err(WasiGuestError::guest)
+                pending.complete(ready.ready() as u32, 0)?;
+                Ok(())
             }
             crate::kernel::engine::wasm::Call::RandomGet(pending) => {
                 let len = pending.buf_len();
                 if len > u8::MAX as u32 {
-                    return Err(WasiGuestError::ProtocolRejected);
+                    return Err(WasiGuestError::UnexpectedReply);
                 }
-                let request = EngineReq::RandomGet(
-                    RandomGet::new(len as u8).map_err(WasiGuestError::protocol)?,
-                );
+                let request = EngineReq::RandomGet(RandomGet::new(len as u8)?);
                 let reply = self
                     .endpoint_call::<LABEL_WASI_RANDOM_GET, LABEL_WASI_RANDOM_GET_RET>(request)
                     .await?;
                 let EngineRet::RandomDone(done) = reply else {
                     return Err(WasiGuestError::UnexpectedReply);
                 };
-                pending
-                    .complete(done.as_bytes(), 0)
-                    .map_err(WasiGuestError::guest)
+                pending.complete(done.as_bytes(), 0)?;
+                Ok(())
             }
             crate::kernel::engine::wasm::Call::FdReaddir(pending) => {
-                let fd = pending.fd().map_err(WasiGuestError::guest)?;
-                let cookie = pending.cookie().map_err(WasiGuestError::guest)?;
-                let max_len = pending.max_len().map_err(WasiGuestError::guest)?;
+                let fd = pending.fd()?;
+                let cookie = pending.cookie()?;
+                let max_len = pending.max_len()?;
                 if max_len > u8::MAX as usize {
-                    return Err(WasiGuestError::ProtocolRejected);
+                    return Err(WasiGuestError::UnexpectedReply);
                 }
-                let request = EngineReq::FdReaddir(
-                    FdReaddir::new(fd, cookie, max_len as u8).map_err(WasiGuestError::protocol)?,
-                );
+                let request = EngineReq::FdReaddir(FdReaddir::new(fd, cookie, max_len as u8)?);
                 let reply = self
                     .endpoint_call::<LABEL_WASI_FD_READDIR, LABEL_WASI_FD_READDIR_RET>(request)
                     .await?;
@@ -3148,27 +3355,22 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 if done.fd() != fd {
                     return Err(WasiGuestError::UnexpectedReply);
                 }
-                pending
-                    .complete(done.as_bytes(), done.errno() as u32)
-                    .map_err(WasiGuestError::guest)
+                pending.complete(done.as_bytes(), done.errno() as u32)?;
+                Ok(())
             }
             crate::kernel::engine::wasm::Call::PathOpen(pending) => {
-                let fd = pending.fd().map_err(WasiGuestError::guest)?;
-                let rights = pending.rights_base().map_err(WasiGuestError::guest)?;
-                let path = pending.path_bytes().map_err(WasiGuestError::guest)?;
-                let request = EngineReq::PathOpen(
-                    PathOpen::new(fd, 0, rights, path.as_bytes())
-                        .map_err(WasiGuestError::protocol)?,
-                );
+                let fd = pending.fd()?;
+                let rights = pending.rights_base()?;
+                let path = pending.path_bytes()?;
+                let request = EngineReq::PathOpen(PathOpen::new(fd, 0, rights, path.as_bytes())?);
                 let reply = self
                     .endpoint_call::<LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET>(request)
                     .await?;
                 let EngineRet::PathOpened(opened) = reply else {
                     return Err(WasiGuestError::UnexpectedReply);
                 };
-                pending
-                    .complete(opened.fd() as u32, opened.errno() as u32)
-                    .map_err(WasiGuestError::guest)
+                pending.complete(opened.fd() as u32, opened.errno() as u32)?;
+                Ok(())
             }
             crate::kernel::engine::wasm::Call::ArgsSizesGet(pending) => {
                 let reply = self
@@ -3179,23 +3381,20 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 let EngineRet::ArgsSizes(sizes) = reply else {
                     return Err(WasiGuestError::UnexpectedReply);
                 };
-                pending
-                    .complete(sizes.count() as u32, sizes.buf_size() as u32, 0)
-                    .map_err(WasiGuestError::guest)
+                pending.complete(sizes.count() as u32, sizes.buf_size() as u32, 0)?;
+                Ok(())
             }
             crate::kernel::engine::wasm::Call::ArgsGet(pending) => {
                 let max_len = pending.max_len();
-                let request =
-                    EngineReq::ArgsGet(ArgsGet::new(max_len).map_err(WasiGuestError::protocol)?);
+                let request = EngineReq::ArgsGet(ArgsGet::new(max_len)?);
                 let reply = self
                     .endpoint_call::<LABEL_WASI_ARGS_GET, LABEL_WASI_ARGS_GET_RET>(request)
                     .await?;
                 let EngineRet::ArgsDone(done) = reply else {
                     return Err(WasiGuestError::UnexpectedReply);
                 };
-                pending
-                    .complete(&[done.as_bytes()], 0)
-                    .map_err(WasiGuestError::guest)
+                pending.complete(&[done.as_bytes()], 0)?;
+                Ok(())
             }
             crate::kernel::engine::wasm::Call::EnvironSizesGet(pending) => {
                 let reply = self
@@ -3206,24 +3405,20 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 let EngineRet::EnvironSizes(sizes) = reply else {
                     return Err(WasiGuestError::UnexpectedReply);
                 };
-                pending
-                    .complete(sizes.count() as u32, sizes.buf_size() as u32, 0)
-                    .map_err(WasiGuestError::guest)
+                pending.complete(sizes.count() as u32, sizes.buf_size() as u32, 0)?;
+                Ok(())
             }
             crate::kernel::engine::wasm::Call::EnvironGet(pending) => {
                 let max_len = pending.max_len();
-                let request = EngineReq::EnvironGet(
-                    EnvironGet::new(max_len).map_err(WasiGuestError::protocol)?,
-                );
+                let request = EngineReq::EnvironGet(EnvironGet::new(max_len)?);
                 let reply = self
                     .endpoint_call::<LABEL_WASI_ENVIRON_GET, LABEL_WASI_ENVIRON_GET_RET>(request)
                     .await?;
                 let EngineRet::EnvironDone(done) = reply else {
                     return Err(WasiGuestError::UnexpectedReply);
                 };
-                pending
-                    .complete(&[(done.as_bytes(), &[][..])], 0)
-                    .map_err(WasiGuestError::guest)
+                pending.complete(&[(done.as_bytes(), &[][..])], 0)?;
+                Ok(())
             }
         }
     }
@@ -3238,26 +3433,37 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         >,
     ) -> Result<(), WasiGuestError> {
         let fence = MemFence::new(MemFenceReason::MemoryGrow, pending.fence_epoch());
-        self.endpoint()
+        let flow = match self
+            .endpoint()
             .flow::<hibana::g::Msg<LABEL_MEM_FENCE, MemFence>>()
-            .map_err(|error| WasiGuestError::endpoint(0x5745_1000 | LABEL_MEM_FENCE as u32, error))?
-            .send(&fence)
-            .await
-            .map_err(|error| {
-                WasiGuestError::endpoint(0x5745_2000 | LABEL_MEM_FENCE as u32, error)
-            })?;
-        pending.complete().map_err(WasiGuestError::guest)
+        {
+            Ok(flow) => flow,
+            Err(error) => {
+                return Err(WasiGuestError::endpoint(
+                    0x5745_1000 | LABEL_MEM_FENCE as u32,
+                    error,
+                ));
+            }
+        };
+        if let Err(error) = flow.send(&fence).await {
+            return Err(WasiGuestError::endpoint(
+                0x5745_2000 | LABEL_MEM_FENCE as u32,
+                error,
+            ));
+        }
+        pending.complete()?;
+        Ok(())
     }
 
-    pub async fn pending(self) -> core::convert::Infallible {
-        core::future::pending::<core::convert::Infallible>().await
+    pub fn pending<E>(self) -> impl core::future::Future<Output = RoleResult<E>> {
+        PendingRole::new(self)
     }
 }
 
 #[cfg(feature = "wasm-engine-core")]
 async fn drive_canonical_wasi_engine<'endpoint, 'guest, C, I, const ROLE: u8>(
     mut ctx: EngineCtx<'endpoint, 'guest, C, ROLE>,
-) -> core::convert::Infallible
+) -> RoleResult<WasiGuestError>
 where
     C: Capsule,
     I: LogicalImage<C>,
@@ -3269,10 +3475,7 @@ where
                 return ctx.pending().await;
             }
             Err(error) => {
-                panic!(
-                    "canonical WASI P1 engine failed: 0x{:08x}",
-                    error.diagnostic_code()
-                );
+                return Err(error);
             }
         }
     }
@@ -3322,8 +3525,8 @@ impl<'a, C: Capsule, const ROLE: u8> DriverCtx<'a, C, ROLE> {
         self.endpoint.endpoint()
     }
 
-    pub async fn pending(self) -> core::convert::Infallible {
-        core::future::pending::<core::convert::Infallible>().await
+    pub fn pending<E>(self) -> impl core::future::Future<Output = RoleResult<E>> {
+        PendingRole::new(self)
     }
 }
 
@@ -3353,8 +3556,8 @@ impl<'a, C: Capsule, const ROLE: u8> BoundaryCtx<'a, C, ROLE> {
         self.endpoint.endpoint()
     }
 
-    pub async fn pending(self) -> core::convert::Infallible {
-        core::future::pending::<core::convert::Infallible>().await
+    pub fn pending<E>(self) -> impl core::future::Future<Output = RoleResult<E>> {
+        PendingRole::new(self)
     }
 }
 
@@ -3384,8 +3587,8 @@ impl<'a, C: Capsule, const ROLE: u8> LinkCtx<'a, C, ROLE> {
         self.endpoint.endpoint()
     }
 
-    pub async fn pending(self) -> core::convert::Infallible {
-        core::future::pending::<core::convert::Infallible>().await
+    pub fn pending<E>(self) -> impl core::future::Future<Output = RoleResult<E>> {
+        PendingRole::new(self)
     }
 }
 
@@ -3415,32 +3618,34 @@ impl<'a, C: Capsule, const ROLE: u8> SupervisorCtx<'a, C, ROLE> {
         self.endpoint.endpoint()
     }
 
-    pub async fn pending(self) -> core::convert::Infallible {
-        core::future::pending::<core::convert::Infallible>().await
+    pub fn pending<E>(self) -> impl core::future::Future<Output = RoleResult<E>> {
+        PendingRole::new(self)
     }
 }
 
 /// Localside implementation contract for a capsule.
 pub trait Localside<C: Capsule> {
+    type Error: Debug;
+
     fn engine<'endpoint, 'guest, const ROLE: u8>(
         ctx: EngineCtx<'endpoint, 'guest, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible>;
+    ) -> impl core::future::Future<Output = RoleResult<Self::Error>>;
 
     fn driver<'a, const ROLE: u8>(
         ctx: DriverCtx<'a, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible>;
+    ) -> impl core::future::Future<Output = RoleResult<Self::Error>>;
 
     fn boundary<'a, const ROLE: u8>(
         ctx: BoundaryCtx<'a, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible>;
+    ) -> impl core::future::Future<Output = RoleResult<Self::Error>>;
 
     fn link<'a, const ROLE: u8>(
         ctx: LinkCtx<'a, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible>;
+    ) -> impl core::future::Future<Output = RoleResult<Self::Error>>;
 
     fn supervisor<'a, const ROLE: u8>(
         ctx: SupervisorCtx<'a, C, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible>;
+    ) -> impl core::future::Future<Output = RoleResult<Self::Error>>;
 }
 
 /// Canonical appkit execution path.
@@ -3531,7 +3736,7 @@ mod tests {
 
     use hibana::{
         g,
-        substrate::{
+        integration::{
             binding::NoBinding,
             cap::{
                 GenericCapToken,
@@ -3568,7 +3773,7 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     struct AttachedQueueTestFrame {
         occupied: bool,
-        frame_label: hibana::substrate::transport::FrameLabel,
+        frame_label: hibana::integration::transport::FrameLabel,
         len: usize,
         bytes: [u8; TEST_CARRIER_FRAME_BYTES],
     }
@@ -3576,7 +3781,7 @@ mod tests {
     impl AttachedQueueTestFrame {
         const EMPTY: Self = Self {
             occupied: false,
-            frame_label: hibana::substrate::transport::FrameLabel::new(0),
+            frame_label: hibana::integration::transport::FrameLabel::new(0),
             len: 0,
             bytes: [0; TEST_CARRIER_FRAME_BYTES],
         };
@@ -3598,12 +3803,12 @@ mod tests {
 
         fn push_back(
             &mut self,
-            frame_label: hibana::substrate::transport::FrameLabel,
-            payload: hibana::substrate::wire::Payload<'_>,
-        ) -> Result<(), hibana::substrate::transport::TransportError> {
+            frame_label: hibana::integration::transport::FrameLabel,
+            payload: hibana::integration::wire::Payload<'_>,
+        ) -> Result<(), hibana::integration::transport::TransportError> {
             let bytes = payload.as_bytes();
             if bytes.len() > TEST_CARRIER_FRAME_BYTES || self.len == TEST_CARRIER_QUEUE_DEPTH {
-                return Err(hibana::substrate::transport::TransportError::Failed);
+                return Err(hibana::integration::transport::TransportError::Failed);
             }
             let idx = (self.head + self.len) % TEST_CARRIER_QUEUE_DEPTH;
             self.frames[idx].occupied = true;
@@ -3616,7 +3821,7 @@ mod tests {
 
         fn push_front(
             &mut self,
-            frame_label: hibana::substrate::transport::FrameLabel,
+            frame_label: hibana::integration::transport::FrameLabel,
             bytes: &[u8],
         ) {
             if bytes.len() > TEST_CARRIER_FRAME_BYTES || self.len == TEST_CARRIER_QUEUE_DEPTH {
@@ -3701,14 +3906,14 @@ mod tests {
         local_role: u8,
         session_id: u32,
         requeued_frames: u16,
-        frame_label: Option<hibana::substrate::transport::FrameLabel>,
-        hint_frame_label: Cell<Option<hibana::substrate::transport::FrameLabel>>,
+        frame_label: Option<hibana::integration::transport::FrameLabel>,
+        hint_frame_label: Cell<Option<hibana::integration::transport::FrameLabel>>,
         len: usize,
         bytes: [u8; TEST_CARRIER_FRAME_BYTES],
     }
 
-    impl hibana::substrate::Transport for AttachedQueueTestCarrier {
-        type Error = hibana::substrate::transport::TransportError;
+    impl hibana::integration::Transport for AttachedQueueTestCarrier {
+        type Error = hibana::integration::transport::TransportError;
         type Tx<'a>
             = AttachedQueueTestTx
         where
@@ -3741,7 +3946,7 @@ mod tests {
         fn poll_send<'a, 'f>(
             &'a self,
             tx: &'a mut Self::Tx<'a>,
-            outgoing: hibana::substrate::transport::Outgoing<'f>,
+            outgoing: hibana::integration::transport::Outgoing<'f>,
             cx: &mut core::task::Context<'_>,
         ) -> core::task::Poll<Result<(), Self::Error>>
         where
@@ -3755,7 +3960,7 @@ mod tests {
             );
             let peer = outgoing.peer() as usize;
             if peer >= TEST_CARRIER_ROLES {
-                return Poll::Ready(Err(hibana::substrate::transport::TransportError::Failed));
+                return Poll::Ready(Err(hibana::integration::transport::TransportError::Failed));
             }
             self.queues.lock().expect("test carrier queue lock").by_role[peer]
                 .push_back(outgoing.frame_label(), outgoing.payload())?;
@@ -3772,14 +3977,14 @@ mod tests {
             &'a self,
             rx: &'a mut Self::Rx<'a>,
             cx: &mut core::task::Context<'_>,
-        ) -> core::task::Poll<Result<hibana::substrate::wire::Payload<'a>, Self::Error>> {
+        ) -> core::task::Poll<Result<hibana::integration::wire::Payload<'a>, Self::Error>> {
             assert_ne!(
                 rx.session_id, 0,
                 "attached receive must belong to a session"
             );
             let local_role = rx.local_role as usize;
             if local_role >= TEST_CARRIER_ROLES {
-                return Poll::Ready(Err(hibana::substrate::transport::TransportError::Failed));
+                return Poll::Ready(Err(hibana::integration::transport::TransportError::Failed));
             }
             let Some(frame) = self.queues.lock().expect("test carrier queue lock").by_role
                 [local_role]
@@ -3796,7 +4001,7 @@ mod tests {
             rx.len = frame.len;
             rx.bytes[..frame.len].copy_from_slice(&frame.bytes[..frame.len]);
             cx.waker().wake_by_ref();
-            Poll::Ready(Ok(hibana::substrate::wire::Payload::new(
+            Poll::Ready(Ok(hibana::integration::wire::Payload::new(
                 &rx.bytes[..rx.len],
             )))
         }
@@ -3819,25 +4024,27 @@ mod tests {
 
         fn drain_events(
             &self,
-            emit: &mut dyn FnMut(hibana::substrate::transport::advanced::TransportEvent),
+            emit: &mut dyn FnMut(hibana::integration::transport::advanced::TransportEvent),
         ) {
-            emit(hibana::substrate::transport::advanced::TransportEvent::new(
-                hibana::substrate::transport::advanced::TransportEventKind::Ack,
-                0,
-                0,
-                0,
-            ));
+            emit(
+                hibana::integration::transport::advanced::TransportEvent::new(
+                    hibana::integration::transport::advanced::TransportEventKind::Ack,
+                    0,
+                    0,
+                    0,
+                ),
+            );
         }
 
         fn recv_frame_hint<'a>(
             &'a self,
             rx: &'a Self::Rx<'a>,
-        ) -> Option<hibana::substrate::transport::FrameLabel> {
+        ) -> Option<hibana::integration::transport::FrameLabel> {
             assert!(
                 (rx.local_role as usize) < TEST_CARRIER_ROLES,
                 "attached receive role must be valid"
             );
-            let hint = rx.hint_frame_label.take();
+            let hint = rx.hint_frame_label.get();
             if hint.is_some() {
                 self.queues
                     .lock()
@@ -3861,10 +4068,14 @@ mod tests {
     struct BridgePlacement;
     struct BridgeLocal;
     struct BridgeImage;
+    struct NoLoopCapsule;
+    struct NoLoopPlacement;
+    struct NoLoopLocal;
     struct MemoryGrowCapsule;
     struct MemoryGrowLocal;
     struct MemoryGrowPlacement;
     static BRIDGE_WASI_GUEST_ARENA: WasiGuestArena = WasiGuestArena::empty();
+    static NO_LOOP_WASI_GUEST_ARENA: WasiGuestArena = WasiGuestArena::empty();
     static MEMORY_GROW_WASI_GUEST_ARENA: WasiGuestArena = WasiGuestArena::empty();
 
     static RUN_BRIDGE_ENGINE_DONE: AtomicU8 = AtomicU8::new(0);
@@ -3876,10 +4087,17 @@ mod tests {
         type Local = BridgeLocal;
         type Report = ();
 
-        fn choreography() -> impl hibana::substrate::program::Projectable<Self::Universe> {
-            g::seq(
+        fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
+            let fd_write = g::seq(
                 g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 0>(),
                 g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 0>(),
+            );
+            g::route(
+                g::seq(
+                    g::send::<g::Role<0>, g::Role<0>, WasiImportLoopContinue, 0>(),
+                    fd_write,
+                ),
+                g::send::<g::Role<0>, g::Role<0>, WasiImportLoopBreak, 0>(),
             )
         }
     }
@@ -3895,50 +4113,108 @@ mod tests {
     }
 
     impl Localside<BridgeCapsule> for BridgeLocal {
+        type Error = WasiGuestError;
+
         fn engine<'endpoint, 'guest, const ROLE: u8>(
             ctx: EngineCtx<'endpoint, 'guest, BridgeCapsule, ROLE>,
-        ) -> impl core::future::Future<Output = core::convert::Infallible> {
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
             async move {
+                let mut ctx = ctx;
                 if ROLE == 0 {
-                    let mut ctx = ctx;
-                    let status = ctx
-                        .drive_wasi_guest(BudgetRun::new(1, 0, 128, 0))
-                        .await
-                        .expect("run bridge drives WASI P1 guest");
+                    let status = ctx.drive_wasi_guest(BudgetRun::new(1, 0, 128, 0)).await?;
                     assert_eq!(status, WasiGuestStatus::Done);
                     RUN_BRIDGE_ENGINE_DONE.store(1, Ordering::SeqCst);
                 }
-                core::future::pending::<core::convert::Infallible>().await
+                ctx.pending().await
             }
         }
 
         fn driver<'a, const ROLE: u8>(
             ctx: DriverCtx<'a, BridgeCapsule, ROLE>,
-        ) -> impl core::future::Future<Output = core::convert::Infallible> {
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
             async move {
+                let mut ctx = ctx;
                 if ROLE == 1 {
-                    reply_to_fd_write(ctx).await;
+                    reply_to_fd_write(&mut ctx).await;
                     RUN_BRIDGE_DRIVER_DONE.store(1, Ordering::SeqCst);
                 }
-                core::future::pending::<core::convert::Infallible>().await
+                ctx.pending().await
             }
         }
 
         fn boundary<'a, const ROLE: u8>(
             ctx: BoundaryCtx<'a, BridgeCapsule, ROLE>,
-        ) -> impl core::future::Future<Output = core::convert::Infallible> {
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
             ctx.pending()
         }
 
         fn link<'a, const ROLE: u8>(
             ctx: LinkCtx<'a, BridgeCapsule, ROLE>,
-        ) -> impl core::future::Future<Output = core::convert::Infallible> {
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
             ctx.pending()
         }
 
         fn supervisor<'a, const ROLE: u8>(
             ctx: SupervisorCtx<'a, BridgeCapsule, ROLE>,
-        ) -> impl core::future::Future<Output = core::convert::Infallible> {
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+    }
+
+    impl Capsule for NoLoopCapsule {
+        type Universe = DefaultLabelUniverse;
+        type Placement = NoLoopPlacement;
+        type Local = NoLoopLocal;
+        type Report = ();
+
+        fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
+            g::seq(
+                g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 0>(),
+                g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 0>(),
+            )
+        }
+    }
+
+    impl Placement<NoLoopCapsule> for NoLoopPlacement {
+        fn role_kind(role: u8) -> RoleKind {
+            match role {
+                0 => RoleKind::Engine,
+                1 => RoleKind::Driver,
+                _ => RoleKind::Boundary,
+            }
+        }
+    }
+
+    impl Localside<NoLoopCapsule> for NoLoopLocal {
+        type Error = Infallible;
+
+        fn engine<'endpoint, 'guest, const ROLE: u8>(
+            ctx: EngineCtx<'endpoint, 'guest, NoLoopCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+
+        fn driver<'a, const ROLE: u8>(
+            ctx: DriverCtx<'a, NoLoopCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+
+        fn boundary<'a, const ROLE: u8>(
+            ctx: BoundaryCtx<'a, NoLoopCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+
+        fn link<'a, const ROLE: u8>(
+            ctx: LinkCtx<'a, NoLoopCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+
+        fn supervisor<'a, const ROLE: u8>(
+            ctx: SupervisorCtx<'a, NoLoopCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
             ctx.pending()
         }
     }
@@ -3949,7 +4225,7 @@ mod tests {
         type Local = MemoryGrowLocal;
         type Report = ();
 
-        fn choreography() -> impl hibana::substrate::program::Projectable<Self::Universe> {
+        fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
             g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_MEM_FENCE, MemFence>, 0>()
         }
     }
@@ -3965,33 +4241,35 @@ mod tests {
     }
 
     impl Localside<MemoryGrowCapsule> for MemoryGrowLocal {
+        type Error = Infallible;
+
         fn engine<'endpoint, 'guest, const ROLE: u8>(
             ctx: EngineCtx<'endpoint, 'guest, MemoryGrowCapsule, ROLE>,
-        ) -> impl core::future::Future<Output = core::convert::Infallible> {
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
             ctx.pending()
         }
 
         fn driver<'a, const ROLE: u8>(
             ctx: DriverCtx<'a, MemoryGrowCapsule, ROLE>,
-        ) -> impl core::future::Future<Output = core::convert::Infallible> {
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
             ctx.pending()
         }
 
         fn boundary<'a, const ROLE: u8>(
             ctx: BoundaryCtx<'a, MemoryGrowCapsule, ROLE>,
-        ) -> impl core::future::Future<Output = core::convert::Infallible> {
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
             ctx.pending()
         }
 
         fn link<'a, const ROLE: u8>(
             ctx: LinkCtx<'a, MemoryGrowCapsule, ROLE>,
-        ) -> impl core::future::Future<Output = core::convert::Infallible> {
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
             ctx.pending()
         }
 
         fn supervisor<'a, const ROLE: u8>(
             ctx: SupervisorCtx<'a, MemoryGrowCapsule, ROLE>,
-        ) -> impl core::future::Future<Output = core::convert::Infallible> {
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
             ctx.pending()
         }
     }
@@ -4211,12 +4489,17 @@ mod tests {
         None
     }
 
-    async fn reply_to_fd_write<const ROLE: u8>(mut ctx: DriverCtx<'_, BridgeCapsule, ROLE>) {
-        let request = ctx
+    async fn reply_to_fd_write<const ROLE: u8>(ctx: &mut DriverCtx<'_, BridgeCapsule, ROLE>) {
+        let branch = ctx
             .endpoint()
-            .recv::<g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>()
+            .offer()
             .await
-            .expect("driver receives fd_write request through endpoint");
+            .expect("driver offers fd_write request branch");
+        assert_eq!(branch.label(), LABEL_WASI_FD_WRITE);
+        let request = branch
+            .decode::<g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>()
+            .await
+            .expect("driver decodes fd_write request through endpoint");
         let EngineReq::FdWrite(write) = request else {
             panic!("expected fd_write request");
         };
@@ -4304,11 +4587,11 @@ mod tests {
         let program = no_policy_loop_fd_write_program();
         let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
         let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
-        let mut tap_buf = [hibana::substrate::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let clock = CounterClock::new();
         let carrier = AttachedQueueTestCarrier::new();
-        let kit = hibana::substrate::SessionKit::<
+        let kit = hibana::integration::SessionKit::<
             AttachedQueueTestCarrier,
             DefaultLabelUniverse,
             CounterClock,
@@ -4316,7 +4599,7 @@ mod tests {
         >::new(&clock);
         let rendezvous = kit
             .add_rendezvous_from_config(
-                Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new()),
+                Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new(), None),
                 carrier,
             )
             .expect("register appkit carrier rendezvous");
@@ -4369,21 +4652,21 @@ mod tests {
         let program = no_policy_loop_fd_write_program();
         let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
         let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
-        let mut tap0 = [hibana::substrate::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
-        let mut tap1 = [hibana::substrate::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap0 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap1 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab0 = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let mut slab1 = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let clock0 = CounterClock::new();
         let clock1 = CounterClock::new();
         let carrier = AttachedQueueTestCarrier::new();
         let inspector = carrier.clone();
-        let kit0 = hibana::substrate::SessionKit::<
+        let kit0 = hibana::integration::SessionKit::<
             AttachedQueueTestCarrier,
             DefaultLabelUniverse,
             CounterClock,
             1,
         >::new(&clock0);
-        let kit1 = hibana::substrate::SessionKit::<
+        let kit1 = hibana::integration::SessionKit::<
             AttachedQueueTestCarrier,
             DefaultLabelUniverse,
             CounterClock,
@@ -4391,13 +4674,13 @@ mod tests {
         >::new(&clock1);
         let rendezvous0 = kit0
             .add_rendezvous_from_config(
-                Config::new(&mut tap0, &mut slab0, 0..8, 1, CounterClock::new()),
+                Config::new(&mut tap0, &mut slab0, 0..8, 1, CounterClock::new(), None),
                 carrier.clone(),
             )
             .expect("register driver logical image carrier rendezvous");
         let rendezvous1 = kit1
             .add_rendezvous_from_config(
-                Config::new(&mut tap1, &mut slab1, 0..8, 1, CounterClock::new()),
+                Config::new(&mut tap1, &mut slab1, 0..8, 1, CounterClock::new(), None),
                 carrier,
             )
             .expect("register engine logical image carrier rendezvous");
@@ -4438,9 +4721,16 @@ mod tests {
         );
         let (recv_count, hint_count, requeue_count) = inspector.counters();
         assert_eq!(
-            (recv_count, hint_count, requeue_count),
-            (1, 1, 0),
-            "split offer must receive one frame, consume one route hint, and avoid requeue before materializing"
+            recv_count, 1,
+            "split offer must receive exactly one frame before materializing"
+        );
+        assert!(
+            hint_count >= 1,
+            "split offer must observe at least one non-consuming route hint before materializing"
+        );
+        assert_eq!(
+            requeue_count, 0,
+            "split offer must avoid requeue before materializing"
         );
         let branch = maybe_branch
             .expect("driver split offer must complete")
@@ -4469,20 +4759,20 @@ mod tests {
         let program = no_policy_loop_fd_write_poll_program();
         let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
         let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
-        let mut tap0 = [hibana::substrate::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
-        let mut tap1 = [hibana::substrate::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap0 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap1 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab0 = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let mut slab1 = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let clock0 = CounterClock::new();
         let clock1 = CounterClock::new();
         let carrier = AttachedQueueTestCarrier::new();
-        let kit0 = hibana::substrate::SessionKit::<
+        let kit0 = hibana::integration::SessionKit::<
             AttachedQueueTestCarrier,
             DefaultLabelUniverse,
             CounterClock,
             1,
         >::new(&clock0);
-        let kit1 = hibana::substrate::SessionKit::<
+        let kit1 = hibana::integration::SessionKit::<
             AttachedQueueTestCarrier,
             DefaultLabelUniverse,
             CounterClock,
@@ -4490,13 +4780,13 @@ mod tests {
         >::new(&clock1);
         let rendezvous0 = kit0
             .add_rendezvous_from_config(
-                Config::new(&mut tap0, &mut slab0, 0..8, 1, CounterClock::new()),
+                Config::new(&mut tap0, &mut slab0, 0..8, 1, CounterClock::new(), None),
                 carrier.clone(),
             )
             .expect("register driver logical image carrier rendezvous");
         let rendezvous1 = kit1
             .add_rendezvous_from_config(
-                Config::new(&mut tap1, &mut slab1, 0..8, 1, CounterClock::new()),
+                Config::new(&mut tap1, &mut slab1, 0..8, 1, CounterClock::new(), None),
                 carrier,
             )
             .expect("register engine logical image carrier rendezvous");
@@ -4571,16 +4861,209 @@ mod tests {
     }
 
     #[test]
+    fn no_policy_route_repeats_fd_write_poll_across_split_session_kits() {
+        let program = no_policy_loop_fd_write_poll_program();
+        let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
+        let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
+        let mut tap0 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap1 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut slab0 = [0u8; APPKIT_ATTACH_SLAB_BYTES];
+        let mut slab1 = [0u8; APPKIT_ATTACH_SLAB_BYTES];
+        let clock0 = CounterClock::new();
+        let clock1 = CounterClock::new();
+        let carrier = AttachedQueueTestCarrier::new();
+        let kit0 = hibana::integration::SessionKit::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            1,
+        >::new(&clock0);
+        let kit1 = hibana::integration::SessionKit::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            1,
+        >::new(&clock1);
+        let rendezvous0 = kit0
+            .add_rendezvous_from_config(
+                Config::new(&mut tap0, &mut slab0, 0..8, 1, CounterClock::new(), None),
+                carrier.clone(),
+            )
+            .expect("register repeated driver logical image carrier rendezvous");
+        let rendezvous1 = kit1
+            .add_rendezvous_from_config(
+                Config::new(&mut tap1, &mut slab1, 0..8, 1, CounterClock::new(), None),
+                carrier,
+            )
+            .expect("register repeated engine logical image carrier rendezvous");
+        let session = SessionId::new(0x55);
+        let mut driver = kit0
+            .enter::<0, _>(rendezvous0, session, &role0, NoBinding)
+            .expect("enter repeated split driver role");
+        let mut engine = kit1
+            .enter::<1, _>(rendezvous1, session, &role1, NoBinding)
+            .expect("enter repeated split engine role");
+
+        for iteration in 0..20 {
+            let continue_send = poll_bounded(
+                engine
+                    .flow::<TestLoopContinue>()
+                    .expect("engine opens repeated loop continue flow")
+                    .send(()),
+                64,
+            );
+            assert!(
+                continue_send.is_some(),
+                "loop continue send did not complete at iteration {iteration}"
+            );
+            continue_send
+                .unwrap()
+                .expect("engine sends repeated loop continue");
+
+            let write_request =
+                EngineReq::FdWrite(FdWrite::new(3, b"1").expect("fd write request"));
+            let write_send = poll_bounded(
+                engine
+                    .flow::<g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>()
+                    .expect("engine opens repeated fd_write flow")
+                    .send(&write_request),
+                64,
+            );
+            assert!(
+                write_send.is_some(),
+                "fd_write send did not complete at iteration {iteration}"
+            );
+            write_send
+                .unwrap()
+                .expect("engine sends repeated fd_write request");
+
+            let write_branch = poll_bounded(driver.offer(), 64);
+            assert!(
+                write_branch.is_some(),
+                "driver offer did not complete at iteration {iteration}"
+            );
+            let write_branch = write_branch
+                .unwrap()
+                .expect("driver offers repeated fd_write branch");
+            assert_eq!(write_branch.label(), LABEL_WASI_FD_WRITE);
+            let observed_write = poll_bounded(
+                write_branch.decode::<g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>(),
+                64,
+            );
+            assert!(
+                observed_write.is_some(),
+                "driver fd_write decode did not complete at iteration {iteration}"
+            );
+            assert_eq!(
+                observed_write
+                    .unwrap()
+                    .expect("driver decodes repeated fd_write payload"),
+                write_request
+            );
+
+            let write_reply = EngineRet::FdWriteDone(FdWriteDone::new(3, 1));
+            let write_reply_send = poll_bounded(
+                driver
+                    .flow::<g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>>()
+                    .expect("driver opens repeated fd_write reply flow")
+                    .send(&write_reply),
+                64,
+            );
+            assert!(
+                write_reply_send.is_some(),
+                "driver fd_write reply send did not complete at iteration {iteration}"
+            );
+            write_reply_send
+                .unwrap()
+                .expect("driver sends repeated fd_write reply");
+            let observed_write_reply = poll_bounded(
+                engine.recv::<g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>>(),
+                64,
+            );
+            assert!(
+                observed_write_reply.is_some(),
+                "engine fd_write reply recv did not complete at iteration {iteration}"
+            );
+            assert_eq!(
+                observed_write_reply
+                    .unwrap()
+                    .expect("engine receives repeated fd_write reply"),
+                write_reply
+            );
+
+            let poll_request = EngineReq::PollOneoff(PollOneoff::new(1));
+            let poll_send = poll_bounded(
+                engine
+                    .flow::<g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>>()
+                    .expect("engine opens repeated poll_oneoff flow")
+                    .send(&poll_request),
+                64,
+            );
+            assert!(
+                poll_send.is_some(),
+                "poll_oneoff send did not complete at iteration {iteration}"
+            );
+            poll_send
+                .unwrap()
+                .expect("engine sends repeated poll_oneoff request");
+            let observed_poll = poll_bounded(
+                driver.recv::<g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>>(),
+                64,
+            );
+            assert!(
+                observed_poll.is_some(),
+                "driver poll_oneoff recv did not complete at iteration {iteration}"
+            );
+            assert_eq!(
+                observed_poll
+                    .unwrap()
+                    .expect("driver receives repeated poll_oneoff payload"),
+                poll_request
+            );
+
+            let poll_reply = EngineRet::PollReady(PollReady::new(1));
+            let poll_reply_send = poll_bounded(
+                driver
+                    .flow::<g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>>()
+                    .expect("driver opens repeated poll_oneoff reply flow")
+                    .send(&poll_reply),
+                64,
+            );
+            assert!(
+                poll_reply_send.is_some(),
+                "driver poll_oneoff reply send did not complete at iteration {iteration}"
+            );
+            poll_reply_send
+                .unwrap()
+                .expect("driver sends repeated poll_oneoff reply");
+            let observed_poll_reply = poll_bounded(
+                engine.recv::<g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>>(),
+                64,
+            );
+            assert!(
+                observed_poll_reply.is_some(),
+                "engine poll_oneoff reply recv did not complete at iteration {iteration}"
+            );
+            assert_eq!(
+                observed_poll_reply
+                    .unwrap()
+                    .expect("engine receives repeated poll_oneoff reply"),
+                poll_reply
+            );
+        }
+    }
+
+    #[test]
     fn drive_wasi_guest_completes_import_only_through_endpoint_carrier() {
         let module = fd_write_guest_module();
         let program = <BridgeCapsule as Capsule>::choreography();
         let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
         let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
-        let mut tap_buf = [hibana::substrate::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let clock = CounterClock::new();
         let carrier = AttachedQueueTestCarrier::new();
-        let kit = hibana::substrate::SessionKit::<
+        let kit = hibana::integration::SessionKit::<
             AttachedQueueTestCarrier,
             DefaultLabelUniverse,
             CounterClock,
@@ -4588,7 +5071,7 @@ mod tests {
         >::new(&clock);
         let rendezvous = kit
             .add_rendezvous_from_config(
-                Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new()),
+                Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new(), None),
                 carrier,
             )
             .expect("register appkit carrier rendezvous");
@@ -4614,13 +5097,13 @@ mod tests {
             <crate::site::Local<BridgeImage> as LogicalImage<BridgeCapsule>>::wasi_guest_storage::<0>(
             ),
         );
-        let driver_ctx: DriverCtx<'_, BridgeCapsule, 1> = DriverCtx::new(
+        let mut driver_ctx: DriverCtx<'_, BridgeCapsule, 1> = DriverCtx::new(
             RoleEndpointCtx::new(driver_endpoint),
             endpoint_carrier,
             DriverFacts::EMPTY,
         );
         let engine = engine_ctx.drive_wasi_guest(BudgetRun::new(1, 0, 128, 0));
-        let driver = reply_to_fd_write(driver_ctx);
+        let driver = reply_to_fd_write(&mut driver_ctx);
         let waker = noop_waker();
         let mut task_context = Context::from_waker(&waker);
         let mut engine = core::pin::pin!(engine);
@@ -4648,7 +5131,57 @@ mod tests {
             driver_done,
             "driver did not receive fd_write request; engine_result={engine_result:?}"
         );
-        assert_eq!(engine_result, Some(Ok(WasiGuestStatus::Done)));
+        assert!(matches!(engine_result, Some(Ok(WasiGuestStatus::Done))));
+    }
+
+    #[test]
+    fn drive_wasi_guest_requires_projected_loop_control_phase() {
+        let module = fd_write_guest_module();
+        let program = <NoLoopCapsule as Capsule>::choreography();
+        let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
+        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
+        let clock = CounterClock::new();
+        let carrier = AttachedQueueTestCarrier::new();
+        let kit = hibana::integration::SessionKit::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            1,
+        >::new(&clock);
+        let rendezvous = kit
+            .add_rendezvous_from_config(
+                Config::new(&mut tap_buf, &mut slab, 0..8, 1, CounterClock::new(), None),
+                carrier,
+            )
+            .expect("register appkit carrier rendezvous");
+        let session = SessionId::new(0x56);
+        let engine_endpoint = kit
+            .enter::<0, _>(rendezvous, session, &role0, NoBinding)
+            .expect("enter no-loop engine role");
+        let projection = derive_projection_caps_from_program::<NoLoopCapsule>(&program);
+        let endpoint_carrier = EndpointCarrierFacts::new(
+            ImageId(3),
+            SiteId(1),
+            RoleSet::single(0),
+            TEST_ATTACHED_QUEUE_CARRIER,
+            projection,
+        );
+        let mut engine_ctx: EngineCtx<'_, '_, NoLoopCapsule, 0> = EngineCtx::new(
+            RoleEndpointCtx::new(engine_endpoint),
+            endpoint_carrier,
+            Some(module.as_slice()),
+            NO_LOOP_WASI_GUEST_ARENA.storage(),
+        );
+        let result = poll_bounded(
+            engine_ctx.drive_wasi_guest(BudgetRun::new(1, 0, 128, 0)),
+            16,
+        )
+        .expect("missing loop-control phase must fail instead of falling back");
+        assert!(matches!(
+            result,
+            Err(WasiGuestError::EndpointRejected(0x5745_6000))
+        ));
     }
 
     #[test]
@@ -4657,11 +5190,11 @@ mod tests {
         let program = <MemoryGrowCapsule as Capsule>::choreography();
         let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
         let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
-        let mut tap_buf = [hibana::substrate::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let clock = CounterClock::new();
         let carrier = AttachedQueueTestCarrier::new();
-        let kit = hibana::substrate::SessionKit::<
+        let kit = hibana::integration::SessionKit::<
             AttachedQueueTestCarrier,
             DefaultLabelUniverse,
             CounterClock,
@@ -4669,7 +5202,7 @@ mod tests {
         >::new(&clock);
         let rendezvous = kit
             .add_rendezvous_from_config(
-                Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new()),
+                Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new(), None),
                 carrier,
             )
             .expect("register appkit carrier rendezvous");
@@ -4728,7 +5261,7 @@ mod tests {
             driver_done,
             "driver did not receive memory.grow fence; engine_result={engine_result:?}"
         );
-        assert_eq!(engine_result, Some(Ok(WasiGuestStatus::Done)));
+        assert!(matches!(engine_result, Some(Ok(WasiGuestStatus::Done))));
     }
 
     #[test]
@@ -4741,6 +5274,12 @@ mod tests {
             run::<crate::site::Local<BridgeImage>, BridgeCapsule>(WasiImage::from_static(module));
         assert_eq!(report.attached_endpoint_count(), 2);
         assert_eq!(report.wasi_completion_pair_count(), 1);
+        let manifest = report.manifest();
+        assert!(
+            manifest.labels[..manifest.label_count as usize]
+                .contains(&crate::choreography::protocol::LABEL_WASI_IMPORT_LOOP_CONTINUE_CONTROL),
+            "auto loop-control must be visible in projection metadata"
+        );
         assert_eq!(RUN_BRIDGE_DRIVER_DONE.load(Ordering::SeqCst), 1);
         assert_eq!(
             RUN_BRIDGE_ENGINE_DONE.load(Ordering::SeqCst),

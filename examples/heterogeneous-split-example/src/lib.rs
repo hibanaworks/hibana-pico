@@ -7,7 +7,7 @@ use core::{
 
 use hibana::{
     g,
-    substrate::{program::Projectable, runtime::DefaultLabelUniverse},
+    integration::{program::Projectable, runtime::DefaultLabelUniverse},
 };
 use hibana_pico::appkit::ArtifactBundle;
 use hibana_pico::{appkit, site};
@@ -32,7 +32,7 @@ struct ExampleFrameSlot {
     session_id: UnsafeCell<u32>,
     sender: UnsafeCell<u8>,
     peer: UnsafeCell<u8>,
-    label: UnsafeCell<hibana::substrate::transport::FrameLabel>,
+    label: UnsafeCell<hibana::integration::transport::FrameLabel>,
     len: UnsafeCell<usize>,
     bytes: UnsafeCell<[u8; EXAMPLE_FRAME_BYTES]>,
 }
@@ -46,7 +46,7 @@ impl ExampleFrameSlot {
             session_id: UnsafeCell::new(0),
             sender: UnsafeCell::new(0),
             peer: UnsafeCell::new(0),
-            label: UnsafeCell::new(hibana::substrate::transport::FrameLabel::new(0)),
+            label: UnsafeCell::new(hibana::integration::transport::FrameLabel::new(0)),
             len: UnsafeCell::new(0),
             bytes: UnsafeCell::new([0; EXAMPLE_FRAME_BYTES]),
         }
@@ -70,15 +70,15 @@ impl ExampleFrameSlot {
         session_id: u32,
         sender: u8,
         peer: u8,
-        label: hibana::substrate::transport::FrameLabel,
-        payload: hibana::substrate::wire::Payload<'_>,
-    ) -> Result<(), hibana::substrate::transport::TransportError> {
+        label: hibana::integration::transport::FrameLabel,
+        payload: hibana::integration::wire::Payload<'_>,
+    ) -> Result<(), hibana::integration::transport::TransportError> {
         let bytes = payload.as_bytes();
         if bytes.len() > EXAMPLE_FRAME_BYTES {
-            return Err(hibana::substrate::transport::TransportError::Failed);
+            return Err(hibana::integration::transport::TransportError::Failed);
         }
         if self.occupied.swap(true, Ordering::AcqRel) {
-            return Err(hibana::substrate::transport::TransportError::Failed);
+            return Err(hibana::integration::transport::TransportError::Failed);
         }
         unsafe {
             *self.session_id.get() = session_id;
@@ -96,7 +96,7 @@ impl ExampleFrameSlot {
         session_id: u32,
         peer: u8,
         rx: &'a mut ExampleRx,
-    ) -> Option<hibana::substrate::wire::Payload<'a>> {
+    ) -> Option<hibana::integration::wire::Payload<'a>> {
         if !self.matches(session_id, peer) {
             return None;
         }
@@ -105,14 +105,14 @@ impl ExampleFrameSlot {
             rx.bytes[..len].copy_from_slice(&(&*self.bytes.get())[..len]);
         }
         self.clear();
-        Some(hibana::substrate::wire::Payload::new(&rx.bytes[..len]))
+        Some(hibana::integration::wire::Payload::new(&rx.bytes[..len]))
     }
 
     fn frame_label(
         &self,
         session_id: u32,
         peer: u8,
-    ) -> Option<hibana::substrate::transport::FrameLabel> {
+    ) -> Option<hibana::integration::transport::FrameLabel> {
         if !self.matches(session_id, peer) {
             return None;
         }
@@ -160,8 +160,8 @@ pub struct ExampleRx {
     bytes: [u8; EXAMPLE_FRAME_BYTES],
 }
 
-impl hibana::substrate::Transport for ExampleCarrier {
-    type Error = hibana::substrate::transport::TransportError;
+impl hibana::integration::Transport for ExampleCarrier {
+    type Error = hibana::integration::transport::TransportError;
     type Tx<'a>
         = ExampleTx
     where
@@ -189,7 +189,7 @@ impl hibana::substrate::Transport for ExampleCarrier {
     fn poll_send<'a, 'f>(
         &'a self,
         tx: &'a mut Self::Tx<'a>,
-        outgoing: hibana::substrate::transport::Outgoing<'f>,
+        outgoing: hibana::integration::transport::Outgoing<'f>,
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<Result<(), Self::Error>>
     where
@@ -212,7 +212,7 @@ impl hibana::substrate::Transport for ExampleCarrier {
             }
             _ => {
                 return core::task::Poll::Ready(Err(
-                    hibana::substrate::transport::TransportError::Failed,
+                    hibana::integration::transport::TransportError::Failed,
                 ));
             }
         };
@@ -238,7 +238,7 @@ impl hibana::substrate::Transport for ExampleCarrier {
         &'a self,
         rx: &'a mut Self::Rx<'a>,
         task_context: &mut core::task::Context<'_>,
-    ) -> core::task::Poll<Result<hibana::substrate::wire::Payload<'a>, Self::Error>> {
+    ) -> core::task::Poll<Result<hibana::integration::wire::Payload<'a>, Self::Error>> {
         assert_ne!(rx.session_id, 0);
         let local_role = rx.local_role;
         let session_id = rx.session_id;
@@ -248,7 +248,7 @@ impl hibana::substrate::Transport for ExampleCarrier {
             2 => &EXAMPLE_FRAME_1_TO_2,
             _ => {
                 return core::task::Poll::Ready(Err(
-                    hibana::substrate::transport::TransportError::Failed,
+                    hibana::integration::transport::TransportError::Failed,
                 ));
             }
         };
@@ -279,20 +279,22 @@ impl hibana::substrate::Transport for ExampleCarrier {
 
     fn drain_events(
         &self,
-        emit: &mut dyn FnMut(hibana::substrate::transport::advanced::TransportEvent),
+        emit: &mut dyn FnMut(hibana::integration::transport::advanced::TransportEvent),
     ) {
-        emit(hibana::substrate::transport::advanced::TransportEvent::new(
-            hibana::substrate::transport::advanced::TransportEventKind::Ack,
-            0,
-            0,
-            0,
-        ));
+        emit(
+            hibana::integration::transport::advanced::TransportEvent::new(
+                hibana::integration::transport::advanced::TransportEventKind::Ack,
+                0,
+                0,
+                0,
+            ),
+        );
     }
 
     fn recv_frame_hint<'a>(
         &'a self,
         rx: &'a Self::Rx<'a>,
-    ) -> Option<hibana::substrate::transport::FrameLabel> {
+    ) -> Option<hibana::integration::transport::FrameLabel> {
         let slot = match rx.local_role {
             0 => &EXAMPLE_FRAME_2_TO_0,
             1 => &EXAMPLE_FRAME_0_TO_1,
@@ -338,9 +340,11 @@ impl appkit::Placement<Control> for ControlPlacement {
 }
 
 impl appkit::Localside<Control> for ControlLocal {
+    type Error = core::convert::Infallible;
+
     fn engine<'endpoint, 'guest, const ROLE: u8>(
         mut ctx: appkit::EngineCtx<'endpoint, 'guest, Control, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             assert_eq!(ROLE, 0);
             ctx.endpoint()
@@ -356,7 +360,7 @@ impl appkit::Localside<Control> for ControlLocal {
 
     fn driver<'a, const ROLE: u8>(
         mut ctx: appkit::DriverCtx<'a, Control, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             assert_eq!(ROLE, 1);
             ctx.endpoint()
@@ -375,7 +379,7 @@ impl appkit::Localside<Control> for ControlLocal {
 
     fn boundary<'a, const ROLE: u8>(
         mut ctx: appkit::BoundaryCtx<'a, Control, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             assert_eq!(ROLE, 2);
             ctx.endpoint()
@@ -394,13 +398,13 @@ impl appkit::Localside<Control> for ControlLocal {
 
     fn link<'a, const ROLE: u8>(
         ctx: appkit::LinkCtx<'a, Control, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn supervisor<'a, const ROLE: u8>(
         ctx: appkit::SupervisorCtx<'a, Control, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 }

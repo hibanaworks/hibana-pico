@@ -1,6 +1,6 @@
 use hibana::{
     g,
-    substrate::{
+    integration::{
         Transport,
         binding::NoBinding,
         cap::{
@@ -29,7 +29,7 @@ use hibana_pico::{
         LABEL_WASI_ENVIRON_SIZES_GET, LABEL_WASI_ENVIRON_SIZES_GET_RET, LABEL_WASI_FD_WRITE,
         LABEL_WASI_FD_WRITE_RET, LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET,
         LABEL_WASI_POLL_ONEOFF, LABEL_WASI_POLL_ONEOFF_RET, LABEL_WASI_PROC_EXIT, PathOpen,
-        PathOpened, RouteControl,
+        PathOpened, RouteControl, WasiImportLoopBreak, WasiImportLoopContinue,
     },
     site,
 };
@@ -453,7 +453,7 @@ struct TestLocalQueueRx {
     frame: Option<TestLocalFrame>,
 }
 
-impl hibana::substrate::Transport for TestLocalQueueCarrier {
+impl hibana::integration::Transport for TestLocalQueueCarrier {
     type Error = TransportError;
     type Tx<'a>
         = TestLocalQueueTx
@@ -612,7 +612,7 @@ impl<const ARM: u8> ControlResourceKind for CustomRouteKind<ARM> {
     fn mint_handle(
         session: SessionId,
         lane: Lane,
-        scope: hibana::substrate::cap::advanced::ScopeId,
+        scope: hibana::integration::cap::advanced::ScopeId,
     ) -> Self::Handle {
         [
             ARM,
@@ -694,9 +694,16 @@ impl appkit::Capsule for RichCapsule {
     type Report = usize;
 
     fn choreography() -> impl Projectable<Self::Universe> {
-        let direct = g::seq(
+        let fd_write = g::seq(
             g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 0>(),
             g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 0>(),
+        );
+        let direct = g::route(
+            g::seq(
+                g::send::<g::Role<0>, g::Role<0>, WasiImportLoopContinue, 0>().policy::<8>(),
+                fd_write,
+            ),
+            g::send::<g::Role<0>, g::Role<0>, WasiImportLoopBreak, 0>().policy::<8>(),
         );
         let left = g::seq(
             g::send::<
@@ -734,23 +741,30 @@ impl appkit::Placement<RichCapsule> for RichPlacement {
 }
 
 impl appkit::Localside<RichCapsule> for RichLocal {
+    type Error = core::convert::Infallible;
+
     fn engine<'endpoint, 'guest, const ROLE: u8>(
         ctx: appkit::EngineCtx<'endpoint, 'guest, RichCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn driver<'a, const ROLE: u8>(
         ctx: appkit::DriverCtx<'a, RichCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
+            let mut ctx = ctx;
             if ROLE == 1 {
-                let mut ctx = ctx;
-                let request = ctx
+                let branch = ctx
                     .endpoint()
-                    .recv::<g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>()
+                    .offer()
                     .await
-                    .expect("rich driver receives fd_write through endpoint");
+                    .expect("rich driver offers fd_write branch");
+                assert_eq!(branch.label(), LABEL_WASI_FD_WRITE);
+                let request = branch
+                    .decode::<g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>()
+                    .await
+                    .expect("rich driver decodes fd_write through endpoint");
                 let EngineReq::FdWrite(write) = request else {
                     panic!("rich driver expected fd_write request");
                 };
@@ -762,25 +776,25 @@ impl appkit::Localside<RichCapsule> for RichLocal {
                     .await
                     .expect("rich driver replies to fd_write");
             }
-            core::future::pending::<core::convert::Infallible>().await
+            ctx.pending().await
         }
     }
 
     fn boundary<'a, const ROLE: u8>(
         ctx: appkit::BoundaryCtx<'a, RichCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn link<'a, const ROLE: u8>(
         ctx: appkit::LinkCtx<'a, RichCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn supervisor<'a, const ROLE: u8>(
         ctx: appkit::SupervisorCtx<'a, RichCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 }
@@ -792,7 +806,13 @@ impl appkit::Capsule for IncompleteCapsule {
     type Report = usize;
 
     fn choreography() -> impl Projectable<Self::Universe> {
-        g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 0>()
+        g::route(
+            g::seq(
+                g::send::<g::Role<0>, g::Role<0>, WasiImportLoopContinue, 0>(),
+                g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 0>(),
+            ),
+            g::send::<g::Role<0>, g::Role<0>, WasiImportLoopBreak, 0>(),
+        )
     }
 }
 
@@ -807,33 +827,35 @@ impl appkit::Placement<IncompleteCapsule> for IncompletePlacement {
 }
 
 impl appkit::Localside<IncompleteCapsule> for IncompleteLocal {
+    type Error = core::convert::Infallible;
+
     fn engine<'endpoint, 'guest, const ROLE: u8>(
         ctx: appkit::EngineCtx<'endpoint, 'guest, IncompleteCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn driver<'a, const ROLE: u8>(
         ctx: appkit::DriverCtx<'a, IncompleteCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn boundary<'a, const ROLE: u8>(
         ctx: appkit::BoundaryCtx<'a, IncompleteCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn link<'a, const ROLE: u8>(
         ctx: appkit::LinkCtx<'a, IncompleteCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn supervisor<'a, const ROLE: u8>(
         ctx: appkit::SupervisorCtx<'a, IncompleteCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 }
@@ -860,33 +882,35 @@ impl appkit::Placement<CustomLabelCapsule> for CustomLabelPlacement {
 }
 
 impl appkit::Localside<CustomLabelCapsule> for CustomLabelLocal {
+    type Error = core::convert::Infallible;
+
     fn engine<'endpoint, 'guest, const ROLE: u8>(
         ctx: appkit::EngineCtx<'endpoint, 'guest, CustomLabelCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn driver<'a, const ROLE: u8>(
         ctx: appkit::DriverCtx<'a, CustomLabelCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn boundary<'a, const ROLE: u8>(
         ctx: appkit::BoundaryCtx<'a, CustomLabelCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn link<'a, const ROLE: u8>(
         ctx: appkit::LinkCtx<'a, CustomLabelCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn supervisor<'a, const ROLE: u8>(
         ctx: appkit::SupervisorCtx<'a, CustomLabelCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 }
@@ -917,36 +941,38 @@ impl appkit::Placement<CountingCapsule> for CountingPlacement {
 }
 
 impl appkit::Localside<CountingCapsule> for CountingLocal {
+    type Error = core::convert::Infallible;
+
     fn engine<'endpoint, 'guest, const ROLE: u8>(
         ctx: appkit::EngineCtx<'endpoint, 'guest, CountingCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         COUNTING_ENGINE_POLLS.fetch_add(1, Ordering::SeqCst);
         ctx.pending()
     }
 
     fn driver<'a, const ROLE: u8>(
         ctx: appkit::DriverCtx<'a, CountingCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         COUNTING_DRIVER_POLLS.fetch_add(1, Ordering::SeqCst);
         ctx.pending()
     }
 
     fn boundary<'a, const ROLE: u8>(
         ctx: appkit::BoundaryCtx<'a, CountingCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         COUNTING_BOUNDARY_POLLS.fetch_add(1, Ordering::SeqCst);
         ctx.pending()
     }
 
     fn link<'a, const ROLE: u8>(
         ctx: appkit::LinkCtx<'a, CountingCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn supervisor<'a, const ROLE: u8>(
         ctx: appkit::SupervisorCtx<'a, CountingCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 }
@@ -958,17 +984,22 @@ impl appkit::Capsule for ChoreoFsRuntimeCapsule {
     type Report = ();
 
     fn choreography() -> impl Projectable<Self::Universe> {
-        g::seq(
+        let path_open = g::seq(
             g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>, 0>(),
+            g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>, 0>(),
+        );
+        let fd_write = g::route(
             g::seq(
-                g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>, 0>(),
+                g::send::<g::Role<0>, g::Role<0>, WasiImportLoopContinue, 0>(),
                 g::seq(
                     g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 0>(),
                     g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 0>(
                     ),
                 ),
             ),
-        )
+            g::send::<g::Role<0>, g::Role<0>, WasiImportLoopBreak, 0>(),
+        );
+        g::seq(path_open, fd_write)
     }
 }
 
@@ -983,15 +1014,17 @@ impl appkit::Placement<ChoreoFsRuntimeCapsule> for ChoreoFsRuntimePlacement {
 }
 
 impl appkit::Localside<ChoreoFsRuntimeCapsule> for ChoreoFsRuntimeLocal {
+    type Error = core::convert::Infallible;
+
     fn engine<'endpoint, 'guest, const ROLE: u8>(
         ctx: appkit::EngineCtx<'endpoint, 'guest, ChoreoFsRuntimeCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn driver<'a, const ROLE: u8>(
         ctx: appkit::DriverCtx<'a, ChoreoFsRuntimeCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             assert_eq!(ROLE, 1);
             let mut ctx = ctx;
@@ -1028,11 +1061,16 @@ impl appkit::Localside<ChoreoFsRuntimeCapsule> for ChoreoFsRuntimeLocal {
                 .await
                 .expect("send path_open reply through endpoint");
 
-            let write_request = ctx
+            let write_branch = ctx
                 .endpoint()
-                .recv::<g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>()
+                .offer()
                 .await
-                .expect("driver receives fd_write through endpoint");
+                .expect("driver offers fd_write branch");
+            assert_eq!(write_branch.label(), LABEL_WASI_FD_WRITE);
+            let write_request = write_branch
+                .decode::<g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>()
+                .await
+                .expect("driver decodes fd_write through endpoint");
             let EngineReq::FdWrite(write) = write_request else {
                 panic!("expected fd_write request");
             };
@@ -1059,19 +1097,19 @@ impl appkit::Localside<ChoreoFsRuntimeCapsule> for ChoreoFsRuntimeLocal {
 
     fn boundary<'a, const ROLE: u8>(
         ctx: appkit::BoundaryCtx<'a, ChoreoFsRuntimeCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn link<'a, const ROLE: u8>(
         ctx: appkit::LinkCtx<'a, ChoreoFsRuntimeCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn supervisor<'a, const ROLE: u8>(
         ctx: appkit::SupervisorCtx<'a, ChoreoFsRuntimeCapsule, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 }
@@ -1344,10 +1382,10 @@ fn std_wasi_env_prefix_reaches_choreofs_path_open() {
     assert!(choreofs_traffic_attach_succeeds::<1>(&program, 262_144));
     let role0: RoleProgram<0> = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
     let role1: RoleProgram<1> = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
-    let mut tap_buf = [hibana::substrate::tap::TapEvent::zero(); 128];
+    let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); 128];
     let mut slab = [0u8; 262_144];
     let clock = CounterClock::new();
-    let kit = hibana::substrate::SessionKit::<
+    let kit = hibana::integration::SessionKit::<
         MemoryTransport,
         DefaultLabelUniverse,
         CounterClock,
@@ -1355,7 +1393,7 @@ fn std_wasi_env_prefix_reaches_choreofs_path_open() {
     >::new(&clock);
     let rv = kit
         .add_rendezvous_from_config(
-            Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new()),
+            Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new(), None),
             MemoryTransport::new(),
         )
         .expect("register rendezvous");
@@ -1453,10 +1491,10 @@ fn std_wasi_optional_env_prefix_allows_direct_choreofs_path_open() {
     let program = choreofs_std_wasi_prefix_program();
     let role0: RoleProgram<0> = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
     let role1: RoleProgram<1> = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
-    let mut tap_buf = [hibana::substrate::tap::TapEvent::zero(); 128];
+    let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); 128];
     let mut slab = [0u8; 262_144];
     let clock = CounterClock::new();
-    let kit = hibana::substrate::SessionKit::<
+    let kit = hibana::integration::SessionKit::<
         MemoryTransport,
         DefaultLabelUniverse,
         CounterClock,
@@ -1464,7 +1502,7 @@ fn std_wasi_optional_env_prefix_allows_direct_choreofs_path_open() {
     >::new(&clock);
     let rv = kit
         .add_rendezvous_from_config(
-            Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new()),
+            Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new(), None),
             MemoryTransport::new(),
         )
         .expect("register rendezvous");
@@ -1595,14 +1633,16 @@ fn choreofs_traffic_attach_succeeds<const ROLE: u8>(
     slab_bytes: usize,
 ) -> bool {
     let role = program.project::<ROLE>();
-    let mut tap_buf = [hibana::substrate::tap::TapEvent::zero(); 128];
+    let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); 128];
     let mut slab = vec![0u8; slab_bytes];
     let clock = CounterClock::new();
     let transport = MemoryTransport::new();
-    let kit =
-        hibana::substrate::SessionKit::<MemoryTransport, DefaultLabelUniverse, CounterClock, 1>::new(
-            &clock,
-        );
+    let kit = hibana::integration::SessionKit::<
+        MemoryTransport,
+        DefaultLabelUniverse,
+        CounterClock,
+        1,
+    >::new(&clock);
     let Ok(rendezvous) = kit.add_rendezvous_from_config(
         Config::new(
             &mut tap_buf,
@@ -1610,6 +1650,7 @@ fn choreofs_traffic_attach_succeeds<const ROLE: u8>(
             0..8,
             1,
             CounterClock::new(),
+            None,
         ),
         transport,
     ) else {
@@ -1662,10 +1703,10 @@ fn choreofs_traffic_role_slices_attach_with_bounded_storage() {
 fn exercise_fd_write_endpoint_round_trip(program: &impl Projectable<DefaultLabelUniverse>) {
     let role0: RoleProgram<0> = Projectable::<DefaultLabelUniverse>::project::<0>(program);
     let role1: RoleProgram<1> = Projectable::<DefaultLabelUniverse>::project::<1>(program);
-    let mut tap_buf = [hibana::substrate::tap::TapEvent::zero(); 128];
+    let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); 128];
     let mut slab = [0u8; 262_144];
     let clock = CounterClock::new();
-    let kit = hibana::substrate::SessionKit::<
+    let kit = hibana::integration::SessionKit::<
         MemoryTransport,
         DefaultLabelUniverse,
         CounterClock,
@@ -1673,7 +1714,7 @@ fn exercise_fd_write_endpoint_round_trip(program: &impl Projectable<DefaultLabel
     >::new(&clock);
     let rv = kit
         .add_rendezvous_from_config(
-            Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new()),
+            Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new(), None),
             MemoryTransport::new(),
         )
         .expect("register in-process rendezvous");
@@ -1684,6 +1725,13 @@ fn exercise_fd_write_endpoint_round_trip(program: &impl Projectable<DefaultLabel
     let mut driver = kit
         .enter::<1, _>(rv, sid, &role1, NoBinding)
         .expect("enter driver role");
+    block_on(
+        engine
+            .flow::<WasiImportLoopContinue>()
+            .expect("engine opens loop continue flow")
+            .send(()),
+    )
+    .expect("send loop continue through endpoint");
     let request = EngineReq::FdWrite(FdWrite::new(1, b"hello").expect("fd write request"));
     block_on(
         engine
@@ -1692,8 +1740,10 @@ fn exercise_fd_write_endpoint_round_trip(program: &impl Projectable<DefaultLabel
             .send(&request),
     )
     .expect("send fd_write request through endpoint");
-    let observed_request = block_on(driver.recv::<g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>())
-        .expect("driver receives fd_write request through endpoint");
+    let branch = block_on(driver.offer()).expect("driver offers fd_write branch");
+    assert_eq!(branch.label(), LABEL_WASI_FD_WRITE);
+    let observed_request = block_on(branch.decode::<g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>())
+        .expect("driver decodes fd_write request through endpoint");
     assert_eq!(observed_request, request);
 
     let reply = EngineRet::FdWriteDone(FdWriteDone::new(1, 5));
@@ -1919,11 +1969,17 @@ fn capsule_uses_projectable_raw_hibana_and_metadata() {
     assert!(caps.has_parallel);
     assert!(caps.has_policy);
     assert!(caps.has_control);
-    assert_eq!(caps.policy_count, 1);
-    assert_eq!(caps.policies[0], 7);
-    assert_eq!(caps.control_count, 1);
-    assert_eq!(caps.control_ops[0], ControlOp::RouteDecision.as_u8());
-    assert_eq!(caps.control_tap_ids[0], 0x707);
+    assert_eq!(caps.policy_count, 2);
+    assert!(caps.policies[..caps.policy_count as usize].contains(&7));
+    assert!(caps.policies[..caps.policy_count as usize].contains(&8));
+    assert!(caps.control_count >= 2);
+    assert!(
+        caps.control_ops[..caps.control_count as usize].contains(&ControlOp::RouteDecision.as_u8())
+    );
+    assert!(
+        caps.control_ops[..caps.control_count as usize].contains(&ControlOp::LoopContinue.as_u8())
+    );
+    assert!(caps.control_tap_ids[..caps.control_count as usize].contains(&0x707));
     assert!(caps.wasi_imports.contains(appkit::WasiImports::FD_WRITE));
     assert_eq!(caps.wasi_completion_pair_count, 1);
     assert!(appkit::validate_requested_roles::<
@@ -2090,11 +2146,19 @@ fn run_takes_artifact_as_dynamic_input() {
             .wasi_imports
             .contains(appkit::WasiImports::FD_WRITE)
     );
-    assert_eq!(manifest.policy_count, 1);
-    assert_eq!(manifest.policies[0], 7);
-    assert_eq!(manifest.control_count, 1);
-    assert_eq!(manifest.control_ops[0], ControlOp::RouteDecision.as_u8());
-    assert_eq!(manifest.control_tap_ids[0], 0x707);
+    assert_eq!(manifest.policy_count, 2);
+    assert!(manifest.policies[..manifest.policy_count as usize].contains(&7));
+    assert!(manifest.policies[..manifest.policy_count as usize].contains(&8));
+    assert!(manifest.control_count >= 2);
+    assert!(
+        manifest.control_ops[..manifest.control_count as usize]
+            .contains(&ControlOp::RouteDecision.as_u8())
+    );
+    assert!(
+        manifest.control_ops[..manifest.control_count as usize]
+            .contains(&ControlOp::LoopContinue.as_u8())
+    );
+    assert!(manifest.control_tap_ids[..manifest.control_count as usize].contains(&0x707));
     assert_eq!(manifest.wasi_completion_pair_count, 1);
     assert_eq!(report.wasi_completion_pair_count(), 1);
 }
@@ -2184,11 +2248,11 @@ fn logical_image_wasi_requirements_follow_requested_role_slice() {
 }
 
 #[test]
-fn hibana_substrate_surfaces_remain_available_to_capsules() {
+fn hibana_integration_surfaces_remain_available_to_capsules() {
     fn route_resolution(ctx: ResolverContext) -> Result<RouteResolution, ResolverError> {
         let retry_hint = ctx.input(0) as u8;
         if ctx
-            .attr(hibana::substrate::policy::signals::core::LANE)
+            .attr(hibana::integration::policy::signals::core::LANE)
             .is_some()
         {
             Ok(RouteResolution::Arm(0))
@@ -2291,18 +2355,25 @@ struct CaptureProgramFacts {
     seen_program: bool,
 }
 
-impl hibana::substrate::program::ProjectionMetadataVisitor for CaptureProgramFacts {
-    fn visit_program(&mut self, facts: hibana::substrate::program::ProjectionProgramFacts) {
+impl hibana::integration::program::ProjectionMetadataVisitor for CaptureProgramFacts {
+    fn visit_program(&mut self, facts: hibana::integration::program::ProjectionProgramFacts) {
         self.seen_program = true;
         assert!(facts.eff_count >= 4);
         assert!(facts.parallel_enter_count >= 1);
         assert!(facts.route_scope_count >= 1);
     }
 
-    fn visit_atom(&mut self, spec: hibana::substrate::program::ProjectionAtomSpec) {
+    fn visit_atom(&mut self, spec: hibana::integration::program::ProjectionAtomSpec) {
         if spec.is_control {
-            assert_eq!(spec.control_op, Some(ControlOp::RouteDecision.as_u8()));
-            assert_eq!(spec.control_tap_id, Some(0x707));
+            match spec.control_op {
+                Some(op) if op == ControlOp::RouteDecision.as_u8() => {
+                    assert_eq!(spec.control_tap_id, Some(0x707));
+                }
+                Some(op)
+                    if op == ControlOp::LoopContinue.as_u8()
+                        || op == ControlOp::LoopBreak.as_u8() => {}
+                other => panic!("unexpected control op in projection metadata: {other:?}"),
+            }
             assert!(spec.control_scope.is_some());
             assert!(spec.control_path.is_some());
             assert!(spec.control_shot.is_some());

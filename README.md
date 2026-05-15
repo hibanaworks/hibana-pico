@@ -1,6 +1,6 @@
 # hibana-pico
 
-`hibana-pico` is a Cargo-native projection, attach, and run substrate for raw
+`hibana-pico` is a Cargo-native projection, attach, and run integration layer for raw
 Hibana choreography.
 
 The shape is:
@@ -40,12 +40,12 @@ Users define a Capsule from raw `hibana::g` choreography:
 
 ```rust
 pub trait Capsule {
-    type Universe: hibana::substrate::runtime::LabelUniverse;
+    type Universe: hibana::integration::runtime::LabelUniverse;
     type Placement;
     type Local;
     type Report;
 
-    fn choreography() -> impl hibana::substrate::program::Projectable<Self::Universe>;
+    fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe>;
 }
 ```
 

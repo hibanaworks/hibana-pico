@@ -1,6 +1,6 @@
 use hibana::{
     g,
-    substrate::{program::Projectable, runtime::DefaultLabelUniverse},
+    integration::{program::Projectable, runtime::DefaultLabelUniverse},
 };
 use hibana_pico::appkit::ArtifactBundle;
 use hibana_pico::{appkit, site};
@@ -21,7 +21,7 @@ const EXAMPLE_CARRIER_FRAME_BYTES: usize = 256;
 #[derive(Clone, Copy, Debug)]
 struct ExampleLocalFrame {
     occupied: bool,
-    frame_label: hibana::substrate::transport::FrameLabel,
+    frame_label: hibana::integration::transport::FrameLabel,
     len: usize,
     bytes: [u8; EXAMPLE_CARRIER_FRAME_BYTES],
 }
@@ -29,13 +29,13 @@ struct ExampleLocalFrame {
 impl ExampleLocalFrame {
     const EMPTY: Self = Self {
         occupied: false,
-        frame_label: hibana::substrate::transport::FrameLabel::new(0),
+        frame_label: hibana::integration::transport::FrameLabel::new(0),
         len: 0,
         bytes: [0; EXAMPLE_CARRIER_FRAME_BYTES],
     };
 
-    fn payload(&self) -> hibana::substrate::wire::Payload<'_> {
-        hibana::substrate::wire::Payload::new(&self.bytes[..self.len])
+    fn payload(&self) -> hibana::integration::wire::Payload<'_> {
+        hibana::integration::wire::Payload::new(&self.bytes[..self.len])
     }
 }
 
@@ -55,12 +55,12 @@ impl ExampleLocalQueue {
 
     fn push_back(
         &mut self,
-        frame_label: hibana::substrate::transport::FrameLabel,
-        payload: hibana::substrate::wire::Payload<'_>,
-    ) -> Result<(), hibana::substrate::transport::TransportError> {
+        frame_label: hibana::integration::transport::FrameLabel,
+        payload: hibana::integration::wire::Payload<'_>,
+    ) -> Result<(), hibana::integration::transport::TransportError> {
         let bytes = payload.as_bytes();
         if bytes.len() > EXAMPLE_CARRIER_FRAME_BYTES || self.len == EXAMPLE_CARRIER_QUEUE_DEPTH {
-            return Err(hibana::substrate::transport::TransportError::Failed);
+            return Err(hibana::integration::transport::TransportError::Failed);
         }
         let idx = (self.head + self.len) % EXAMPLE_CARRIER_QUEUE_DEPTH;
         self.frames[idx].occupied = true;
@@ -133,8 +133,8 @@ struct ExampleLocalQueueRx {
     frame: Option<ExampleLocalFrame>,
 }
 
-impl hibana::substrate::Transport for ExampleLocalQueueCarrier {
-    type Error = hibana::substrate::transport::TransportError;
+impl hibana::integration::Transport for ExampleLocalQueueCarrier {
+    type Error = hibana::integration::transport::TransportError;
     type Tx<'a>
         = ExampleLocalQueueTx
     where
@@ -162,7 +162,7 @@ impl hibana::substrate::Transport for ExampleLocalQueueCarrier {
     fn poll_send<'a, 'f>(
         &'a self,
         tx: &'a mut Self::Tx<'a>,
-        outgoing: hibana::substrate::transport::Outgoing<'f>,
+        outgoing: hibana::integration::transport::Outgoing<'f>,
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<Result<(), Self::Error>>
     where
@@ -173,7 +173,7 @@ impl hibana::substrate::Transport for ExampleLocalQueueCarrier {
         let peer = outgoing.peer() as usize;
         if peer >= EXAMPLE_CARRIER_ROLES {
             return core::task::Poll::Ready(Err(
-                hibana::substrate::transport::TransportError::Failed,
+                hibana::integration::transport::TransportError::Failed,
             ));
         }
         let result = self.queues.borrow_mut().by_role[peer]
@@ -190,12 +190,12 @@ impl hibana::substrate::Transport for ExampleLocalQueueCarrier {
         &'a self,
         rx: &'a mut Self::Rx<'a>,
         cx: &mut core::task::Context<'_>,
-    ) -> core::task::Poll<Result<hibana::substrate::wire::Payload<'a>, Self::Error>> {
+    ) -> core::task::Poll<Result<hibana::integration::wire::Payload<'a>, Self::Error>> {
         assert_ne!(rx.session_id, 0);
         let local_role = rx.local_role as usize;
         if local_role >= EXAMPLE_CARRIER_ROLES {
             return core::task::Poll::Ready(Err(
-                hibana::substrate::transport::TransportError::Failed,
+                hibana::integration::transport::TransportError::Failed,
             ));
         }
         let Some(frame) = self.queues.borrow_mut().by_role[local_role].pop_front() else {
@@ -217,20 +217,22 @@ impl hibana::substrate::Transport for ExampleLocalQueueCarrier {
 
     fn drain_events(
         &self,
-        emit: &mut dyn FnMut(hibana::substrate::transport::advanced::TransportEvent),
+        emit: &mut dyn FnMut(hibana::integration::transport::advanced::TransportEvent),
     ) {
-        emit(hibana::substrate::transport::advanced::TransportEvent::new(
-            hibana::substrate::transport::advanced::TransportEventKind::Ack,
-            0,
-            0,
-            0,
-        ));
+        emit(
+            hibana::integration::transport::advanced::TransportEvent::new(
+                hibana::integration::transport::advanced::TransportEventKind::Ack,
+                0,
+                0,
+                0,
+            ),
+        );
     }
 
     fn recv_frame_hint<'a>(
         &'a self,
         rx: &'a Self::Rx<'a>,
-    ) -> Option<hibana::substrate::transport::FrameLabel> {
+    ) -> Option<hibana::integration::transport::FrameLabel> {
         rx.frame.map(|frame| frame.frame_label)
     }
 
@@ -267,33 +269,35 @@ impl appkit::Placement<Smoke> for SmokePlacement {
 }
 
 impl appkit::Localside<Smoke> for SmokeLocal {
+    type Error = core::convert::Infallible;
+
     fn engine<'endpoint, 'guest, const ROLE: u8>(
         ctx: appkit::EngineCtx<'endpoint, 'guest, Smoke, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn driver<'a, const ROLE: u8>(
         ctx: appkit::DriverCtx<'a, Smoke, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn boundary<'a, const ROLE: u8>(
         ctx: appkit::BoundaryCtx<'a, Smoke, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn link<'a, const ROLE: u8>(
         ctx: appkit::LinkCtx<'a, Smoke, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 
     fn supervisor<'a, const ROLE: u8>(
         ctx: appkit::SupervisorCtx<'a, Smoke, ROLE>,
-    ) -> impl core::future::Future<Output = core::convert::Infallible> {
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
 }

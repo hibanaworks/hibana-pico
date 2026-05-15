@@ -1,7 +1,7 @@
-//! Generic site substrate facts.
+//! Generic site facts.
 //!
 //! Core site vocabulary is intentionally small. Users and examples define their
-//! own execution substrate and carrier implementations with the same public
+//! own execution runtime and carrier implementations with the same public
 //! `LogicalImage` contract used by built-in examples.
 
 use core::marker::PhantomData;

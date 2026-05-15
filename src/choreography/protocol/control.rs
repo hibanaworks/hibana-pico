@@ -195,81 +195,6 @@ impl ControlResourceKind for EngineAbortAckKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ActivationAuthorityKind;
-
-impl ResourceKind for ActivationAuthorityKind {
-    type Handle = LifecycleControlWireHandle;
-    const TAG: u8 = 0x44;
-    const NAME: &'static str = "ActivationAuthority";
-
-    fn encode_handle(handle: &Self::Handle) -> [u8; CAP_HANDLE_LEN] {
-        encode_control_handle(*handle)
-    }
-
-    fn decode_handle(data: [u8; CAP_HANDLE_LEN]) -> Result<Self::Handle, CapError> {
-        decode_control_handle(data)
-    }
-
-    fn zeroize(handle: &mut Self::Handle) {
-        *handle = (0, 0);
-    }
-}
-
-impl ControlResourceKind for ActivationAuthorityKind {
-    const SCOPE: ControlScopeKind = ControlScopeKind::Delegate;
-    const TAP_ID: u16 = 0x0510;
-    const SHOT: CapShot = CapShot::Many;
-    const PATH: ControlPath = ControlPath::Local;
-    const OP: ControlOp = ControlOp::CapDelegate;
-    const AUTO_MINT_WIRE: bool = false;
-
-    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
-        core::hint::black_box(sid.raw());
-        core::hint::black_box(lane.raw());
-        (0, scope.raw())
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ActivationKind;
-
-impl ResourceKind for ActivationKind {
-    type Handle = LifecycleControlWireHandle;
-    const TAG: u8 = 0x45;
-    const NAME: &'static str = "Activation";
-
-    fn encode_handle(handle: &Self::Handle) -> [u8; CAP_HANDLE_LEN] {
-        encode_control_handle(*handle)
-    }
-
-    fn decode_handle(data: [u8; CAP_HANDLE_LEN]) -> Result<Self::Handle, CapError> {
-        decode_control_handle(data)
-    }
-
-    fn zeroize(handle: &mut Self::Handle) {
-        *handle = (0, 0);
-    }
-}
-
-impl ControlResourceKind for ActivationKind {
-    const SCOPE: ControlScopeKind = ControlScopeKind::Delegate;
-    const TAP_ID: u16 = 0x0511;
-    const SHOT: CapShot = CapShot::One;
-    const PATH: ControlPath = ControlPath::Local;
-    const OP: ControlOp = ControlOp::CapDelegate;
-    const AUTO_MINT_WIRE: bool = false;
-
-    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
-        core::hint::black_box(sid.raw());
-        core::hint::black_box(lane.raw());
-        (1, scope.raw())
-    }
-}
-
-pub type ReentryPermitKind = ActivationAuthorityKind;
-pub type ActivationPermitKind = ActivationKind;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TopologyBeginKind;
 
 impl ResourceKind for TopologyBeginKind {
@@ -458,11 +383,11 @@ impl ResourceKind for StateSnapshotKind {
     const NAME: &'static str = "StateSnapshot";
 
     fn encode_handle(handle: &Self::Handle) -> [u8; CAP_HANDLE_LEN] {
-        encode_control_handle(*handle)
+        encode_abort_control_handle(*handle)
     }
 
     fn decode_handle(data: [u8; CAP_HANDLE_LEN]) -> Result<Self::Handle, CapError> {
-        decode_control_handle(data)
+        decode_abort_control_handle(data)
     }
 
     fn zeroize(handle: &mut Self::Handle) {
@@ -479,9 +404,8 @@ impl ControlResourceKind for StateSnapshotKind {
     const AUTO_MINT_WIRE: bool = true;
 
     fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
-        core::hint::black_box(sid.raw());
-        core::hint::black_box(lane.raw());
-        (0, scope.raw())
+        core::hint::black_box(scope.raw());
+        (sid.raw(), lane.raw() as u16)
     }
 }
 
@@ -494,11 +418,11 @@ impl ResourceKind for StateRestoreKind {
     const NAME: &'static str = "StateRestore";
 
     fn encode_handle(handle: &Self::Handle) -> [u8; CAP_HANDLE_LEN] {
-        encode_control_handle(*handle)
+        encode_abort_control_handle(*handle)
     }
 
     fn decode_handle(data: [u8; CAP_HANDLE_LEN]) -> Result<Self::Handle, CapError> {
-        decode_control_handle(data)
+        decode_abort_control_handle(data)
     }
 
     fn zeroize(handle: &mut Self::Handle) {
@@ -515,9 +439,8 @@ impl ControlResourceKind for StateRestoreKind {
     const AUTO_MINT_WIRE: bool = true;
 
     fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
-        core::hint::black_box(sid.raw());
-        core::hint::black_box(lane.raw());
-        (1, scope.raw())
+        core::hint::black_box(scope.raw());
+        (sid.raw(), lane.raw() as u16)
     }
 }
 
@@ -534,20 +457,6 @@ pub type EngineAbortFenceControl = Msg<
 >;
 pub type EngineAbortAckControl =
     Msg<LABEL_ENGINE_ABORT_ACK_CONTROL, GenericCapToken<EngineAbortAckKind>, EngineAbortAckKind>;
-pub type ReentryPermitControl =
-    Msg<LABEL_REENTRY_PERMIT_CONTROL, GenericCapToken<ReentryPermitKind>, ReentryPermitKind>;
-pub type ActivationPermitControl = Msg<
-    LABEL_ACTIVATION_PERMIT_CONTROL,
-    GenericCapToken<ActivationPermitKind>,
-    ActivationPermitKind,
->;
-pub type ActivationAuthorityControl = Msg<
-    LABEL_ACTIVATION_AUTHORITY_CONTROL,
-    GenericCapToken<ActivationAuthorityKind>,
-    ActivationAuthorityKind,
->;
-pub type ActivationControl =
-    Msg<LABEL_ACTIVATION_CONTROL, GenericCapToken<ActivationKind>, ActivationKind>;
 pub type TopologyBeginControl =
     Msg<LABEL_TOPOLOGY_BEGIN_CONTROL, GenericCapToken<TopologyBeginKind>, TopologyBeginKind>;
 pub type TopologyAckControl =

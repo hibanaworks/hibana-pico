@@ -1,27 +1,27 @@
 //! Private Wasm/WASI P1 engine facade.
 //!
 //! The engine boundary has one handle: [`Guest`]. The parser, interpreter,
-//! import lowering, memory writeback, and pending slot live in `substrate`.
+//! import lowering, memory writeback, and pending slot live in `machine`.
 
-mod substrate;
+mod machine;
 
 use crate::{
     choreography::protocol::{BudgetExpired, BudgetRun, ProcExitStatus},
     kernel::features::Wasip1HandlerSet,
 };
 
-pub(crate) use substrate::{FdStat, PathBytes};
+pub(crate) use machine::{FdStat, PathBytes};
 
-pub(crate) type Error = substrate::WasmError;
+pub(crate) type Error = machine::WasmError;
 
 pub(crate) struct Guest<'a> {
-    engine: substrate::Vm<'a>,
+    engine: machine::Vm<'a>,
 }
 
 impl<'a> Guest<'a> {
     pub(crate) unsafe fn init_in_place(dst: *mut Self, module: &'a [u8]) -> Result<(), Error> {
         unsafe {
-            substrate::Vm::init_in_place(
+            machine::Vm::init_in_place(
                 core::ptr::addr_of_mut!((*dst).engine),
                 module,
                 Wasip1HandlerSet::active(),
@@ -35,59 +35,60 @@ impl<'a> Guest<'a> {
         budget: BudgetRun,
     ) -> Result<Event<'guest, 'a>, Error> {
         match self.engine.resume(budget) {
-            Ok(substrate::VmEvent::FdWrite(call)) => Ok(Event::Call(Call::FdWrite(Pending::new(
+            Ok(machine::VmEvent::FdWrite(call)) => Ok(Event::Call(Call::FdWrite(Pending::new(
                 self,
                 FdWrite { call },
             )))),
-            Ok(substrate::VmEvent::FdRead(call)) => Ok(Event::Call(Call::FdRead(Pending::new(
+            Ok(machine::VmEvent::FdRead(call)) => Ok(Event::Call(Call::FdRead(Pending::new(
                 self,
                 FdRead { call },
             )))),
-            Ok(substrate::VmEvent::FdFdstatGet(call)) => Ok(Event::Call(Call::FdFdstatGet(
+            Ok(machine::VmEvent::FdFdstatGet(call)) => Ok(Event::Call(Call::FdFdstatGet(
                 Pending::new(self, FdFdstatGet { call }),
             ))),
-            Ok(substrate::VmEvent::FdClose(call)) => Ok(Event::Call(Call::FdClose(Pending::new(
+            Ok(machine::VmEvent::FdClose(call)) => Ok(Event::Call(Call::FdClose(Pending::new(
                 self,
                 FdClose { call },
             )))),
-            Ok(substrate::VmEvent::ClockResGet(call)) => Ok(Event::Call(Call::ClockResGet(
+            Ok(machine::VmEvent::ClockResGet(call)) => Ok(Event::Call(Call::ClockResGet(
                 Pending::new(self, ClockResGet { call }),
             ))),
-            Ok(substrate::VmEvent::ClockTimeGet(call)) => Ok(Event::Call(Call::ClockTimeGet(
+            Ok(machine::VmEvent::ClockTimeGet(call)) => Ok(Event::Call(Call::ClockTimeGet(
                 Pending::new(self, ClockTimeGet { call }),
             ))),
-            Ok(substrate::VmEvent::PollOneoff(call)) => Ok(Event::Call(Call::PollOneoff(
+            Ok(machine::VmEvent::PollOneoff(call)) => Ok(Event::Call(Call::PollOneoff(
                 Pending::new(self, PollOneoff { call }),
             ))),
-            Ok(substrate::VmEvent::RandomGet(call)) => Ok(Event::Call(Call::RandomGet(
+            Ok(machine::VmEvent::RandomGet(call)) => Ok(Event::Call(Call::RandomGet(
                 Pending::new(self, RandomGet { call }),
             ))),
-            Ok(substrate::VmEvent::FdReaddir(call)) => Ok(Event::Call(Call::FdReaddir(
+            Ok(machine::VmEvent::FdReaddir(call)) => Ok(Event::Call(Call::FdReaddir(
                 Pending::new(self, FdReaddir { call }),
             ))),
-            Ok(substrate::VmEvent::PathOpen(call)) => Ok(Event::Call(Call::PathOpen(
-                Pending::new(self, PathOpen { call }),
-            ))),
-            Ok(substrate::VmEvent::ArgsSizesGet(call)) => Ok(Event::Call(Call::ArgsSizesGet(
+            Ok(machine::VmEvent::PathOpen(call)) => Ok(Event::Call(Call::PathOpen(Pending::new(
+                self,
+                PathOpen { call },
+            )))),
+            Ok(machine::VmEvent::ArgsSizesGet(call)) => Ok(Event::Call(Call::ArgsSizesGet(
                 Pending::new(self, ArgsSizesGet { call }),
             ))),
-            Ok(substrate::VmEvent::ArgsGet(call)) => Ok(Event::Call(Call::ArgsGet(Pending::new(
+            Ok(machine::VmEvent::ArgsGet(call)) => Ok(Event::Call(Call::ArgsGet(Pending::new(
                 self,
                 ArgsGet { call },
             )))),
-            Ok(substrate::VmEvent::EnvironSizesGet(call)) => Ok(Event::Call(
-                Call::EnvironSizesGet(Pending::new(self, EnvironSizesGet { call })),
-            )),
-            Ok(substrate::VmEvent::EnvironGet(call)) => Ok(Event::Call(Call::EnvironGet(
+            Ok(machine::VmEvent::EnvironSizesGet(call)) => Ok(Event::Call(Call::EnvironSizesGet(
+                Pending::new(self, EnvironSizesGet { call }),
+            ))),
+            Ok(machine::VmEvent::EnvironGet(call)) => Ok(Event::Call(Call::EnvironGet(
                 Pending::new(self, EnvironGet { call }),
             ))),
-            Ok(substrate::VmEvent::MemoryGrow(event)) => Ok(Event::MemoryFence(Pending::new(
+            Ok(machine::VmEvent::MemoryGrow(event)) => Ok(Event::MemoryFence(Pending::new(
                 self,
                 MemoryFence { event },
             ))),
-            Ok(substrate::VmEvent::BudgetExpired(expired)) => Ok(Event::BudgetExpired(expired)),
-            Ok(substrate::VmEvent::ProcExit(status)) => Ok(Event::Exit(ProcExit::new(status))),
-            Ok(substrate::VmEvent::Done) => Ok(Event::Done),
+            Ok(machine::VmEvent::BudgetExpired(expired)) => Ok(Event::BudgetExpired(expired)),
+            Ok(machine::VmEvent::ProcExit(status)) => Ok(Event::Exit(ProcExit::new(status))),
+            Ok(machine::VmEvent::Done) => Ok(Event::Done),
             Err(error) => Err(error),
         }
     }
@@ -128,11 +129,11 @@ impl<'guest, 'a, K> Pending<'guest, 'a, K> {
         Self { guest, call }
     }
 
-    fn engine(&self) -> &substrate::Vm<'a> {
+    fn engine(&self) -> &machine::Vm<'a> {
         &self.guest.engine
     }
 
-    fn complete_with<R>(self, f: impl FnOnce(&mut substrate::Vm<'a>, K) -> R) -> R {
+    fn complete_with<R>(self, f: impl FnOnce(&mut machine::Vm<'a>, K) -> R) -> R {
         let Self { guest, call } = self;
         f(&mut guest.engine, call)
     }
@@ -158,7 +159,7 @@ impl ProcExit {
 }
 
 pub(crate) struct Payload {
-    raw: substrate::InlinePayload,
+    raw: machine::InlinePayload,
 }
 
 impl Payload {
@@ -168,7 +169,7 @@ impl Payload {
 }
 
 pub(crate) struct FdWrite {
-    call: substrate::FdWriteCall,
+    call: machine::FdWriteCall,
 }
 
 impl Pending<'_, '_, FdWrite> {
@@ -188,7 +189,7 @@ impl Pending<'_, '_, FdWrite> {
 }
 
 pub(crate) struct FdRead {
-    call: substrate::FdReadCall,
+    call: machine::FdReadCall,
 }
 
 impl Pending<'_, '_, FdRead> {
@@ -207,7 +208,7 @@ impl Pending<'_, '_, FdRead> {
 }
 
 pub(crate) struct FdFdstatGet {
-    call: substrate::FdRequestCall,
+    call: machine::FdRequestCall,
 }
 
 impl Pending<'_, '_, FdFdstatGet> {
@@ -221,7 +222,7 @@ impl Pending<'_, '_, FdFdstatGet> {
 }
 
 pub(crate) struct FdClose {
-    call: substrate::FdRequestCall,
+    call: machine::FdRequestCall,
 }
 
 impl Pending<'_, '_, FdClose> {
@@ -235,7 +236,7 @@ impl Pending<'_, '_, FdClose> {
 }
 
 pub(crate) struct ClockResGet {
-    call: substrate::ClockResGetCall,
+    call: machine::ClockResGetCall,
 }
 
 impl Pending<'_, '_, ClockResGet> {
@@ -249,7 +250,7 @@ impl Pending<'_, '_, ClockResGet> {
 }
 
 pub(crate) struct ClockTimeGet {
-    call: substrate::ClockTimeGetCall,
+    call: machine::ClockTimeGetCall,
 }
 
 impl Pending<'_, '_, ClockTimeGet> {
@@ -267,7 +268,7 @@ impl Pending<'_, '_, ClockTimeGet> {
 }
 
 pub(crate) struct PollOneoff {
-    call: substrate::PollOneoffCall,
+    call: machine::PollOneoffCall,
 }
 
 impl Pending<'_, '_, PollOneoff> {
@@ -281,7 +282,7 @@ impl Pending<'_, '_, PollOneoff> {
 }
 
 pub(crate) struct RandomGet {
-    call: substrate::RandomGetCall,
+    call: machine::RandomGetCall,
 }
 
 impl Pending<'_, '_, RandomGet> {
@@ -295,7 +296,7 @@ impl Pending<'_, '_, RandomGet> {
 }
 
 pub(crate) struct FdReaddir {
-    call: substrate::PathCall,
+    call: machine::PathCall,
 }
 
 impl Pending<'_, '_, FdReaddir> {
@@ -317,7 +318,7 @@ impl Pending<'_, '_, FdReaddir> {
 }
 
 pub(crate) struct PathOpen {
-    call: substrate::PathCall,
+    call: machine::PathCall,
 }
 
 impl Pending<'_, '_, PathOpen> {
@@ -339,7 +340,7 @@ impl Pending<'_, '_, PathOpen> {
 }
 
 pub(crate) struct ArgsSizesGet {
-    call: substrate::ArgsSizesGetCall,
+    call: machine::ArgsSizesGetCall,
 }
 
 impl Pending<'_, '_, ArgsSizesGet> {
@@ -351,7 +352,7 @@ impl Pending<'_, '_, ArgsSizesGet> {
 }
 
 pub(crate) struct ArgsGet {
-    call: substrate::ArgsGetCall,
+    call: machine::ArgsGetCall,
 }
 
 impl Pending<'_, '_, ArgsGet> {
@@ -365,7 +366,7 @@ impl Pending<'_, '_, ArgsGet> {
 }
 
 pub(crate) struct EnvironSizesGet {
-    call: substrate::EnvironSizesGetCall,
+    call: machine::EnvironSizesGetCall,
 }
 
 impl Pending<'_, '_, EnvironSizesGet> {
@@ -377,7 +378,7 @@ impl Pending<'_, '_, EnvironSizesGet> {
 }
 
 pub(crate) struct EnvironGet {
-    call: substrate::EnvironGetCall,
+    call: machine::EnvironGetCall,
 }
 
 impl Pending<'_, '_, EnvironGet> {
@@ -391,7 +392,7 @@ impl Pending<'_, '_, EnvironGet> {
 }
 
 pub(crate) struct MemoryFence {
-    event: substrate::MemoryGrowEvent,
+    event: machine::MemoryGrowEvent,
 }
 
 impl Pending<'_, '_, MemoryFence> {
