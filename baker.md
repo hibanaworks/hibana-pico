@@ -11,13 +11,21 @@ artifact contains two logical images:
 
 ```text
 examples/baker-firmware
-  src/lib.rs: Baker SIO carrier, markers, reset support, logical image helpers
+  src/lib.rs: Baker boot2, clock init, SIO carrier, markers, reset support, logical image helpers
   src/bin/traffic.rs: Capsule + choreography + Localside
   src/bin/choreofs_traffic.rs: Capsule + choreography + Localside + ObjectSpec
   src/bin/choreofs_traffic_loop.rs: Capsule + choreography + Localside + ObjectSpec
   src/bin/fail_safe.rs: Capsule + choreography + Localside
   src/bin/recovery.rs: Capsule + choreography + Localside
   src/bin/many_reentry.rs: Capsule + choreography + Localside
+  src/bin/panic_marker.rs: firmware panic marker proof
+  src/bin/endpoint_fault.rs: endpoint error evidence proof
+  src/bin/endpoint_poison.rs: poisoned generation proof
+  src/bin/preview_probe.rs: route-observation preview proof
+  src/bin/deadline_fault.rs: operational deadline fault proof
+  src/bin/timer_route.rs: protocol timer route proof
+  wasip1/guest/src/lib.rs: Baker WASI P1 guest helpers
+  wasip1/guest/src/bin/*.rs: Baker WASI P1 guest programs
   Core0 logical image: DriverImage
   Core1 logical image: EngineImage
 ```
@@ -42,8 +50,10 @@ The current source map is:
 | Generic site marker | `src/site.rs` |
 | Baker-local RP2040 SIO carrier | `examples/baker-firmware/src/lib.rs` |
 | Baker logical-image/reset support | `examples/baker-firmware/src/lib.rs` |
+| Baker-local boot2 and clock setup | `examples/baker-firmware/src/lib.rs` |
 | Baker validation Capsules, choreography, Localside, ObjectSpec | `examples/baker-firmware/src/bin/*.rs` |
-| WASI P1 ChoreoFS traffic guest | `examples/baker-firmware/wasip1/traffic/src/bin/wasip1-led-choreofs-traffic-cycle.rs` |
+| Baker WASI P1 guest helpers | `examples/baker-firmware/wasip1/guest/src/lib.rs` |
+| WASI P1 ChoreoFS traffic guest | `examples/baker-firmware/wasip1/guest/src/bin/wasip1-led-choreofs-traffic-cycle.rs` |
 | WASI P1 guest build gate | `scripts/check_wasip1_guest_builds.sh` |
 | Hardware proof runner | `scripts/run_baker_link_hardware_pattern.sh` |
 
@@ -51,6 +61,15 @@ The current source map is:
 
 The hardware runner flashes the firmware and reads RAM markers by symbol. A
 successful flash alone is not a proof; the RAM markers are the evidence.
+
+Baker does not depend on an external boot/runtime crate. Its second-stage
+W25Q080 boot block and RP2040 clock setup live in
+`examples/baker-firmware/src/lib.rs`. Reset establishes the Pico SDK-equivalent
+clock shape used by these proofs: XOSC stable at 12MHz, `clk_ref` sourced from
+XOSC, PLL_SYS configured as 1500MHz VCO with post dividers 6 and 2, `clk_sys`
+sourced from PLL_SYS at 125MHz, `clk_peri` sourced from `clk_sys`, and watchdog
+tick generation set to 1MHz from the 12MHz XOSC. The hardware runner reads the
+MMIO registers for those facts after flashing.
 
 The currently supported patterns are:
 
@@ -61,6 +80,12 @@ bash scripts/run_baker_link_hardware_pattern.sh choreofs-traffic-loop
 bash scripts/run_baker_link_hardware_pattern.sh fail-safe
 bash scripts/run_baker_link_hardware_pattern.sh recovery
 bash scripts/run_baker_link_hardware_pattern.sh many-reentry
+bash scripts/run_baker_link_hardware_pattern.sh panic-marker
+bash scripts/run_baker_link_hardware_pattern.sh endpoint-fault
+bash scripts/run_baker_link_hardware_pattern.sh endpoint-poison
+bash scripts/run_baker_link_hardware_pattern.sh preview-probe
+bash scripts/run_baker_link_hardware_pattern.sh deadline-fault
+bash scripts/run_baker_link_hardware_pattern.sh timer-route
 ```
 
 `traffic`, `fail-safe`, `recovery`, and `many-reentry` are two-role endpoint /
@@ -100,6 +125,18 @@ WASI P1 guest
 
 There is no host filesystem fallback, route inference, timeout rescue,
 lane-recovery loop, or co-located syscall completion.
+
+`panic-marker`, `endpoint-fault`, `endpoint-poison`, and `deadline-fault` are
+negative evidence proofs. They intentionally terminate through the firmware
+panic/fault marker path and verify that the recorded evidence carries the
+operation, location, or deadline cause instead of silently continuing the same
+session generation.
+
+`preview-probe` proves that route-observation hints can cross SIO as preview
+evidence without becoming route authority. `timer-route` is the protocol-time
+counterpart to `deadline-fault`: a timer/clock fact is present in the
+choreography and resolver-selected route arm, so the expired branch is typed
+progress rather than an operational timeout fallback.
 
 ## ChoreoFS Scope
 
@@ -161,6 +198,8 @@ Important result values:
 | `0x48494653` | fail-safe proof success |
 | `0x48495243` | recovery proof success |
 | `0x4849524d` | many-reentry proof success |
+| `0x48495050` | preview-probe proof success |
+| `0x48495452` | timer-route proof success |
 | `0x48494641` | hard failure |
 
 Important stage values:
@@ -234,6 +273,35 @@ many-reentry:
   core0_stage=0x4849000a
   core1_stage=0x4849000a
   hardfault pc/lr=0
+
+panic-marker:
+  result=0x48494641
+  panic marker contains file/line/column/message evidence
+
+endpoint-fault:
+  result=0x48494641
+  panic marker contains EndpointError evidence
+
+endpoint-poison:
+  result=0x48494641
+  panic marker contains EndpointError evidence
+  endpoint error marker prefix=0x57451
+
+preview-probe:
+  result=0x48495050
+  core0_stage=0x4849000a
+  core1_stage=0x4849000a
+  hardfault pc/lr=0
+
+deadline-fault:
+  result=0x48494641
+  panic marker contains DeadlineExceeded evidence
+
+timer-route:
+  result=0x48495452
+  core0_stage=0x4849000a
+  core1_stage=0x4849000a
+  hardfault pc/lr=0
 ```
 
 ## Build And Run
@@ -301,4 +369,10 @@ bash scripts/run_baker_link_hardware_pattern.sh traffic
 bash scripts/run_baker_link_hardware_pattern.sh fail-safe
 bash scripts/run_baker_link_hardware_pattern.sh recovery
 bash scripts/run_baker_link_hardware_pattern.sh many-reentry
+bash scripts/run_baker_link_hardware_pattern.sh panic-marker
+bash scripts/run_baker_link_hardware_pattern.sh endpoint-fault
+bash scripts/run_baker_link_hardware_pattern.sh endpoint-poison
+bash scripts/run_baker_link_hardware_pattern.sh preview-probe
+bash scripts/run_baker_link_hardware_pattern.sh deadline-fault
+bash scripts/run_baker_link_hardware_pattern.sh timer-route
 ```

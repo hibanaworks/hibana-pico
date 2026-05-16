@@ -8,6 +8,7 @@ bash ./scripts/check_wasip1_guest_builds.sh
 cargo check --workspace --all-targets
 cargo check --workspace --all-targets --all-features
 cargo check -p heterogeneous-split-example --all-targets
+cargo check -p heterogeneous-split-example --target thumbv6m-none-eabi --bin rp2040-io
 cargo check -p heterogeneous-split-example --target thumbv8m.main-none-eabihf --bin m33-realtime
 cargo test --test host_architecture_boundaries
 cargo test --test host_capsule_api --features wasm-engine-core,wasip1-sys-fd-write,wasip1-sys-path-open,wasip1-sys-poll-oneoff,wasip1-sys-proc-exit
@@ -25,33 +26,38 @@ if rg -n -S 'mod (machine|port|projects);' src/lib.rs || test -e src/machine || 
   exit 1
 fi
 
-if rg -n -S --glob '!scripts/check_plan_pico_gates.sh' 'appkit::(Choreo\b|Program\b|support\b)|pub mod proof|proof::|NetworkRoute|RemoteRoute|PicoFdRoute|with_policy|cap_grant_remote|apply_cap_grant_with_policy|AttachedImage|RunCtx|I::launch|fn run\(attached|project_role|AttachOnlyTransport|materialized_role_count|macro_rules!|g::steps|Program<steps::|wasm-engine-tiny|TinyWasm|CoreWasm|CoreWasip1' src examples Cargo.toml README.md scripts; then
+if rg -n -S --glob '!scripts/check_plan_pico_gates.sh' 'appkit::(Choreo\b|Program\b|support\b)|pub mod proof|proof::|NetworkRoute|RemoteRoute|PicoFdRoute|with_policy|cap_grant_remote|apply_cap_grant_with_policy|AttachedImage|RunCtx|I::launch|fn run\(attached|project_role|AttachOnlyTransport|materialized_role_count|macro_rules!|g::steps|Program<steps::|wasm-engine-tiny|TinyWasm|CoreWasm|CoreWasip1' src examples guest Cargo.toml README.md scripts; then
   echo "plan gate failed: forbidden legacy public/runtime surface" >&2
   exit 1
 fi
 
-if rg -n -S 'appkit build|proc_macro choreography|choreo!|placement!|xtask required|external projection generator' src examples Cargo.toml apps; then
+if rg -n -S 'appkit build|proc_macro choreography|choreo!|placement!|xtask required|external projection generator' src examples guest Cargo.toml; then
   echo "plan gate failed: forbidden build or DSL surface" >&2
   exit 1
 fi
 
-if rg -n -S 'wasi:(cli|clocks|filesystem|http|io|random|sockets)|wasi_snapshot_preview2|wasm32-wasip2|wasip2|wit-bindgen|wit_component|component-model' Cargo.toml README.md src examples apps --glob '!src/appkit.rs'; then
+if rg -n -S 'wasi:(cli|clocks|filesystem|http|io|random|sockets)|wasi_snapshot_preview2|wasm32-wasip2|wasip2|wit-bindgen|wit_component|component-model' Cargo.toml README.md src examples guest --glob '!src/appkit.rs'; then
   echo "plan gate failed: forbidden WASI P2 / WIT / Component Model surface" >&2
   exit 1
 fi
 
-if rg -n -S '#\[allow|#!\[allow|allow\((dead_code|unused|warnings)' src tests examples apps; then
+if rg -n -S '#\[allow|#!\[allow|allow\((dead_code|unused|warnings)' src tests examples guest; then
   echo "plan gate failed: dead-code/unused allowances are not permitted" >&2
   exit 1
 fi
 
-if rg -n -S 'as _\b|let _[A-Za-z0-9_]*\b|for _[A-Za-z0-9_]*\b|[(,]\s*_[A-Za-z0-9_]+\s*:' src tests examples apps; then
+if rg -n -S 'as _\b|let _[A-Za-z0-9_]*\b|for _[A-Za-z0-9_]*\b|(^|[(,])\s*_[A-Za-z0-9_]+\s*:' src tests examples guest; then
   echo "plan gate failed: capsule/appkit code must not hide unused values behind underscore bindings" >&2
   exit 1
 fi
 
-if rg -n -S 'platform-(host-native|linux|cortex-m)' Cargo.toml examples scripts src --glob '!scripts/check_plan_pico_gates.sh'; then
+if rg -n -S 'platform-(host-native|linux|cortex-m)' Cargo.toml examples guest scripts src --glob '!scripts/check_plan_pico_gates.sh'; then
   echo "plan gate failed: std/no_std and site family behavior must follow Rust target and site types, not platform feature flags" >&2
+  exit 1
+fi
+
+if git ls-files --others --exclude-standard | rg -n '/target/'; then
+  echo "plan gate failed: generated target/ artifacts must stay ignored" >&2
   exit 1
 fi
 
@@ -77,6 +83,11 @@ fi
 
 if rg -n -S 'RefCell|CarrierAttachState|AttachedCarrierFrame|push_attached_frame|pop_attached_frame|requeue_attached_frame' src/appkit.rs; then
   echo "plan gate failed: appkit core must not carry local queue/refcell carrier implementation details" >&2
+  exit 1
+fi
+
+if rg -n -S 'rp2040-boot2|rp2040_boot2' examples/baker-firmware/Cargo.toml examples/baker-firmware/src; then
+  echo "plan gate failed: Baker boot code must live in the Baker example, not an external boot crate" >&2
   exit 1
 fi
 

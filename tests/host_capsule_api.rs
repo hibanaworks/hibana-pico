@@ -12,7 +12,7 @@ use hibana::{
         },
         ids::{Lane, SessionId},
         policy::{LoopResolution, ResolverContext, ResolverError, ResolverRef, RouteResolution},
-        program::{Projectable, RoleProgram},
+        program::{Projectable, ProjectionMetadataVisitor, RoleProgram},
         runtime::{Config, CounterClock, DefaultLabelUniverse},
         transport::{
             FrameLabel, Outgoing, TransportError,
@@ -43,10 +43,6 @@ use std::{
 const WASM_FD_WRITE: &[u8] = b"\0asm\x01\0\0\0\
     \x01\x04\x01\x60\x00\x00\
     \x02\x23\x01\x16wasi_snapshot_preview1\x08fd_write\x00\x00";
-#[cfg(feature = "wasm-engine-core")]
-const WASM_FD_READ: &[u8] = b"\0asm\x01\0\0\0\
-    \x01\x04\x01\x60\x00\x00\
-    \x02\x22\x01\x16wasi_snapshot_preview1\x07fd_read\x00\x00";
 const TEST_LOCAL_QUEUE_CARRIER: appkit::CarrierKind = appkit::CarrierKind::new(1001);
 const TEST_TCP: appkit::CarrierKind = appkit::CarrierKind::new(1002);
 const TEST_UART: appkit::CarrierKind = appkit::CarrierKind::new(1004);
@@ -229,6 +225,134 @@ fn fd_write_guest_module() -> Vec<u8> {
 }
 
 #[cfg(feature = "wasm-engine-core")]
+fn fd_write_with_unused_std_wasi_imports_module() -> Vec<u8> {
+    let mut module = Vec::new();
+    module.extend_from_slice(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+
+    let mut types = Vec::new();
+    push_leb_u32(&mut types, 5);
+    types.push(0x60);
+    push_leb_u32(&mut types, 4);
+    types.extend_from_slice(&[VALTYPE_I32, VALTYPE_I32, VALTYPE_I32, VALTYPE_I32]);
+    push_leb_u32(&mut types, 1);
+    types.push(VALTYPE_I32);
+    types.push(0x60);
+    push_leb_u32(&mut types, 2);
+    types.extend_from_slice(&[VALTYPE_I32, VALTYPE_I32]);
+    push_leb_u32(&mut types, 1);
+    types.push(VALTYPE_I32);
+    types.push(0x60);
+    push_leb_u32(&mut types, 1);
+    types.push(VALTYPE_I32);
+    push_leb_u32(&mut types, 0);
+    types.push(0x60);
+    push_leb_u32(&mut types, 0);
+    push_leb_u32(&mut types, 0);
+    types.push(0x60);
+    push_leb_u32(&mut types, 0);
+    push_leb_u32(&mut types, 0);
+    push_section(&mut module, SECTION_TYPE, &types);
+
+    let mut imports = Vec::new();
+    push_leb_u32(&mut imports, 4);
+    push_name(&mut imports, b"wasi_snapshot_preview1");
+    push_name(&mut imports, b"fd_write");
+    imports.push(EXTERNAL_KIND_FUNC);
+    push_leb_u32(&mut imports, 0);
+    push_name(&mut imports, b"wasi_snapshot_preview1");
+    push_name(&mut imports, b"environ_sizes_get");
+    imports.push(EXTERNAL_KIND_FUNC);
+    push_leb_u32(&mut imports, 1);
+    push_name(&mut imports, b"wasi_snapshot_preview1");
+    push_name(&mut imports, b"environ_get");
+    imports.push(EXTERNAL_KIND_FUNC);
+    push_leb_u32(&mut imports, 1);
+    push_name(&mut imports, b"wasi_snapshot_preview1");
+    push_name(&mut imports, b"proc_exit");
+    imports.push(EXTERNAL_KIND_FUNC);
+    push_leb_u32(&mut imports, 2);
+    push_section(&mut module, SECTION_IMPORT, &imports);
+
+    let mut functions = Vec::new();
+    push_leb_u32(&mut functions, 1);
+    push_leb_u32(&mut functions, 4);
+    push_section(&mut module, SECTION_FUNCTION, &functions);
+
+    push_section(&mut module, SECTION_MEMORY, &[0x01, 0x00, 0x01]);
+
+    let mut exports = Vec::new();
+    push_leb_u32(&mut exports, 1);
+    push_name(&mut exports, b"_start");
+    exports.push(EXTERNAL_KIND_FUNC);
+    push_leb_u32(&mut exports, 4);
+    push_section(&mut module, SECTION_EXPORT, &exports);
+
+    let mut body = Vec::new();
+    push_leb_u32(&mut body, 0);
+    push_i32_const(&mut body, 1);
+    push_i32_const(&mut body, 0);
+    push_i32_const(&mut body, 1);
+    push_i32_const(&mut body, 8);
+    body.push(OPCODE_CALL);
+    push_leb_u32(&mut body, 0);
+    body.push(OPCODE_DROP);
+    body.push(OPCODE_END);
+    let mut code = Vec::new();
+    push_leb_u32(&mut code, 1);
+    push_leb_u32(&mut code, body.len() as u32);
+    code.extend_from_slice(&body);
+    push_section(&mut module, SECTION_CODE, &code);
+
+    let mut segment = [0u8; 21];
+    segment[0..4].copy_from_slice(&16u32.to_le_bytes());
+    segment[4..8].copy_from_slice(&5u32.to_le_bytes());
+    segment[16..21].copy_from_slice(b"hello");
+    let mut data = Vec::new();
+    push_leb_u32(&mut data, 1);
+    push_leb_u32(&mut data, 0);
+    data.push(OPCODE_I32_CONST);
+    data.push(0);
+    data.push(OPCODE_END);
+    push_leb_u32(&mut data, segment.len() as u32);
+    data.extend_from_slice(&segment);
+    push_section(&mut module, SECTION_DATA, &data);
+
+    module
+}
+
+#[cfg(feature = "wasm-engine-core")]
+fn fd_write_with_non_wasi_import_module() -> Vec<u8> {
+    let mut module = Vec::new();
+    module.extend_from_slice(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+
+    let mut types = Vec::new();
+    push_leb_u32(&mut types, 2);
+    types.push(0x60);
+    push_leb_u32(&mut types, 4);
+    types.extend_from_slice(&[VALTYPE_I32, VALTYPE_I32, VALTYPE_I32, VALTYPE_I32]);
+    push_leb_u32(&mut types, 1);
+    types.push(VALTYPE_I32);
+    types.push(0x60);
+    push_leb_u32(&mut types, 0);
+    push_leb_u32(&mut types, 0);
+    push_section(&mut module, SECTION_TYPE, &types);
+
+    let mut imports = Vec::new();
+    push_leb_u32(&mut imports, 2);
+    push_name(&mut imports, b"wasi_snapshot_preview1");
+    push_name(&mut imports, b"fd_write");
+    imports.push(EXTERNAL_KIND_FUNC);
+    push_leb_u32(&mut imports, 0);
+    push_name(&mut imports, b"env");
+    push_name(&mut imports, b"host_side_effect");
+    imports.push(EXTERNAL_KIND_FUNC);
+    push_leb_u32(&mut imports, 1);
+    push_section(&mut module, SECTION_IMPORT, &imports);
+
+    module
+}
+
+#[cfg(feature = "wasm-engine-core")]
 fn path_open_fd_write_guest_module() -> Vec<u8> {
     let mut module = Vec::new();
     module.extend_from_slice(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
@@ -341,6 +465,7 @@ fn leak_wasm(mut module: Vec<u8>) -> &'static [u8] {
 #[derive(Clone, Copy, Debug)]
 struct TestLocalFrame {
     occupied: bool,
+    lane: u8,
     frame_label: FrameLabel,
     len: usize,
     bytes: [u8; TEST_CARRIER_FRAME_BYTES],
@@ -349,6 +474,7 @@ struct TestLocalFrame {
 impl TestLocalFrame {
     const EMPTY: Self = Self {
         occupied: false,
+        lane: 0,
         frame_label: FrameLabel::new(0),
         len: 0,
         bytes: [0; TEST_CARRIER_FRAME_BYTES],
@@ -375,6 +501,7 @@ impl TestLocalQueue {
 
     fn push_back(
         &mut self,
+        lane: u8,
         frame_label: FrameLabel,
         payload: Payload<'_>,
     ) -> Result<(), TransportError> {
@@ -384,6 +511,7 @@ impl TestLocalQueue {
         }
         let idx = (self.head + self.len) % TEST_CARRIER_QUEUE_DEPTH;
         self.frames[idx].occupied = true;
+        self.frames[idx].lane = lane;
         self.frames[idx].frame_label = frame_label;
         self.frames[idx].len = bytes.len();
         self.frames[idx].bytes[..bytes.len()].copy_from_slice(bytes);
@@ -404,15 +532,32 @@ impl TestLocalQueue {
         self.len += 1;
     }
 
-    fn pop_front(&mut self) -> Option<TestLocalFrame> {
+    fn pop_front(&mut self, lane: u8) -> Option<TestLocalFrame> {
         if self.len == 0 {
             return None;
         }
-        let idx = self.head;
+        let mut matched = None;
+        for offset in 0..self.len {
+            let idx = (self.head + offset) % TEST_CARRIER_QUEUE_DEPTH;
+            if self.frames[idx].occupied && self.frames[idx].lane == lane {
+                matched = Some(idx);
+                break;
+            }
+        }
+        let idx = matched?;
         let frame = self.frames[idx];
-        self.frames[idx] = TestLocalFrame::EMPTY;
-        self.head = (self.head + 1) % TEST_CARRIER_QUEUE_DEPTH;
+        let tail = (self.head + self.len - 1) % TEST_CARRIER_QUEUE_DEPTH;
+        let mut cursor = idx;
+        while cursor != tail {
+            let next = (cursor + 1) % TEST_CARRIER_QUEUE_DEPTH;
+            self.frames[cursor] = self.frames[next];
+            cursor = next;
+        }
+        self.frames[tail] = TestLocalFrame::EMPTY;
         self.len -= 1;
+        if self.len == 0 {
+            self.head = 0;
+        }
         if frame.occupied { Some(frame) } else { None }
     }
 }
@@ -444,12 +589,14 @@ impl TestLocalQueueCarrier {
 struct TestLocalQueueTx {
     local_role: u8,
     session_id: u32,
+    lane: u8,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct TestLocalQueueRx {
     local_role: u8,
     session_id: u32,
+    lane: u8,
     frame: Option<TestLocalFrame>,
 }
 
@@ -465,15 +612,22 @@ impl hibana::integration::Transport for TestLocalQueueCarrier {
         Self: 'a;
     type Metrics = ();
 
-    fn open<'a>(&'a self, local_role: u8, session_id: u32) -> (Self::Tx<'a>, Self::Rx<'a>) {
+    fn open<'a>(
+        &'a self,
+        local_role: u8,
+        session_id: u32,
+        lane: u8,
+    ) -> (Self::Tx<'a>, Self::Rx<'a>) {
         (
             TestLocalQueueTx {
                 local_role,
                 session_id,
+                lane,
             },
             TestLocalQueueRx {
                 local_role,
                 session_id,
+                lane,
                 frame: None,
             },
         )
@@ -494,8 +648,14 @@ impl hibana::integration::Transport for TestLocalQueueCarrier {
         if peer >= TEST_CARRIER_ROLES {
             return Poll::Ready(Err(TransportError::Failed));
         }
-        let result = self.queues.borrow_mut().by_role[peer]
-            .push_back(outgoing.frame_label(), outgoing.payload());
+        if outgoing.lane() != tx.lane {
+            return Poll::Ready(Err(TransportError::Failed));
+        }
+        let result = self.queues.borrow_mut().by_role[peer].push_back(
+            outgoing.lane(),
+            outgoing.frame_label(),
+            outgoing.payload(),
+        );
         cx.waker().wake_by_ref();
         Poll::Ready(result)
     }
@@ -514,9 +674,12 @@ impl hibana::integration::Transport for TestLocalQueueCarrier {
         if local_role >= TEST_CARRIER_ROLES {
             return Poll::Ready(Err(TransportError::Failed));
         }
-        let Some(frame) = self.queues.borrow_mut().by_role[local_role].pop_front() else {
+        let Some(frame) = self.queues.borrow_mut().by_role[local_role].pop_front(rx.lane) else {
             return Poll::Pending;
         };
+        if frame.lane != rx.lane {
+            return Poll::Ready(Err(TransportError::Failed));
+        }
         rx.frame = Some(frame);
         cx.waker().wake_by_ref();
         Poll::Ready(Ok(rx.frame.as_ref().expect("frame stored").payload()))
@@ -668,7 +831,7 @@ struct WrappedRunExit<R, I> {
     #[cfg(feature = "wasm-engine-core")]
     report: appkit::RunReport<R, I>,
     #[cfg(not(feature = "wasm-engine-core"))]
-    _marker: core::marker::PhantomData<(R, I)>,
+    report_type: core::marker::PhantomData<(R, I)>,
 }
 
 impl<R, I> appkit::FromRunReport<R, I> for WrappedRunExit<R, I> {
@@ -681,7 +844,7 @@ impl<R, I> appkit::FromRunReport<R, I> for WrappedRunExit<R, I> {
         {
             core::hint::black_box(report);
             Self {
-                _marker: core::marker::PhantomData,
+                report_type: core::marker::PhantomData,
             }
         }
     }
@@ -1143,16 +1306,23 @@ where
 
 const MEMORY_ROLE_COUNT: usize = 4;
 
+struct MemoryFrame {
+    lane: u8,
+    bytes: Vec<u8>,
+}
+
 struct MemoryTransport {
-    queues: [RefCell<VecDeque<Vec<u8>>>; MEMORY_ROLE_COUNT],
+    queues: [RefCell<VecDeque<MemoryFrame>>; MEMORY_ROLE_COUNT],
 }
 
 struct MemoryTx {
     role: u8,
+    lane: u8,
 }
 
 struct MemoryRx {
     role: u8,
+    lane: u8,
     current: Option<Vec<u8>>,
     delivered: bool,
 }
@@ -1180,13 +1350,22 @@ impl Transport for MemoryTransport {
         Self: 'a;
     type Metrics = ();
 
-    fn open<'a>(&'a self, local_role: u8, session_id: u32) -> (Self::Tx<'a>, Self::Rx<'a>) {
+    fn open<'a>(
+        &'a self,
+        local_role: u8,
+        session_id: u32,
+        lane: u8,
+    ) -> (Self::Tx<'a>, Self::Rx<'a>) {
         assert!((local_role as usize) < MEMORY_ROLE_COUNT);
         core::hint::black_box(session_id);
         (
-            MemoryTx { role: local_role },
+            MemoryTx {
+                role: local_role,
+                lane,
+            },
             MemoryRx {
                 role: local_role,
+                lane,
                 current: None,
                 delivered: false,
             },
@@ -1206,9 +1385,13 @@ impl Transport for MemoryTransport {
         core::hint::black_box(cx);
         let peer = outgoing.peer() as usize;
         assert!(peer < MEMORY_ROLE_COUNT);
-        self.queues[peer]
-            .borrow_mut()
-            .push_back(outgoing.payload().as_bytes().to_vec());
+        if outgoing.lane() != tx.lane {
+            return Poll::Ready(Err(TransportError::Failed));
+        }
+        self.queues[peer].borrow_mut().push_back(MemoryFrame {
+            lane: outgoing.lane(),
+            bytes: outgoing.payload().as_bytes().to_vec(),
+        });
         Poll::Ready(Ok(()))
     }
 
@@ -1228,7 +1411,15 @@ impl Transport for MemoryTransport {
             rx.delivered = false;
         }
         if rx.current.is_none() {
-            rx.current = self.queues[rx.role as usize].borrow_mut().pop_front();
+            let mut queue = self.queues[rx.role as usize].borrow_mut();
+            let mut selected = None;
+            for idx in 0..queue.len() {
+                if queue[idx].lane == rx.lane {
+                    selected = Some(idx);
+                    break;
+                }
+            }
+            rx.current = selected.and_then(|idx| queue.remove(idx).map(|frame| frame.bytes));
         }
         match rx.current.as_ref() {
             Some(bytes) => {
@@ -1240,8 +1431,13 @@ impl Transport for MemoryTransport {
     }
 
     fn requeue<'a>(&'a self, rx: &'a mut Self::Rx<'a>) {
-        if let Some(frame) = rx.current.take() {
-            self.queues[rx.role as usize].borrow_mut().push_front(frame);
+        if let Some(bytes) = rx.current.take() {
+            self.queues[rx.role as usize]
+                .borrow_mut()
+                .push_front(MemoryFrame {
+                    lane: rx.lane,
+                    bytes,
+                });
         }
         rx.delivered = false;
     }
@@ -1633,6 +1829,7 @@ fn choreofs_traffic_attach_succeeds<const ROLE: u8>(
     slab_bytes: usize,
 ) -> bool {
     let role = program.project::<ROLE>();
+    let lane_range = projected_lane_range(program);
     let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); 128];
     let mut slab = vec![0u8; slab_bytes];
     let clock = CounterClock::new();
@@ -1647,7 +1844,7 @@ fn choreofs_traffic_attach_succeeds<const ROLE: u8>(
         Config::new(
             &mut tap_buf,
             slab.as_mut_slice(),
-            0..8,
+            lane_range,
             1,
             CounterClock::new(),
             None,
@@ -1658,6 +1855,91 @@ fn choreofs_traffic_attach_succeeds<const ROLE: u8>(
     };
     kit.enter::<ROLE, _>(rendezvous, SessionId::new(2040), &role, NoBinding)
         .is_ok()
+}
+
+fn choreofs_traffic_embedded_attach_succeeds<const ROLE: u8>(
+    program: &impl Projectable<DefaultLabelUniverse>,
+    slab_bytes: usize,
+) -> bool {
+    let role = program.project::<ROLE>();
+    let lane_range = projected_lane_range(program);
+    let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); 128];
+    let mut slab = vec![0u8; slab_bytes];
+    type Kit<'a> =
+        hibana::integration::SessionKit<'a, MemoryTransport, DefaultLabelUniverse, CounterClock, 1>;
+
+    let base = slab.as_mut_ptr() as usize;
+    let kit_start = align_up_for_test(base, core::mem::align_of::<Kit<'_>>());
+    let Some(kit_end) = kit_start.checked_add(core::mem::size_of::<Kit<'_>>()) else {
+        return false;
+    };
+    let Some(total_end) = base.checked_add(slab.len()) else {
+        return false;
+    };
+    if kit_end > total_end {
+        return false;
+    }
+
+    let kit_offset = kit_start - base;
+    let rest_offset = kit_end - base;
+    let clock = CounterClock::new();
+    let kit_storage = unsafe {
+        &mut *slab
+            .as_mut_ptr()
+            .add(kit_offset)
+            .cast::<core::mem::MaybeUninit<Kit<'_>>>()
+    };
+    let rendezvous_slab = &mut slab[rest_offset..];
+    let kit = hibana::integration::SessionKit::<
+        MemoryTransport,
+        DefaultLabelUniverse,
+        CounterClock,
+        1,
+    >::init_in_place(kit_storage, &clock);
+    let Ok(rendezvous) = kit.add_rendezvous_from_config(
+        Config::new(
+            &mut tap_buf,
+            rendezvous_slab,
+            lane_range,
+            1,
+            CounterClock::new(),
+            None,
+        ),
+        MemoryTransport::new(),
+    ) else {
+        return false;
+    };
+    kit.enter::<ROLE, _>(rendezvous, SessionId::new(2040), &role, NoBinding)
+        .is_ok()
+}
+
+fn align_up_for_test(value: usize, align: usize) -> usize {
+    let mask = align.saturating_sub(1);
+    (value + mask) & !mask
+}
+
+#[derive(Default)]
+struct ProjectedLaneRange {
+    max_lane: u8,
+    saw_lane: bool,
+}
+
+impl ProjectionMetadataVisitor for ProjectedLaneRange {
+    fn visit_atom(&mut self, spec: hibana::integration::program::ProjectionAtomSpec) {
+        self.max_lane = self.max_lane.max(spec.lane);
+        self.saw_lane = true;
+    }
+}
+
+fn projected_lane_range(program: &impl Projectable<DefaultLabelUniverse>) -> core::ops::Range<u16> {
+    let mut visitor = ProjectedLaneRange::default();
+    program.visit_projection_metadata(&mut visitor);
+    let end = if visitor.saw_lane {
+        u16::from(visitor.max_lane) + 1
+    } else {
+        1
+    };
+    0..end
 }
 
 fn minimum_choreofs_traffic_attach_slab<const ROLE: u8>(
@@ -1671,6 +1953,19 @@ fn minimum_choreofs_traffic_attach_slab<const ROLE: u8>(
         slab += 1024;
     }
     panic!("role {ROLE} did not attach within 128 KiB");
+}
+
+fn minimum_choreofs_traffic_embedded_attach_slab<const ROLE: u8>(
+    program: &impl Projectable<DefaultLabelUniverse>,
+) -> usize {
+    let mut slab = 4 * 1024;
+    while slab <= 128 * 1024 {
+        if choreofs_traffic_embedded_attach_succeeds::<ROLE>(program, slab) {
+            return slab;
+        }
+        slab += 1024;
+    }
+    panic!("role {ROLE} did not embedded-attach within 128 KiB");
 }
 
 #[test]
@@ -1687,6 +1982,8 @@ fn choreofs_traffic_role_slices_attach_with_bounded_storage() {
     let baker_program = choreofs_baker_wasi_traffic_program();
     let baker_role0 = minimum_choreofs_traffic_attach_slab::<0>(&baker_program);
     let baker_role1 = minimum_choreofs_traffic_attach_slab::<1>(&baker_program);
+    let baker_embedded_role0 = minimum_choreofs_traffic_embedded_attach_slab::<0>(&baker_program);
+    let baker_embedded_role1 = minimum_choreofs_traffic_embedded_attach_slab::<1>(&baker_program);
 
     println!("single exchange role0 attach slab bytes: {single_role0}");
     println!("single exchange role1 attach slab bytes: {single_role1}");
@@ -1696,8 +1993,16 @@ fn choreofs_traffic_role_slices_attach_with_bounded_storage() {
     println!("choreofs loop traffic role1 attach slab bytes: {loop_role1}");
     println!("baker wasi choreofs traffic role0 attach slab bytes: {baker_role0}");
     println!("baker wasi choreofs traffic role1 attach slab bytes: {baker_role1}");
+    println!(
+        "baker wasi choreofs traffic role0 embedded attach slab bytes: {baker_embedded_role0}"
+    );
+    println!(
+        "baker wasi choreofs traffic role1 embedded attach slab bytes: {baker_embedded_role1}"
+    );
     assert!(single_role0 <= role0);
     assert!(single_role1 <= role1);
+    assert!(baker_role0 <= baker_embedded_role0);
+    assert!(baker_role1 <= baker_embedded_role1);
 }
 
 fn exercise_fd_write_endpoint_round_trip(program: &impl Projectable<DefaultLabelUniverse>) {
@@ -1787,8 +2092,10 @@ impl appkit::LogicalImage<RichCapsule> for site::Local<image::Composite> {
     fn carrier<'a>() -> Self::Carrier<'a> {
         TestLocalQueueCarrier::new()
     }
+}
 
-    #[cfg(feature = "wasm-engine-core")]
+#[cfg(feature = "wasm-engine-core")]
+impl appkit::WasiGuestImage<RichCapsule> for site::Local<image::Composite> {
     fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
         host_capsule_wasi_guest_storage::<ROLE>()
     }
@@ -1813,11 +2120,6 @@ impl appkit::LogicalImage<RichCapsule> for site::Local<image::DriverOnly> {
     fn carrier<'a>() -> Self::Carrier<'a> {
         TestLocalQueueCarrier::new()
     }
-
-    #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        host_capsule_wasi_guest_storage::<ROLE>()
-    }
 }
 
 impl appkit::LogicalImage<RichCapsule> for site::Local<image::BoundaryOnly> {
@@ -1838,11 +2140,6 @@ impl appkit::LogicalImage<RichCapsule> for site::Local<image::BoundaryOnly> {
 
     fn carrier<'a>() -> Self::Carrier<'a> {
         TestLocalQueueCarrier::new()
-    }
-
-    #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        host_capsule_wasi_guest_storage::<ROLE>()
     }
 }
 
@@ -1865,8 +2162,10 @@ impl appkit::LogicalImage<RichCapsule> for site::Local<image::WrappedExit> {
     fn carrier<'a>() -> Self::Carrier<'a> {
         TestLocalQueueCarrier::new()
     }
+}
 
-    #[cfg(feature = "wasm-engine-core")]
+#[cfg(feature = "wasm-engine-core")]
+impl appkit::WasiGuestImage<RichCapsule> for site::Local<image::WrappedExit> {
     fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
         host_capsule_wasi_guest_storage::<ROLE>()
     }
@@ -1891,8 +2190,10 @@ impl appkit::LogicalImage<IncompleteCapsule> for site::Local<image::Composite> {
     fn carrier<'a>() -> Self::Carrier<'a> {
         TestLocalQueueCarrier::new()
     }
+}
 
-    #[cfg(feature = "wasm-engine-core")]
+#[cfg(feature = "wasm-engine-core")]
+impl appkit::WasiGuestImage<IncompleteCapsule> for site::Local<image::Composite> {
     fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
         host_capsule_wasi_guest_storage::<ROLE>()
     }
@@ -1917,11 +2218,6 @@ impl appkit::LogicalImage<CountingCapsule> for site::Local<image::Counting> {
     fn carrier<'a>() -> Self::Carrier<'a> {
         TestLocalQueueCarrier::new()
     }
-
-    #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        host_capsule_wasi_guest_storage::<ROLE>()
-    }
 }
 
 impl appkit::LogicalImage<ChoreoFsRuntimeCapsule> for site::Local<image::ChoreoFsRuntime> {
@@ -1944,13 +2240,15 @@ impl appkit::LogicalImage<ChoreoFsRuntimeCapsule> for site::Local<image::ChoreoF
         TestLocalQueueCarrier::new()
     }
 
-    #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        host_capsule_wasi_guest_storage::<ROLE>()
-    }
-
     fn driver_facts() -> appkit::DriverFacts<'static> {
         CHOREOFS_RUNTIME_FACTS.driver_facts()
+    }
+}
+
+#[cfg(feature = "wasm-engine-core")]
+impl appkit::WasiGuestImage<ChoreoFsRuntimeCapsule> for site::Local<image::ChoreoFsRuntime> {
+    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
+        host_capsule_wasi_guest_storage::<ROLE>()
     }
 }
 
@@ -2069,7 +2367,7 @@ fn run_polls_localside_for_attached_role_kinds() {
 }
 
 #[test]
-#[cfg(feature = "wasm-engine-core")]
+#[cfg(all(feature = "wasm-engine-core", feature = "wasip1-sys-path-open"))]
 fn choreofs_facts_are_consumed_by_driver_ctx_during_endpoint_progress() {
     let before = CHOREOFS_RUNTIME_COMPLETIONS.load(Ordering::SeqCst);
     let wasm = leak_wasm(path_open_fd_write_guest_module());
@@ -2322,33 +2620,37 @@ fn driver_facts_are_separate_from_progress_authority() {
 
 #[test]
 #[cfg(feature = "wasm-engine-core")]
-fn wasi_image_rejects_non_p1_artifacts() {
+fn wasi_static_import_table_is_not_choreography_authority() {
     let p1 = leak_wasm(fd_write_guest_module());
     let report = appkit::run::<site::Local<image::Composite>, RichCapsule>(
         appkit::WasiImage::from_static(p1),
     );
     assert_eq!(report.wasi_imports(), appkit::WasiImports::FD_WRITE);
 
-    let empty = std::panic::catch_unwind(|| {
-        appkit::run::<site::Local<image::Composite>, RichCapsule>(appkit::WasiImage::from_static(
-            b"",
-        ));
-    });
-    assert!(empty.is_err());
+    let std_like = leak_wasm(fd_write_with_unused_std_wasi_imports_module());
+    let std_like_report = appkit::run::<site::Local<image::Composite>, RichCapsule>(
+        appkit::WasiImage::from_static(std_like),
+    );
+    assert_eq!(
+        std_like_report.wasi_imports(),
+        appkit::WasiImports::FD_WRITE
+    );
 
-    let preview2 = std::panic::catch_unwind(|| {
+    let extra_import = leak_wasm(path_open_fd_write_guest_module());
+    let extra_import_run = std::panic::catch_unwind(|| {
         appkit::run::<site::Local<image::Composite>, RichCapsule>(appkit::WasiImage::from_static(
-            b"\0asm\x01\0\0\0wasi_snapshot_preview1 wasi_snapshot_preview2",
+            extra_import,
         ));
     });
-    assert!(preview2.is_err());
+    assert!(extra_import_run.is_err());
 
-    let missing = std::panic::catch_unwind(|| {
+    let foreign_import = leak_wasm(fd_write_with_non_wasi_import_module());
+    let foreign_import_run = std::panic::catch_unwind(|| {
         appkit::run::<site::Local<image::Composite>, RichCapsule>(appkit::WasiImage::from_static(
-            WASM_FD_READ,
+            foreign_import,
         ));
     });
-    assert!(missing.is_err());
+    assert!(foreign_import_run.is_err());
 }
 
 struct CaptureProgramFacts {

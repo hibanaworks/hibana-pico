@@ -19,6 +19,7 @@ const LABEL_RESPONSE_MESSAGE: u8 = 133;
 const LABEL_TIMER_EXPIRED_MESSAGE: u8 = 134;
 const LABEL_TIMER_ROUTE_DONE: u8 = 135;
 const LABEL_TIMER_FIRED_FACT: u8 = 136;
+const LABEL_TIMER_ROUTE_ACK: u8 = 137;
 const TIMER_ROUTE_POLICY: u16 = 56;
 
 type ResponseRouteKind = RouteControl<LABEL_RESPONSE_READY, 0>;
@@ -31,13 +32,14 @@ type ResponseReady = g::Msg<LABEL_RESPONSE_MESSAGE, u8>;
 type TimerExpired = g::Msg<LABEL_TIMER_EXPIRED_MESSAGE, u8>;
 type TimerRouteDone = g::Msg<LABEL_TIMER_ROUTE_DONE, u8>;
 type TimerFiredFact = g::Msg<LABEL_TIMER_FIRED_FACT, u8>;
+type TimerRouteAck = g::Msg<LABEL_TIMER_ROUTE_ACK, u8>;
 
 static TIMER_FACT_READY: AtomicBool = AtomicBool::new(false);
 
 pub struct TimerRoute;
 pub struct TimerRouteLocal;
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum TimerRouteError {
     Endpoint(hibana::EndpointError),
     Resolver(hibana::integration::policy::ResolverError),
@@ -46,12 +48,16 @@ pub enum TimerRouteError {
 
 impl From<hibana::EndpointError> for TimerRouteError {
     fn from(error: hibana::EndpointError) -> Self {
+        baker_firmware::record_choreofs_engine_status(
+            0x5452_e000 | baker_firmware::choreofs_endpoint_error_code(&error),
+        );
         Self::Endpoint(error)
     }
 }
 
 impl From<hibana::integration::policy::ResolverError> for TimerRouteError {
     fn from(error: hibana::integration::policy::ResolverError) -> Self {
+        baker_firmware::record_choreofs_engine_status(0x5452_f000);
         Self::Resolver(error)
     }
 }
@@ -95,7 +101,10 @@ impl appkit::Capsule for TimerRoute {
                         g::send::<g::Role<1>, g::Role<0>, TimerExpired, 1>(),
                     ),
                 ),
-                g::send::<g::Role<0>, g::Role<1>, TimerRouteDone, 1>(),
+                g::seq(
+                    g::send::<g::Role<0>, g::Role<1>, TimerRouteDone, 1>(),
+                    g::send::<g::Role<1>, g::Role<0>, TimerRouteAck, 1>(),
+                ),
             ),
         )
     }
@@ -154,6 +163,11 @@ impl appkit::Localside<TimerRoute> for TimerRouteLocal {
                 baker_firmware::record_choreofs_engine_status(0x5452_0113);
                 baker_firmware::record_choreofs_driver_trace(0x5452_0113);
 
+                let ack = ctx.endpoint().flow::<TimerRouteAck>()?;
+                ack.send(&1).await?;
+                baker_firmware::record_choreofs_engine_status(0x5452_0114);
+                baker_firmware::record_choreofs_driver_trace(0x5452_0114);
+
                 baker_firmware::mark_runtime_ready();
                 return ctx.pending().await;
             }
@@ -168,6 +182,7 @@ impl appkit::Localside<TimerRoute> for TimerRouteLocal {
             if ROLE == 0 {
                 baker_firmware::record_choreofs_driver_trace(0x5452_000f);
                 baker_firmware::baker_poll_delay(100);
+                TIMER_FACT_READY.store(true, Ordering::Release);
                 baker_firmware::record_choreofs_driver_trace(0x5452_0010);
 
                 let fact = ctx.endpoint().flow::<TimerFiredFact>()?;
@@ -175,6 +190,9 @@ impl appkit::Localside<TimerRoute> for TimerRouteLocal {
                 baker_firmware::record_choreofs_driver_trace(0x5452_0011);
 
                 let branch = ctx.endpoint().offer().await?;
+                baker_firmware::record_choreofs_driver_trace(
+                    0x5452_1000 | u32::from(branch.label()),
+                );
                 let expired = branch.decode::<TimerExpired>().await?;
                 if expired != 1 {
                     return Err(TimerRouteError::RuntimeViolation);
@@ -184,6 +202,12 @@ impl appkit::Localside<TimerRoute> for TimerRouteLocal {
                 let done = ctx.endpoint().flow::<TimerRouteDone>()?;
                 done.send(&1).await?;
                 baker_firmware::record_choreofs_driver_trace(0x5452_0013);
+
+                let ack = ctx.endpoint().recv::<TimerRouteAck>().await?;
+                if ack != 1 {
+                    return Err(TimerRouteError::RuntimeViolation);
+                }
+                baker_firmware::record_choreofs_driver_trace(0x5452_0014);
 
                 baker_firmware::mark_runtime_ready();
                 baker_firmware::mark_success(<TimerRoute as BakerCapsuleFacts>::SUCCESS_RESULT);

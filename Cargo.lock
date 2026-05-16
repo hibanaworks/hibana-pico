@@ -8,23 +8,7 @@ version = "0.1.0"
 dependencies = [
  "hibana",
  "hibana-pico",
- "rp2040-boot2",
 ]
-
-[[package]]
-name = "crc-any"
-version = "2.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a62ec9ff5f7965e4d7280bd5482acd20aadb50d632cf6c1d74493856b011fa73"
-dependencies = [
- "debug-helper",
-]
-
-[[package]]
-name = "debug-helper"
-version = "0.3.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f578e8e2c440e7297e008bb5486a3a8a194775224bbc23729b0dbdfaeebf162e"
 
 [[package]]
 name = "heterogeneous-split-example"
@@ -36,38 +20,13 @@ dependencies = [
 
 [[package]]
 name = "hibana"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ed034209878f336f78d66e604d0855fb91174f8c545eed326e32732a467b0a7"
+checksum = "01bdf2523e32dd27c3c30652e700a58c646cd362509a1121e2d539e516ddddfd"
 
 [[package]]
 name = "hibana-pico"
 version = "0.1.0"
 dependencies = [
  "hibana",
-]
-
-[[package]]
-name = "host-smoke-example"
-version = "0.1.0"
-dependencies = [
- "hibana",
- "hibana-pico",
-]
-
-[[package]]
-name = "rp2040-boot2"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c92f344f63f950ee36cf4080050e4dce850839b9175da38f9d2ffb69b4dbb21"
-dependencies = [
- "crc-any",
-]
-
-[[package]]
-name = "swarm-smoke-example"
-version = "0.1.0"
-dependencies = [
- "hibana",
- "hibana-pico",
 ]

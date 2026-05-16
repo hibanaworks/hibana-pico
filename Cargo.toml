@@ -7,21 +7,18 @@ publish = false
 [workspace]
 members = [
     ".",
-    "examples/host-smoke-example",
     "examples/baker-firmware",
-    "examples/swarm-smoke-example",
     "examples/heterogeneous-split-example",
 ]
 exclude = [
-    "examples/baker-firmware/wasip1/traffic",
-    "examples/wasip1-guests/hibana-wasi-guest",
-    "examples/wasip1-guests/swarm-node-apps",
-    "examples/wasip1-guests/wasip1-smoke-apps",
+    "examples/baker-firmware/wasip1/guest",
+    "guest/hibana-wasip1-guest",
+    "guest/wasip1-programs",
 ]
 resolver = "3"
 
 [dependencies]
-hibana = { version = "0.4.1", default-features = false }
+hibana = { version = "0.5.0", default-features = false }
 
 [features]
 default = []

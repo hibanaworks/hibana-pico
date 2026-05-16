@@ -1,0 +1,81 @@
+[package]
+name = "hibana-pico-wasip1-programs"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+hibana-wasip1-guest = { path = "../hibana-wasip1-guest" }
+
+[[bin]]
+name = "wasip1-stdout"
+path = "../wasip1-stdout/src/main.rs"
+
+[[bin]]
+name = "wasip1-stderr"
+path = "../wasip1-stderr/src/main.rs"
+
+[[bin]]
+name = "wasip1-stdin"
+path = "../wasip1-stdin/src/main.rs"
+
+[[bin]]
+name = "wasip1-clock"
+path = "../wasip1-clock/src/main.rs"
+
+[[bin]]
+name = "wasip1-random"
+path = "../wasip1-random/src/main.rs"
+
+[[bin]]
+name = "wasip1-exit"
+path = "../wasip1-exit/src/main.rs"
+
+[[bin]]
+name = "wasip1-timer"
+path = "src/bin/wasip1-timer.rs"
+
+[[bin]]
+name = "wasip1-trap"
+path = "src/bin/wasip1-trap.rs"
+
+[[bin]]
+name = "wasip1-infinite-loop"
+path = "src/bin/wasip1-infinite-loop.rs"
+
+[[bin]]
+name = "wasip1-std-core-coverage"
+path = "src/bin/wasip1-std-core-coverage.rs"
+
+[[bin]]
+name = "wasip1-std-choreofs-read"
+path = "src/bin/wasip1-std-choreofs-read.rs"
+
+[[bin]]
+name = "wasip1-std-choreofs-append"
+path = "src/bin/wasip1-std-choreofs-append.rs"
+
+[[bin]]
+name = "wasip1-std-bad-path"
+path = "src/bin/wasip1-std-bad-path.rs"
+
+[[bin]]
+name = "wasip1-std-choreofs-static-write"
+path = "src/bin/wasip1-std-choreofs-static-write.rs"
+
+[[bin]]
+name = "wasip1-memory-grow-ok"
+path = "src/bin/wasip1-memory-grow-ok.rs"
+
+[[bin]]
+name = "wasip1-memory-grow-stale-lease"
+path = "src/bin/wasip1-memory-grow-stale-lease.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "debuginfo"

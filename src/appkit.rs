@@ -20,7 +20,7 @@ use core::future::Future;
 #[cfg(any(feature = "wasm-engine-core", all(not(test), target_os = "none")))]
 use core::cell::UnsafeCell;
 
-#[cfg(feature = "wasm-engine-core")]
+#[cfg(all(feature = "wasm-engine-core", target_has_atomic = "ptr"))]
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::choreography::protocol::{
@@ -64,9 +64,7 @@ const APPKIT_ROLE_FUTURE_BYTES: usize = 8 * 1024;
 #[cfg(all(not(test), target_os = "none"))]
 const APPKIT_EMBEDDED_FUTURE_ALIGN: usize = 16;
 #[cfg(all(not(test), target_os = "none"))]
-const APPKIT_EMBEDDED_ROLE0_FUTURE_BYTES: usize = 2 * 1024;
-#[cfg(all(not(test), target_os = "none"))]
-const APPKIT_EMBEDDED_ROLE1_FUTURE_BYTES: usize = 8 * 1024;
+const APPKIT_EMBEDDED_ROLE_FUTURE_BYTES: usize = 4 * 1024;
 #[cfg(feature = "wasm-engine-core")]
 const APPKIT_WASI_GUEST_ARENA_ALIGN: usize = 16;
 #[cfg(feature = "wasm-engine-core")]
@@ -119,6 +117,7 @@ impl<T, E> core::future::Future for PendingRole<T, E> {
     }
 }
 
+#[derive(Clone, Copy)]
 enum RoleTaskError<E> {
     Local(E),
     #[cfg(feature = "wasm-engine-core")]
@@ -138,24 +137,152 @@ where
     }
 }
 
-async fn local_role_task<F, E>(future: F) -> RoleResult<RoleTaskError<E>>
+struct LocalRoleTask<F, E> {
+    future: F,
+    marker: PhantomData<fn() -> E>,
+}
+
+impl<F, E> LocalRoleTask<F, E> {
+    const fn new(future: F) -> Self {
+        Self {
+            future,
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<F, E> Future for LocalRoleTask<F, E>
 where
     F: core::future::Future<Output = RoleResult<E>>,
 {
-    match future.await {
-        Ok(done) => Ok(done),
-        Err(error) => Err(RoleTaskError::Local(error)),
+    type Output = RoleResult<RoleTaskError<E>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let state = unsafe { self.get_unchecked_mut() };
+        let future = unsafe { Pin::new_unchecked(&mut state.future) };
+        match future.poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(done)) => match done {},
+            Poll::Ready(Err(error)) => Poll::Ready(Err(RoleTaskError::Local(error))),
+        }
     }
 }
 
 #[cfg(feature = "wasm-engine-core")]
-async fn wasi_role_task<F, E>(future: F) -> RoleResult<RoleTaskError<E>>
+struct WasiRoleTask<F, E> {
+    future: F,
+    marker: PhantomData<fn() -> E>,
+}
+
+#[cfg(feature = "wasm-engine-core")]
+impl<F, E> WasiRoleTask<F, E> {
+    const fn new(future: F) -> Self {
+        Self {
+            future,
+            marker: PhantomData,
+        }
+    }
+}
+
+#[cfg(feature = "wasm-engine-core")]
+impl<F, E> Future for WasiRoleTask<F, E>
 where
     F: core::future::Future<Output = RoleResult<WasiGuestError>>,
 {
-    match future.await {
-        Ok(done) => Ok(done),
-        Err(error) => Err(RoleTaskError::Wasi(error)),
+    type Output = RoleResult<RoleTaskError<E>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let state = unsafe { self.get_unchecked_mut() };
+        let future = unsafe { Pin::new_unchecked(&mut state.future) };
+        match future.poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(done)) => match done {},
+            Poll::Ready(Err(error)) => Poll::Ready(Err(RoleTaskError::Wasi(error))),
+        }
+    }
+}
+
+fn local_role_task<F, E>(future: F) -> LocalRoleTask<F, E>
+where
+    F: core::future::Future<Output = RoleResult<E>>,
+{
+    LocalRoleTask::new(future)
+}
+
+#[cfg(feature = "wasm-engine-core")]
+fn wasi_role_task<F, E>(future: F) -> WasiRoleTask<F, E>
+where
+    F: core::future::Future<Output = RoleResult<WasiGuestError>>,
+{
+    WasiRoleTask::new(future)
+}
+
+#[cfg(all(not(test), target_os = "none"))]
+#[repr(C, align(16))]
+struct EmbeddedFutureArena<const N: usize> {
+    bytes: UnsafeCell<[u8; N]>,
+}
+
+#[cfg(all(not(test), target_os = "none"))]
+impl<const N: usize> EmbeddedFutureArena<N> {
+    const EMPTY: Self = Self {
+        bytes: UnsafeCell::new([0; N]),
+    };
+
+    fn as_mut_ptr(&self) -> *mut u8 {
+        unsafe { (*self.bytes.get()).as_mut_ptr() }
+    }
+}
+
+#[cfg(all(not(test), target_os = "none"))]
+struct EmbeddedWakerSlot {
+    initialized: UnsafeCell<bool>,
+    waker: UnsafeCell<MaybeUninit<Waker>>,
+}
+
+#[cfg(all(not(test), target_os = "none"))]
+unsafe impl Sync for EmbeddedWakerSlot {}
+
+#[cfg(all(not(test), target_os = "none"))]
+impl EmbeddedWakerSlot {
+    const EMPTY: Self = Self {
+        initialized: UnsafeCell::new(false),
+        waker: UnsafeCell::new(MaybeUninit::uninit()),
+    };
+
+    fn get(&'static self) -> &'static Waker {
+        unsafe {
+            if !*self.initialized.get() {
+                (*self.waker.get()).write(Waker::from_raw(RawWaker::new(
+                    core::ptr::null(),
+                    &NOOP_WAKER_VTABLE,
+                )));
+                *self.initialized.get() = true;
+            }
+            &*(*self.waker.get()).as_ptr()
+        }
+    }
+}
+
+#[cfg(all(not(test), target_os = "none"))]
+struct EmbeddedTaskContextSlot {
+    context: UnsafeCell<MaybeUninit<Context<'static>>>,
+}
+
+#[cfg(all(not(test), target_os = "none"))]
+unsafe impl Sync for EmbeddedTaskContextSlot {}
+
+#[cfg(all(not(test), target_os = "none"))]
+impl EmbeddedTaskContextSlot {
+    const EMPTY: Self = Self {
+        context: UnsafeCell::new(MaybeUninit::uninit()),
+    };
+
+    fn get(&'static self, waker: &'static Waker) -> &'static mut Context<'static> {
+        unsafe {
+            (*self.context.get()).write(Context::from_waker(waker));
+            &mut *(*self.context.get()).as_mut_ptr()
+        }
     }
 }
 
@@ -164,12 +291,20 @@ where
 pub struct EmbeddedAttachStorage<const SLAB_BYTES: usize> {
     tap: UnsafeCell<[hibana::integration::tap::TapEvent; APPKIT_ATTACH_TAP_EVENTS]>,
     slab: UnsafeCell<[u8; SLAB_BYTES]>,
+    future: EmbeddedFutureArena<APPKIT_EMBEDDED_ROLE_FUTURE_BYTES>,
+    waker: EmbeddedWakerSlot,
+    context: EmbeddedTaskContextSlot,
 }
 
 #[cfg(all(not(test), target_os = "none"))]
+#[derive(Clone, Copy)]
 pub struct EmbeddedAttachStorageRef<'a> {
-    tap: &'a mut [hibana::integration::tap::TapEvent; APPKIT_ATTACH_TAP_EVENTS],
-    slab: &'a mut [u8],
+    tap: *mut [hibana::integration::tap::TapEvent; APPKIT_ATTACH_TAP_EVENTS],
+    slab: *mut [u8],
+    future: *mut u8,
+    future_bytes: usize,
+    waker: &'a EmbeddedWakerSlot,
+    context: &'a EmbeddedTaskContextSlot,
 }
 
 #[cfg(all(not(test), target_os = "none"))]
@@ -180,6 +315,9 @@ impl<const SLAB_BYTES: usize> EmbeddedAttachStorage<SLAB_BYTES> {
                 [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS],
             ),
             slab: UnsafeCell::new([0; SLAB_BYTES]),
+            future: EmbeddedFutureArena::EMPTY,
+            waker: EmbeddedWakerSlot::EMPTY,
+            context: EmbeddedTaskContextSlot::EMPTY,
         }
     }
 
@@ -188,7 +326,14 @@ impl<const SLAB_BYTES: usize> EmbeddedAttachStorage<SLAB_BYTES> {
         let slab = unsafe { &mut *self.slab.get() };
         tap.fill(hibana::integration::tap::TapEvent::zero());
         slab.fill(0);
-        EmbeddedAttachStorageRef { tap, slab }
+        EmbeddedAttachStorageRef {
+            tap,
+            slab,
+            future: self.future.as_mut_ptr(),
+            future_bytes: APPKIT_EMBEDDED_ROLE_FUTURE_BYTES,
+            waker: &self.waker,
+            context: &self.context,
+        }
     }
 }
 
@@ -244,47 +389,45 @@ where
     }
 }
 
-#[cfg(all(not(test), target_os = "none"))]
-#[repr(C, align(16))]
-struct EmbeddedFutureArena<const N: usize> {
-    bytes: UnsafeCell<[u8; N]>,
-}
-
 #[repr(C, align(16))]
 #[cfg(feature = "wasm-engine-core")]
 pub struct WasiGuestArena {
     bytes: UnsafeCell<[u8; APPKIT_WASI_GUEST_BYTES]>,
+    #[cfg(target_has_atomic = "ptr")]
     occupied: AtomicBool,
-}
-
-#[cfg(all(not(test), target_os = "none"))]
-impl<const N: usize> EmbeddedFutureArena<N> {
-    const EMPTY: Self = Self {
-        bytes: UnsafeCell::new([0; N]),
-    };
-
-    fn as_mut_ptr(&self) -> *mut u8 {
-        unsafe { (*self.bytes.get()).as_mut_ptr() }
-    }
+    #[cfg(not(target_has_atomic = "ptr"))]
+    occupied: UnsafeCell<bool>,
+    #[cfg(not(target_has_atomic = "ptr"))]
+    owner: PhantomData<*mut ()>,
 }
 
 #[cfg(feature = "wasm-engine-core")]
 impl WasiGuestArena {
     const EMPTY: Self = Self {
         bytes: UnsafeCell::new([0; APPKIT_WASI_GUEST_BYTES]),
+        #[cfg(target_has_atomic = "ptr")]
         occupied: AtomicBool::new(false),
+        #[cfg(not(target_has_atomic = "ptr"))]
+        occupied: UnsafeCell::new(false),
+        #[cfg(not(target_has_atomic = "ptr"))]
+        owner: PhantomData,
     };
 
     pub const fn empty() -> Self {
         Self::EMPTY
     }
 
-    pub fn storage<'guest>(&'static self) -> WasiGuestStorage<'guest> {
+    fn assert_guest_alignment() {
         assert!(
             align_of::<crate::kernel::engine::wasm::Guest<'static>>()
                 <= APPKIT_WASI_GUEST_ARENA_ALIGN,
             "WASI guest arena alignment is too small"
         );
+    }
+
+    #[cfg(target_has_atomic = "ptr")]
+    pub fn storage<'guest>(&'static self) -> WasiGuestStorage<'guest> {
+        Self::assert_guest_alignment();
         #[cfg(target_has_atomic = "ptr")]
         while self
             .occupied
@@ -293,17 +436,31 @@ impl WasiGuestArena {
         {
             core::hint::spin_loop();
         }
-        #[cfg(not(target_has_atomic = "ptr"))]
-        {
-            assert!(
-                !self.occupied.load(Ordering::Acquire),
-                "WASI guest arena is already leased"
-            );
-            self.occupied.store(true, Ordering::Release);
-        }
         WasiGuestStorage {
             occupied: &self.occupied,
             ptr: unsafe { (*self.bytes.get()).as_mut_ptr().cast() },
+        }
+    }
+
+    /// Lease a no-atomic arena through its single physical owner.
+    ///
+    /// # Safety
+    ///
+    /// `arena` must be the unique live owner for the current logical image. No
+    /// other core, interrupt, or task may call this function for the same arena
+    /// until the returned [`WasiGuestStorage`] is dropped.
+    #[cfg(not(target_has_atomic = "ptr"))]
+    pub unsafe fn storage_from_owner<'guest>(arena: *mut Self) -> WasiGuestStorage<'guest> {
+        Self::assert_guest_alignment();
+        assert!(!arena.is_null(), "WASI guest arena owner pointer is null");
+        let arena = unsafe { &mut *arena };
+        unsafe {
+            assert!(!*arena.occupied.get(), "WASI guest arena is already leased");
+            *arena.occupied.get() = true;
+        }
+        WasiGuestStorage {
+            occupied: arena.occupied.get(),
+            ptr: unsafe { (*arena.bytes.get()).as_mut_ptr().cast() },
         }
     }
 }
@@ -312,11 +469,15 @@ impl WasiGuestArena {
 unsafe impl<const N: usize> Sync for EmbeddedFutureArena<N> {}
 
 #[cfg(feature = "wasm-engine-core")]
+#[cfg(target_has_atomic = "ptr")]
 unsafe impl Sync for WasiGuestArena {}
 
 #[cfg(feature = "wasm-engine-core")]
 pub struct WasiGuestStorage<'guest> {
+    #[cfg(target_has_atomic = "ptr")]
     occupied: &'static AtomicBool,
+    #[cfg(not(target_has_atomic = "ptr"))]
+    occupied: *mut bool,
     ptr: *mut crate::kernel::engine::wasm::Guest<'guest>,
 }
 
@@ -330,37 +491,74 @@ impl<'guest> WasiGuestStorage<'guest> {
 #[cfg(feature = "wasm-engine-core")]
 impl Drop for WasiGuestStorage<'_> {
     fn drop(&mut self) {
+        #[cfg(target_has_atomic = "ptr")]
         self.occupied.store(false, Ordering::Release);
+        #[cfg(not(target_has_atomic = "ptr"))]
+        unsafe {
+            *self.occupied = false;
+        }
     }
 }
 
 #[cfg(all(not(test), target_os = "none"))]
-static EMBEDDED_ROLE0_FUTURE_ARENA: EmbeddedFutureArena<APPKIT_EMBEDDED_ROLE0_FUTURE_BYTES> =
-    EmbeddedFutureArena::EMPTY;
+#[inline(always)]
+fn embedded_wake() {
+    #[cfg(target_arch = "arm")]
+    unsafe {
+        core::arch::asm!("sev", options(nomem, nostack, preserves_flags));
+    }
+    #[cfg(not(target_arch = "arm"))]
+    core::hint::spin_loop();
+}
 
 #[cfg(all(not(test), target_os = "none"))]
-static EMBEDDED_ROLE1_FUTURE_ARENA: EmbeddedFutureArena<APPKIT_EMBEDDED_ROLE1_FUTURE_BYTES> =
-    EmbeddedFutureArena::EMPTY;
+#[inline(always)]
+fn embedded_wait_for_event() {
+    #[cfg(target_arch = "arm")]
+    unsafe {
+        core::arch::asm!("wfe", options(nomem, nostack, preserves_flags));
+    }
+    #[cfg(not(target_arch = "arm"))]
+    core::hint::spin_loop();
+}
 
 #[cfg(all(not(test), target_os = "none"))]
 unsafe fn noop_waker_clone(data: *const ()) -> RawWaker {
-    assert!(data.is_null(), "appkit noop waker data must be null");
+    assert!(
+        data.is_null(),
+        "appkit noop waker clone data must be null: {:#010x}",
+        data as usize
+    );
     RawWaker::new(core::ptr::null(), &NOOP_WAKER_VTABLE)
 }
 
 #[cfg(all(not(test), target_os = "none"))]
 unsafe fn noop_waker_wake(data: *const ()) {
-    assert!(data.is_null(), "appkit noop waker data must be null");
+    assert!(
+        data.is_null(),
+        "appkit noop waker wake data must be null: {:#010x}",
+        data as usize
+    );
+    embedded_wake();
 }
 
 #[cfg(all(not(test), target_os = "none"))]
 unsafe fn noop_waker_wake_by_ref(data: *const ()) {
-    assert!(data.is_null(), "appkit noop waker data must be null");
+    assert!(
+        data.is_null(),
+        "appkit noop waker wake_by_ref data must be null: {:#010x}",
+        data as usize
+    );
+    embedded_wake();
 }
 
 #[cfg(all(not(test), target_os = "none"))]
 unsafe fn noop_waker_drop(data: *const ()) {
-    assert!(data.is_null(), "appkit noop waker data must be null");
+    assert!(
+        data.is_null(),
+        "appkit noop waker drop data must be null: {:#010x}",
+        data as usize
+    );
 }
 
 #[cfg(all(not(test), target_os = "none"))]
@@ -372,57 +570,51 @@ static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
 );
 
 #[cfg(all(not(test), target_os = "none"))]
-fn poll_localside_once<F, E>(future: F)
+#[inline(always)]
+fn embedded_task_waker(storage: EmbeddedAttachStorageRef<'static>) -> &'static Waker {
+    storage.waker.get()
+}
+
+#[cfg(all(not(test), target_os = "none"))]
+#[inline(always)]
+fn embedded_task_context(
+    storage: EmbeddedAttachStorageRef<'static>,
+) -> &'static mut Context<'static> {
+    let waker = embedded_task_waker(storage);
+    storage.context.get(waker)
+}
+
+#[cfg(all(not(test), target_os = "none"))]
+fn embedded_future_arena(storage: EmbeddedAttachStorageRef<'static>) -> (*mut u8, usize) {
+    (storage.future, storage.future_bytes)
+}
+
+#[cfg(all(not(test), target_os = "none"))]
+#[inline(never)]
+unsafe fn poll_embedded_stored_task<F, E>(ptr: *mut u8, cx: &mut Context<'_>) -> Poll<RoleResult<E>>
+where
+    F: core::future::Future<Output = RoleResult<E>>,
+{
+    let future = unsafe {
+        // SAFETY: `poll_localside_forever` wrote an initialized `F` into the
+        // role arena and polls it in place for the lifetime of the image.
+        &mut *ptr.cast::<F>()
+    };
+    let mut pinned = unsafe {
+        // SAFETY: The future remains in the fixed arena and is never moved
+        // after initialization.
+        Pin::new_unchecked(future)
+    };
+    pinned.as_mut().poll(cx)
+}
+
+#[cfg(all(not(test), target_os = "none"))]
+fn poll_localside_forever<F, E>(storage: EmbeddedAttachStorageRef<'static>, future: F) -> !
 where
     F: core::future::Future<Output = RoleResult<E>>,
     E: Debug,
 {
-    let raw = RawWaker::new(core::ptr::null(), &NOOP_WAKER_VTABLE);
-    let waker = unsafe {
-        // SAFETY: The vtable never dereferences the data pointer and all
-        // operations are no-ops suitable for a single immediate poll.
-        Waker::from_raw(raw)
-    };
-    let mut cx = Context::from_waker(&waker);
-    let mut pinned = core::pin::pin!(future);
-    match pinned.as_mut().poll(&mut cx) {
-        Poll::Pending => {}
-        Poll::Ready(Ok(done)) => match done {},
-        Poll::Ready(Err(error)) => {
-            panic!("appkit role task failed: {error:?}");
-        }
-    }
-}
-
-#[cfg(all(not(test), target_os = "none"))]
-fn embedded_future_arena_for_role<const ROLE: u8>() -> (*mut u8, usize) {
-    if ROLE == 0 {
-        (
-            EMBEDDED_ROLE0_FUTURE_ARENA.as_mut_ptr(),
-            APPKIT_EMBEDDED_ROLE0_FUTURE_BYTES,
-        )
-    } else {
-        (
-            EMBEDDED_ROLE1_FUTURE_ARENA.as_mut_ptr(),
-            APPKIT_EMBEDDED_ROLE1_FUTURE_BYTES,
-        )
-    }
-}
-
-#[cfg(all(not(test), target_os = "none"))]
-fn poll_localside_forever<const ROLE: u8, F, E>(future: F) -> !
-where
-    F: core::future::Future<Output = RoleResult<E>>,
-    E: Debug,
-{
-    let raw_waker = RawWaker::new(core::ptr::null(), &NOOP_WAKER_VTABLE);
-    let waker = unsafe {
-        // SAFETY: The vtable never dereferences the data pointer and all
-        // operations are no-ops suitable for cooperative embedded polling.
-        Waker::from_raw(raw_waker)
-    };
-    let mut task_context = Context::from_waker(&waker);
-    let (future_arena, future_arena_bytes) = embedded_future_arena_for_role::<ROLE>();
+    let (future_arena, future_arena_bytes) = embedded_future_arena(storage);
 
     assert!(
         size_of::<F>() <= future_arena_bytes,
@@ -436,13 +628,18 @@ where
     unsafe {
         let future_ptr = future_arena.cast::<F>();
         future_ptr.write(future);
-        let mut pinned = Pin::new_unchecked(&mut *future_ptr);
+        let poll = poll_embedded_stored_task::<F, E>;
         loop {
-            match pinned.as_mut().poll(&mut task_context) {
-                Poll::Pending => core::hint::spin_loop(),
+            let task_poll = {
+                let task_context = embedded_task_context(storage);
+                poll(future_arena, task_context)
+            };
+            match task_poll {
+                Poll::Pending => embedded_wait_for_event(),
                 Poll::Ready(Ok(done)) => match done {},
                 Poll::Ready(Err(error)) => {
-                    panic!("appkit embedded role {ROLE} task failed: {error:?}")
+                    core::hint::black_box(&error);
+                    panic!("appkit embedded role task failed: {error:?}")
                 }
             }
         }
@@ -450,15 +647,19 @@ where
 }
 
 #[cfg(all(not(test), target_os = "none"))]
-fn poll_embedded_role_future<const ROLE: u8, F, E>(requested_roles: RoleSet, future: F)
-where
+fn poll_embedded_role_future<F, E>(
+    requested_roles: RoleSet,
+    storage: EmbeddedAttachStorageRef<'static>,
+    future: F,
+) where
     F: core::future::Future<Output = RoleResult<E>>,
     E: Debug,
 {
-    if requested_roles.count() == 1 {
-        poll_localside_forever::<ROLE, F, E>(future);
-    }
-    poll_localside_once::<F, E>(future);
+    assert!(
+        requested_roles.count() == 1,
+        "bare-metal logical images attach exactly one role; split peer roles into separate logical images"
+    );
+    poll_localside_forever::<F, E>(storage, future);
 }
 
 /// Compact logical image identifier.
@@ -891,15 +1092,19 @@ pub trait LogicalImage<C: Capsule>: Sized {
     fn carrier<'a>() -> Self::Carrier<'a>;
     #[cfg(all(not(test), target_os = "none"))]
     fn attach_storage() -> EmbeddedAttachStorageRef<'static>;
-    #[cfg(feature = "wasm-engine-core")]
+    fn driver_facts() -> DriverFacts<'static> {
+        DriverFacts::EMPTY
+    }
+}
+
+/// Site-local storage facts required only by logical images that actually run a WASI guest.
+#[cfg(feature = "wasm-engine-core")]
+pub trait WasiGuestImage<C: Capsule>: LogicalImage<C> {
     fn wasi_guest_storage<'guest, const ROLE: u8>() -> WasiGuestStorage<'guest>;
-    #[cfg(feature = "wasm-engine-core")]
+
     fn wasi_budget<const ROLE: u8>() -> BudgetRun {
         core::hint::black_box(ROLE);
         BudgetRun::new(1, 0, APPKIT_DEFAULT_WASI_FUEL_PER_ACTIVATION, 0)
-    }
-    fn driver_facts() -> DriverFacts<'static> {
-        DriverFacts::EMPTY
     }
 }
 
@@ -1041,16 +1246,33 @@ mod artifact_seal {
     pub trait Sealed {}
 }
 
-/// Internal artifact evidence consumed by [`run`] while validating a logical image.
+/// Internal artifact evidence consumed by [`run`] while attaching a logical image.
 ///
 /// This trait is public only as a sealed generic bound for wrappers that are
 /// themselves generic over a capsule. User code should select `WasiImage` or
-/// `NoWasi`; it cannot implement new artifact authority.
+/// `NoWasi`; it cannot implement new artifact authority. Static WASI import
+/// tables are load evidence only, never choreography admission authority.
 #[doc(hidden)]
 pub trait ArtifactEvidence: artifact_seal::Sealed {
     fn byte_len(&self) -> usize;
     fn wasi_bytes(&self) -> Option<&[u8]>;
-    fn validate(&self, required: WasiImports) -> bool;
+}
+
+/// Artifact-driven access to WASI guest storage.
+///
+/// `NoWasi` never leases storage. `WasiImage` requires the selected logical
+/// image to implement [`WasiGuestImage`]. This keeps the public `run` path
+/// single while preventing non-WASI images from carrying dummy storage methods.
+#[doc(hidden)]
+pub trait ArtifactGuestStorage<C: Capsule, I: LogicalImage<C>>: ArtifactEvidence {
+    #[cfg(feature = "wasm-engine-core")]
+    fn wasi_guest_storage<'guest, const ROLE: u8>() -> Option<WasiGuestStorage<'guest>>;
+
+    #[cfg(feature = "wasm-engine-core")]
+    fn wasi_budget<const ROLE: u8>() -> BudgetRun {
+        core::hint::black_box(ROLE);
+        BudgetRun::new(1, 0, APPKIT_DEFAULT_WASI_FUEL_PER_ACTIVATION, 0)
+    }
 }
 
 /// Endpoint/carrier facts validated for one logical image run.
@@ -1065,7 +1287,10 @@ pub struct EndpointCarrierFacts {
     carrier: CarrierKind,
     wasi_imports: WasiImports,
     wasi_completion_pair_count: u8,
-    has_wasi_import_loop_control: bool,
+    wasi_loop_continue_head_labels: [u8; 16],
+    wasi_loop_continue_head_count: u8,
+    wasi_loop_break_head_labels: [u8; 16],
+    wasi_loop_break_head_count: u8,
 }
 
 #[cfg(feature = "wasm-engine-core")]
@@ -1077,7 +1302,7 @@ pub enum WasiGuestStatus {
 }
 
 #[cfg(feature = "wasm-engine-core")]
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum WasiGuestError {
     NoWasiArtifact,
     GuestRejected(crate::kernel::engine::wasm::Error),
@@ -1142,13 +1367,10 @@ impl EndpointCarrierFacts {
             carrier,
             wasi_imports: projection.wasi_imports,
             wasi_completion_pair_count: projection.wasi_completion_pair_count,
-            has_wasi_import_loop_control: projection_has_label(
-                projection,
-                LABEL_WASI_IMPORT_LOOP_CONTINUE_CONTROL,
-            ) && projection_has_label(
-                projection,
-                LABEL_WASI_IMPORT_LOOP_BREAK_CONTROL,
-            ),
+            wasi_loop_continue_head_labels: projection.wasi_loop_continue_head_labels,
+            wasi_loop_continue_head_count: projection.wasi_loop_continue_head_count,
+            wasi_loop_break_head_labels: projection.wasi_loop_break_head_labels,
+            wasi_loop_break_head_count: projection.wasi_loop_break_head_count,
         }
     }
 
@@ -1187,12 +1409,31 @@ impl EndpointCarrierFacts {
     pub const fn wasi_completion_pair_count(self) -> u8 {
         self.wasi_completion_pair_count
     }
+
+    #[cfg(feature = "wasm-engine-core")]
+    const fn requires_wasi_loop_continue_for_label(self, label: u8) -> bool {
+        label_array_contains(
+            self.wasi_loop_continue_head_labels,
+            self.wasi_loop_continue_head_count,
+            label,
+        )
+    }
+
+    #[cfg(feature = "wasm-engine-core")]
+    const fn requires_wasi_loop_break_for_label(self, label: u8) -> bool {
+        label_array_contains(
+            self.wasi_loop_break_head_labels,
+            self.wasi_loop_break_head_count,
+            label,
+        )
+    }
 }
 
-const fn projection_has_label(projection: ProjectionCaps, label: u8) -> bool {
+#[cfg(feature = "wasm-engine-core")]
+const fn label_array_contains(labels: [u8; 16], count: u8, label: u8) -> bool {
     let mut idx = 0usize;
-    while idx < projection.label_count as usize {
-        if projection.labels[idx] == label {
+    while idx < count as usize {
+        if labels[idx] == label {
             return true;
         }
         idx += 1;
@@ -1204,30 +1445,6 @@ const fn session_id_from_projection(projection: ProjectionCaps) -> u32 {
     let mixed = projection.fingerprint[0] ^ projection.fingerprint[1].rotate_left(17);
     let folded = (mixed as u32) ^ ((mixed >> 32) as u32);
     if folded == 0 { 1 } else { folded }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ArtifactError {
-    BadWasmMagic,
-    MalformedWasm,
-    UnsupportedWasiImport,
-}
-
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    if needle.len() > haystack.len() {
-        return false;
-    }
-    let mut idx = 0usize;
-    while idx + needle.len() <= haystack.len() {
-        if &haystack[idx..idx + needle.len()] == needle {
-            return true;
-        }
-        idx += 1;
-    }
-    false
 }
 
 fn wasi_import_for_engine_req_label(label: u8) -> Option<WasiImports> {
@@ -1279,139 +1496,6 @@ fn wasi_completion_label_for_engine_req_label(label: u8) -> Option<u8> {
     }
 }
 
-fn import_name_to_wasi(name: &[u8]) -> Option<WasiImports> {
-    match name {
-        b"fd_write" => Some(WasiImports::FD_WRITE),
-        b"fd_read" => Some(WasiImports::FD_READ),
-        b"fd_fdstat_get" => Some(WasiImports::FD_FDSTAT_GET),
-        b"fd_close" => Some(WasiImports::FD_CLOSE),
-        b"clock_res_get" => Some(WasiImports::CLOCK_RES_GET),
-        b"clock_time_get" => Some(WasiImports::CLOCK_TIME_GET),
-        b"poll_oneoff" => Some(WasiImports::POLL_ONEOFF),
-        b"random_get" => Some(WasiImports::RANDOM_GET),
-        b"proc_exit" => Some(WasiImports::PROC_EXIT),
-        b"args_sizes_get" => Some(WasiImports::ARGS_SIZES_GET),
-        b"args_get" => Some(WasiImports::ARGS_GET),
-        b"environ_sizes_get" => Some(WasiImports::ENVIRON_SIZES_GET),
-        b"environ_get" => Some(WasiImports::ENVIRON_GET),
-        b"path_open" => Some(WasiImports::PATH_OPEN),
-        b"fd_readdir" => Some(WasiImports::FD_READDIR),
-        _ => None,
-    }
-}
-
-fn read_byte(bytes: &[u8], cursor: &mut usize) -> Result<u8, ArtifactError> {
-    if *cursor >= bytes.len() {
-        return Err(ArtifactError::MalformedWasm);
-    }
-    let value = bytes[*cursor];
-    *cursor += 1;
-    Ok(value)
-}
-
-fn read_leb_u32(bytes: &[u8], cursor: &mut usize) -> Result<u32, ArtifactError> {
-    let mut result = 0u32;
-    let mut shift = 0u32;
-    let mut count = 0u8;
-    while count < 5 {
-        let byte = read_byte(bytes, cursor)?;
-        result |= ((byte & 0x7f) as u32) << shift;
-        if byte & 0x80 == 0 {
-            return Ok(result);
-        }
-        shift += 7;
-        count += 1;
-    }
-    Err(ArtifactError::MalformedWasm)
-}
-
-fn read_name<'a>(bytes: &'a [u8], cursor: &mut usize) -> Result<&'a [u8], ArtifactError> {
-    let len = read_leb_u32(bytes, cursor)? as usize;
-    let end = cursor
-        .checked_add(len)
-        .ok_or(ArtifactError::MalformedWasm)?;
-    if end > bytes.len() {
-        return Err(ArtifactError::MalformedWasm);
-    }
-    let name = &bytes[*cursor..end];
-    *cursor = end;
-    Ok(name)
-}
-
-fn skip_import_desc(bytes: &[u8], cursor: &mut usize, kind: u8) -> Result<(), ArtifactError> {
-    match kind {
-        0x00 => {
-            read_leb_u32(bytes, cursor)?;
-        }
-        0x01 => {
-            read_byte(bytes, cursor)?;
-            read_leb_u32(bytes, cursor)?;
-            let flags = read_leb_u32(bytes, cursor)?;
-            read_leb_u32(bytes, cursor)?;
-            if flags & 0x01 != 0 {
-                read_leb_u32(bytes, cursor)?;
-            }
-        }
-        0x02 => {
-            let flags = read_leb_u32(bytes, cursor)?;
-            read_leb_u32(bytes, cursor)?;
-            if flags & 0x01 != 0 {
-                read_leb_u32(bytes, cursor)?;
-            }
-        }
-        0x03 => {
-            read_byte(bytes, cursor)?;
-            read_byte(bytes, cursor)?;
-        }
-        _ => return Err(ArtifactError::MalformedWasm),
-    }
-    Ok(())
-}
-
-fn parse_wasip1_imports(bytes: &[u8]) -> Result<WasiImports, ArtifactError> {
-    if bytes.len() < 8 || &bytes[..4] != b"\0asm" || &bytes[4..8] != b"\x01\0\0\0" {
-        return Err(ArtifactError::BadWasmMagic);
-    }
-
-    let mut cursor = 8usize;
-    let mut imports = WasiImports::EMPTY;
-    while cursor < bytes.len() {
-        let section_id = read_byte(bytes, &mut cursor)?;
-        let section_size = read_leb_u32(bytes, &mut cursor)? as usize;
-        let section_end = cursor
-            .checked_add(section_size)
-            .ok_or(ArtifactError::MalformedWasm)?;
-        if section_end > bytes.len() {
-            return Err(ArtifactError::MalformedWasm);
-        }
-        if section_id == 2 {
-            let mut section_cursor = cursor;
-            let count = read_leb_u32(bytes, &mut section_cursor)?;
-            let mut item = 0u32;
-            while item < count {
-                let module = read_name(bytes, &mut section_cursor)?;
-                let name = read_name(bytes, &mut section_cursor)?;
-                let kind = read_byte(bytes, &mut section_cursor)?;
-                if module == b"wasi_snapshot_preview1" {
-                    if kind != 0 {
-                        return Err(ArtifactError::UnsupportedWasiImport);
-                    }
-                    let import =
-                        import_name_to_wasi(name).ok_or(ArtifactError::UnsupportedWasiImport)?;
-                    imports = imports.union(import);
-                }
-                skip_import_desc(bytes, &mut section_cursor, kind)?;
-                item += 1;
-            }
-            if section_cursor != section_end {
-                return Err(ArtifactError::MalformedWasm);
-            }
-        }
-        cursor = section_end;
-    }
-    Ok(imports)
-}
-
 impl ArtifactEvidence for WasiImage<'_> {
     fn byte_len(&self) -> usize {
         self.bytes.len()
@@ -1420,42 +1504,32 @@ impl ArtifactEvidence for WasiImage<'_> {
     fn wasi_bytes(&self) -> Option<&[u8]> {
         Some(self.bytes)
     }
-
-    fn validate(&self, required: WasiImports) -> bool {
-        if self.bytes.is_empty() {
-            return false;
-        }
-        if !self.bytes.starts_with(b"\0asm") {
-            return false;
-        }
-        if !contains_bytes(self.bytes, b"wasi_snapshot_preview1") {
-            return false;
-        }
-        for forbidden in [
-            b"wasi_snapshot_preview2".as_slice(),
-            b"wasm32-wasip2".as_slice(),
-            b"wit-bindgen".as_slice(),
-            b"wit_component".as_slice(),
-            b"component-model".as_slice(),
-        ] {
-            if contains_bytes(self.bytes, forbidden) {
-                return false;
-            }
-        }
-        let Ok(observed) = parse_wasip1_imports(self.bytes) else {
-            return false;
-        };
-        if observed.is_empty() {
-            return false;
-        }
-        if !required.is_subset_of(observed) {
-            return false;
-        }
-        true
-    }
 }
 
 impl artifact_seal::Sealed for WasiImage<'_> {}
+
+#[cfg(feature = "wasm-engine-core")]
+impl<'a, C, I> ArtifactGuestStorage<C, I> for WasiImage<'a>
+where
+    C: Capsule,
+    I: WasiGuestImage<C>,
+{
+    fn wasi_guest_storage<'guest, const ROLE: u8>() -> Option<WasiGuestStorage<'guest>> {
+        Some(I::wasi_guest_storage::<ROLE>())
+    }
+
+    fn wasi_budget<const ROLE: u8>() -> BudgetRun {
+        I::wasi_budget::<ROLE>()
+    }
+}
+
+#[cfg(not(feature = "wasm-engine-core"))]
+impl<'a, C, I> ArtifactGuestStorage<C, I> for WasiImage<'a>
+where
+    C: Capsule,
+    I: LogicalImage<C>,
+{
+}
 
 impl ArtifactEvidence for NoWasi {
     fn byte_len(&self) -> usize {
@@ -1465,13 +1539,21 @@ impl ArtifactEvidence for NoWasi {
     fn wasi_bytes(&self) -> Option<&[u8]> {
         None
     }
-
-    fn validate(&self, required: WasiImports) -> bool {
-        required.is_empty()
-    }
 }
 
 impl artifact_seal::Sealed for NoWasi {}
+
+impl<C, I> ArtifactGuestStorage<C, I> for NoWasi
+where
+    C: Capsule,
+    I: LogicalImage<C>,
+{
+    #[cfg(feature = "wasm-engine-core")]
+    fn wasi_guest_storage<'guest, const ROLE: u8>() -> Option<WasiGuestStorage<'guest>> {
+        core::hint::black_box(ROLE);
+        None
+    }
+}
 
 /// Metadata-derived capacity facts for a capsule program.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1486,6 +1568,10 @@ pub struct ProjectionCaps {
     pub control_count: u16,
     pub wasi_imports: WasiImports,
     pub wasi_completion_pair_count: u8,
+    pub wasi_loop_continue_head_labels: [u8; 16],
+    pub wasi_loop_continue_head_count: u8,
+    pub wasi_loop_break_head_labels: [u8; 16],
+    pub wasi_loop_break_head_count: u8,
     pub role_count: u8,
     pub eff_count: u16,
     pub scope_count: u16,
@@ -1495,6 +1581,7 @@ pub struct ProjectionCaps {
     pub has_parallel: bool,
     pub has_policy: bool,
     pub has_control: bool,
+    pub capacity_overflow: bool,
 }
 
 struct ProjectionCapsVisitor {
@@ -1504,6 +1591,10 @@ struct ProjectionCapsVisitor {
     engine_req_label_count: u8,
     engine_ret_labels: [u8; 32],
     engine_ret_label_count: u8,
+    loop_continue_eff_indices: [u16; 16],
+    loop_continue_eff_count: u8,
+    loop_break_eff_indices: [u16; 16],
+    loop_break_eff_count: u8,
 }
 
 impl ProjectionCapsVisitor {
@@ -1520,6 +1611,10 @@ impl ProjectionCapsVisitor {
                 control_count: 0,
                 wasi_imports: WasiImports::EMPTY,
                 wasi_completion_pair_count: 0,
+                wasi_loop_continue_head_labels: [0; 16],
+                wasi_loop_continue_head_count: 0,
+                wasi_loop_break_head_labels: [0; 16],
+                wasi_loop_break_head_count: 0,
                 role_count: 0,
                 eff_count: 0,
                 scope_count: 0,
@@ -1529,12 +1624,17 @@ impl ProjectionCapsVisitor {
                 has_parallel: false,
                 has_policy: false,
                 has_control: false,
+                capacity_overflow: false,
             },
             import_roles: None,
             engine_req_labels: [0; 32],
             engine_req_label_count: 0,
             engine_ret_labels: [0; 32],
             engine_ret_label_count: 0,
+            loop_continue_eff_indices: [0; 16],
+            loop_continue_eff_count: 0,
+            loop_break_eff_indices: [0; 16],
+            loop_break_eff_count: 0,
         }
     }
 
@@ -1551,6 +1651,10 @@ impl ProjectionCapsVisitor {
                 control_count: 0,
                 wasi_imports: WasiImports::EMPTY,
                 wasi_completion_pair_count: 0,
+                wasi_loop_continue_head_labels: [0; 16],
+                wasi_loop_continue_head_count: 0,
+                wasi_loop_break_head_labels: [0; 16],
+                wasi_loop_break_head_count: 0,
                 role_count: 0,
                 eff_count: 0,
                 scope_count: 0,
@@ -1560,12 +1664,17 @@ impl ProjectionCapsVisitor {
                 has_parallel: false,
                 has_policy: false,
                 has_control: false,
+                capacity_overflow: false,
             },
             import_roles: Some(import_roles),
             engine_req_labels: [0; 32],
             engine_req_label_count: 0,
             engine_ret_labels: [0; 32],
             engine_ret_label_count: 0,
+            loop_continue_eff_indices: [0; 16],
+            loop_continue_eff_count: 0,
+            loop_break_eff_indices: [0; 16],
+            loop_break_eff_count: 0,
         }
     }
 
@@ -1580,6 +1689,8 @@ impl ProjectionCapsVisitor {
         if idx < self.caps.labels.len() {
             self.caps.labels[idx] = label;
             self.caps.label_count += 1;
+        } else {
+            self.caps.capacity_overflow = true;
         }
     }
 
@@ -1594,6 +1705,8 @@ impl ProjectionCapsVisitor {
         if idx < self.caps.policies.len() {
             self.caps.policies[idx] = policy_id;
             self.caps.policy_count += 1;
+        } else {
+            self.caps.capacity_overflow = true;
         }
     }
 
@@ -1609,6 +1722,94 @@ impl ProjectionCapsVisitor {
             self.caps.control_ops[idx] = op;
             self.caps.control_tap_ids[idx] = tap_id;
             self.caps.control_count += 1;
+        } else {
+            self.caps.capacity_overflow = true;
+        }
+    }
+
+    fn push_loop_continue_eff(&mut self, eff_index: u16) {
+        let mut idx = 0usize;
+        while idx < self.loop_continue_eff_count as usize {
+            if self.loop_continue_eff_indices[idx] == eff_index {
+                return;
+            }
+            idx += 1;
+        }
+        if idx < self.loop_continue_eff_indices.len() {
+            self.loop_continue_eff_indices[idx] = eff_index;
+            self.loop_continue_eff_count += 1;
+        } else {
+            self.caps.capacity_overflow = true;
+        }
+    }
+
+    fn push_loop_break_eff(&mut self, eff_index: u16) {
+        let mut idx = 0usize;
+        while idx < self.loop_break_eff_count as usize {
+            if self.loop_break_eff_indices[idx] == eff_index {
+                return;
+            }
+            idx += 1;
+        }
+        if idx < self.loop_break_eff_indices.len() {
+            self.loop_break_eff_indices[idx] = eff_index;
+            self.loop_break_eff_count += 1;
+        } else {
+            self.caps.capacity_overflow = true;
+        }
+    }
+
+    fn has_loop_continue_head_eff(&self, eff_index: u16) -> bool {
+        let mut idx = 0usize;
+        while idx < self.loop_continue_eff_count as usize {
+            if self.loop_continue_eff_indices[idx].saturating_add(1) == eff_index {
+                return true;
+            }
+            idx += 1;
+        }
+        false
+    }
+
+    fn has_loop_break_head_eff(&self, eff_index: u16) -> bool {
+        let mut idx = 0usize;
+        while idx < self.loop_break_eff_count as usize {
+            if self.loop_break_eff_indices[idx].saturating_add(1) == eff_index {
+                return true;
+            }
+            idx += 1;
+        }
+        false
+    }
+
+    fn push_wasi_loop_continue_head_label(&mut self, label: u8) {
+        let mut idx = 0usize;
+        while idx < self.caps.wasi_loop_continue_head_count as usize {
+            if self.caps.wasi_loop_continue_head_labels[idx] == label {
+                return;
+            }
+            idx += 1;
+        }
+        if idx < self.caps.wasi_loop_continue_head_labels.len() {
+            self.caps.wasi_loop_continue_head_labels[idx] = label;
+            self.caps.wasi_loop_continue_head_count += 1;
+        } else {
+            self.caps.capacity_overflow = true;
+        }
+    }
+
+    fn push_wasi_loop_break_head_label(&mut self, label: u8) {
+        let mut idx = 0usize;
+        while idx < self.caps.wasi_loop_break_head_count as usize {
+            if self.caps.wasi_loop_break_head_labels[idx] == label {
+                return;
+            }
+            idx += 1;
+        }
+        if idx < self.caps.wasi_loop_break_head_labels.len() {
+            self.caps.wasi_loop_break_head_labels[idx] = label;
+            self.caps.wasi_loop_break_head_count += 1;
+        } else {
+            self.caps.capacity_overflow = true;
         }
     }
 
@@ -1623,6 +1824,8 @@ impl ProjectionCapsVisitor {
         if idx < self.engine_req_labels.len() {
             self.engine_req_labels[idx] = label;
             self.engine_req_label_count += 1;
+        } else {
+            self.caps.capacity_overflow = true;
         }
     }
 
@@ -1637,6 +1840,8 @@ impl ProjectionCapsVisitor {
         if idx < self.engine_ret_labels.len() {
             self.engine_ret_labels[idx] = label;
             self.engine_ret_label_count += 1;
+        } else {
+            self.caps.capacity_overflow = true;
         }
     }
 
@@ -2021,6 +2226,8 @@ struct AttachProjectedRoles<
     tasks_lifetime: PhantomData<&'tasks mut ()>,
     capsule_lifetime: PhantomData<C>,
     image_lifetime: PhantomData<ImageTy>,
+    #[cfg(all(not(test), target_os = "none"))]
+    embedded_storage: EmbeddedAttachStorageRef<'static>,
     #[cfg(any(test, not(target_os = "none")))]
     tasks: &'tasks mut ScheduledTasks<'kit, RoleTaskError<<C::Local as Localside<C>>::Error>>,
 }
@@ -2043,6 +2250,7 @@ where
     C: Capsule + 'kit,
     C::Local: 'kit,
     ImageTy: LogicalImage<C> + 'kit,
+    ImageTy::Artifact: ArtifactGuestStorage<C, ImageTy>,
     TransportTy: hibana::integration::Transport + 'cfg,
     UniverseTy: hibana::integration::runtime::LabelUniverse + 'cfg,
     ClockTy: hibana::integration::runtime::Clock + 'cfg,
@@ -2050,6 +2258,10 @@ where
     'guest: 'kit,
 {
     fn visit<const ROLE: u8>(&mut self, program: hibana::integration::program::RoleProgram<ROLE>) {
+        assert!(
+            self.rendezvous.raw() != u16::MAX,
+            "appkit projected role visitor holds invalid rendezvous id before enter"
+        );
         let endpoint = match self.kit.enter::<ROLE, _>(
             self.rendezvous,
             self.session,
@@ -2073,18 +2285,31 @@ where
         match role_kind {
             RoleKind::Engine => {
                 #[cfg(feature = "wasm-engine-core")]
+                let guest_storage =
+                    <ImageTy::Artifact as ArtifactGuestStorage<C, ImageTy>>::wasi_guest_storage::<
+                        ROLE,
+                    >();
+                #[cfg(feature = "wasm-engine-core")]
+                let has_wasi_guest = self.wasi_guest_bytes.is_some();
+                #[cfg(feature = "wasm-engine-core")]
+                assert_eq!(
+                    has_wasi_guest,
+                    guest_storage.is_some(),
+                    "WASI guest artifact and logical image storage capability must match"
+                );
+                #[cfg(feature = "wasm-engine-core")]
                 let ctx = EngineCtx::new(
                     endpoint_ctx,
                     self.endpoint_carrier,
                     self.wasi_guest_bytes,
-                    ImageTy::wasi_guest_storage::<ROLE>(),
+                    guest_storage,
                 );
                 #[cfg(not(feature = "wasm-engine-core"))]
                 let ctx =
                     EngineCtx::new(endpoint_ctx, self.endpoint_carrier, self.wasi_guest_bytes);
                 #[cfg(feature = "wasm-engine-core")]
                 {
-                    if self.wasi_guest_bytes.is_some() {
+                    if has_wasi_guest {
                         #[cfg(any(test, not(target_os = "none")))]
                         self.tasks
                             .push(wasi_role_task::<_, <C::Local as Localside<C>>::Error>(
@@ -2092,11 +2317,11 @@ where
                             ));
                         #[cfg(all(not(test), target_os = "none"))]
                         poll_embedded_role_future::<
-                            ROLE,
                             _,
                             RoleTaskError<<C::Local as Localside<C>>::Error>,
                         >(
                             ImageTy::REQUESTED_ROLES,
+                            self.embedded_storage,
                             wasi_role_task::<_, <C::Local as Localside<C>>::Error>(
                                 drive_canonical_wasi_engine::<C, ImageTy, ROLE>(ctx),
                             ),
@@ -2108,11 +2333,11 @@ where
                         ));
                         #[cfg(all(not(test), target_os = "none"))]
                         poll_embedded_role_future::<
-                            ROLE,
                             _,
                             RoleTaskError<<C::Local as Localside<C>>::Error>,
                         >(
                             ImageTy::REQUESTED_ROLES,
+                            self.embedded_storage,
                             local_role_task(<C::Local as Localside<C>>::engine::<ROLE>(ctx)),
                         );
                     }
@@ -2129,12 +2354,9 @@ where
                             ctx,
                         )));
                     #[cfg(all(not(test), target_os = "none"))]
-                    poll_embedded_role_future::<
-                        ROLE,
-                        _,
-                        RoleTaskError<<C::Local as Localside<C>>::Error>,
-                    >(
+                    poll_embedded_role_future::<_, RoleTaskError<<C::Local as Localside<C>>::Error>>(
                         ImageTy::REQUESTED_ROLES,
+                        self.embedded_storage,
                         local_role_task(<C::Local as Localside<C>>::engine::<ROLE>(ctx)),
                     );
                 }
@@ -2147,12 +2369,9 @@ where
                         ctx,
                     )));
                 #[cfg(all(not(test), target_os = "none"))]
-                poll_embedded_role_future::<
-                    ROLE,
-                    _,
-                    RoleTaskError<<C::Local as Localside<C>>::Error>,
-                >(
+                poll_embedded_role_future::<_, RoleTaskError<<C::Local as Localside<C>>::Error>>(
                     ImageTy::REQUESTED_ROLES,
+                    self.embedded_storage,
                     local_role_task(<C::Local as Localside<C>>::driver::<ROLE>(ctx)),
                 );
             }
@@ -2163,12 +2382,9 @@ where
                     <C::Local as Localside<C>>::boundary::<ROLE>(ctx),
                 ));
                 #[cfg(all(not(test), target_os = "none"))]
-                poll_embedded_role_future::<
-                    ROLE,
-                    _,
-                    RoleTaskError<<C::Local as Localside<C>>::Error>,
-                >(
+                poll_embedded_role_future::<_, RoleTaskError<<C::Local as Localside<C>>::Error>>(
                     ImageTy::REQUESTED_ROLES,
+                    self.embedded_storage,
                     local_role_task(<C::Local as Localside<C>>::boundary::<ROLE>(ctx)),
                 );
             }
@@ -2180,12 +2396,9 @@ where
                         ctx,
                     )));
                 #[cfg(all(not(test), target_os = "none"))]
-                poll_embedded_role_future::<
-                    ROLE,
-                    _,
-                    RoleTaskError<<C::Local as Localside<C>>::Error>,
-                >(
+                poll_embedded_role_future::<_, RoleTaskError<<C::Local as Localside<C>>::Error>>(
                     ImageTy::REQUESTED_ROLES,
+                    self.embedded_storage,
                     local_role_task(<C::Local as Localside<C>>::link::<ROLE>(ctx)),
                 );
             }
@@ -2197,12 +2410,9 @@ where
                         ROLE,
                     >(ctx)));
                 #[cfg(all(not(test), target_os = "none"))]
-                poll_embedded_role_future::<
-                    ROLE,
-                    _,
-                    RoleTaskError<<C::Local as Localside<C>>::Error>,
-                >(
+                poll_embedded_role_future::<_, RoleTaskError<<C::Local as Localside<C>>::Error>>(
                     ImageTy::REQUESTED_ROLES,
+                    self.embedded_storage,
                     local_role_task(<C::Local as Localside<C>>::supervisor::<ROLE>(ctx)),
                 );
             }
@@ -2228,6 +2438,7 @@ fn attach_projected_roles<C, I>(
 where
     C: Capsule,
     I: LogicalImage<C>,
+    I::Artifact: ArtifactGuestStorage<C, I>,
 {
     #[cfg(any(test, not(target_os = "none")))]
     let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
@@ -2236,9 +2447,9 @@ where
     #[cfg(all(not(test), target_os = "none"))]
     let embedded_storage = embedded_attach_storage::<C, I>();
     #[cfg(all(not(test), target_os = "none"))]
-    let attach_tap = embedded_storage.tap;
+    let attach_tap = unsafe { &mut *embedded_storage.tap };
     #[cfg(all(not(test), target_os = "none"))]
-    let attach_slab = embedded_storage.slab;
+    let attach_slab = unsafe { &mut *embedded_storage.slab };
     #[cfg(any(test, not(target_os = "none")))]
     let attach_tap = &mut tap_buf;
     #[cfg(any(test, not(target_os = "none")))]
@@ -2274,6 +2485,11 @@ where
     let rendezvous = kit
         .add_rendezvous_from_config(config, carrier)
         .expect("appkit attach carrier must register rendezvous");
+    let rendezvous_raw = rendezvous.raw();
+    assert!(
+        rendezvous_raw != u16::MAX,
+        "appkit registered invalid rendezvous id"
+    );
     let session = hibana::integration::ids::SessionId::new(endpoint_carrier.session_id());
     {
         let mut resolver_registry = AttachResolverRegistry::<
@@ -2295,9 +2511,19 @@ where
         };
         C::register_resolvers(&mut resolver_registry);
     }
+    assert_eq!(
+        rendezvous.raw(),
+        rendezvous_raw,
+        "appkit rendezvous id changed during resolver registration"
+    );
     #[cfg(any(test, not(target_os = "none")))]
     let mut tasks = ScheduledTasks::new();
     let summary = {
+        assert_eq!(
+            rendezvous.raw(),
+            rendezvous_raw,
+            "appkit rendezvous id changed before projected role attach"
+        );
         let mut visitor = AttachProjectedRoles {
             kit: &kit,
             rendezvous,
@@ -2310,6 +2536,8 @@ where
             tasks_lifetime: PhantomData,
             capsule_lifetime: PhantomData::<C>,
             image_lifetime: PhantomData::<I>,
+            #[cfg(all(not(test), target_os = "none"))]
+            embedded_storage,
             #[cfg(any(test, not(target_os = "none")))]
             tasks: &mut tasks,
         };
@@ -2346,6 +2574,17 @@ impl hibana::integration::program::ProjectionMetadataVisitor for ProjectionCapsV
         if let (Some(op), Some(tap_id)) = (spec.control_op, spec.control_tap_id) {
             self.push_control(op, tap_id);
         }
+        if spec.control_op
+            == Some(hibana::integration::cap::advanced::ControlOp::LoopContinue.as_u8())
+            && spec.label == LABEL_WASI_IMPORT_LOOP_CONTINUE_CONTROL
+        {
+            self.push_loop_continue_eff(spec.eff_index);
+        }
+        if spec.control_op == Some(hibana::integration::cap::advanced::ControlOp::LoopBreak.as_u8())
+            && spec.label == LABEL_WASI_IMPORT_LOOP_BREAK_CONTROL
+        {
+            self.push_loop_break_eff(spec.eff_index);
+        }
     }
 
     fn visit_message(&mut self, spec: hibana::integration::program::ProjectionMessageSpec) {
@@ -2367,6 +2606,12 @@ impl hibana::integration::program::ProjectionMetadataVisitor for ProjectionCapsV
             };
             if include_import {
                 self.caps.wasi_imports = self.caps.wasi_imports.union(import);
+                if self.has_loop_continue_head_eff(spec.eff_index) {
+                    self.push_wasi_loop_continue_head_label(spec.label);
+                }
+                if self.has_loop_break_head_eff(spec.eff_index) {
+                    self.push_wasi_loop_break_head_label(spec.label);
+                }
             }
         }
     }
@@ -3022,7 +3267,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         endpoint: RoleEndpointCtx<'endpoint, C, ROLE>,
         endpoint_carrier: EndpointCarrierFacts,
         wasi_guest_bytes: Option<&'guest [u8]>,
-        #[cfg(feature = "wasm-engine-core")] guest_storage: WasiGuestStorage<'guest>,
+        #[cfg(feature = "wasm-engine-core")] guest_storage: Option<WasiGuestStorage<'guest>>,
     ) -> Self {
         #[cfg(not(feature = "wasm-engine-core"))]
         core::hint::black_box(wasi_guest_bytes);
@@ -3032,7 +3277,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
             #[cfg(feature = "wasm-engine-core")]
             wasi_guest_bytes,
             #[cfg(feature = "wasm-engine-core")]
-            guest_storage: Some(guest_storage),
+            guest_storage,
             #[cfg(feature = "wasm-engine-core")]
             guest_slot: None,
             #[cfg(not(feature = "wasm-engine-core"))]
@@ -3074,6 +3319,8 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         &mut self,
         request: EngineReq,
     ) -> Result<EngineRet, WasiGuestError> {
+        self.admit_wasi_import_loop_continue_for_label(REQUEST_LABEL)
+            .await?;
         self.endpoint_send::<REQUEST_LABEL>(request).await?;
         match self
             .endpoint()
@@ -3089,13 +3336,19 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
     }
 
     #[cfg(feature = "wasm-engine-core")]
-    async fn admit_wasi_import_loop_continue(&mut self) -> Result<(), WasiGuestError> {
-        if !self.endpoint_carrier.has_wasi_import_loop_control {
-            return Err(WasiGuestError::EndpointRejected(0x5745_6000));
+    async fn admit_wasi_import_loop_continue_for_label(
+        &mut self,
+        label: u8,
+    ) -> Result<(), WasiGuestError> {
+        if !self
+            .endpoint_carrier
+            .requires_wasi_loop_continue_for_label(label)
+        {
+            return Ok(());
         }
         let flow = match self.endpoint().flow::<WasiImportLoopContinue>() {
             Ok(flow) => flow,
-            Err(..) => return Ok(()),
+            Err(error) => return Err(WasiGuestError::endpoint(0x5745_6000, error)),
         };
         match flow.send(()).await {
             Ok(()) => Ok(()),
@@ -3104,9 +3357,15 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
     }
 
     #[cfg(feature = "wasm-engine-core")]
-    async fn admit_wasi_import_loop_break(&mut self) -> Result<(), WasiGuestError> {
-        if !self.endpoint_carrier.has_wasi_import_loop_control {
-            return Err(WasiGuestError::EndpointRejected(0x5745_6200));
+    async fn admit_wasi_import_loop_break_for_label(
+        &mut self,
+        label: u8,
+    ) -> Result<(), WasiGuestError> {
+        if !self
+            .endpoint_carrier
+            .requires_wasi_loop_break_for_label(label)
+        {
+            return Ok(());
         }
         let flow = match self.endpoint().flow::<WasiImportLoopBreak>() {
             Ok(flow) => flow,
@@ -3164,7 +3423,10 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                     let Some(status) = exit.as_protocol_status() else {
                         break Err(WasiGuestError::UnexpectedReply);
                     };
-                    if let Err(error) = self.admit_wasi_import_loop_break().await {
+                    if let Err(error) = self
+                        .admit_wasi_import_loop_break_for_label(LABEL_WASI_PROC_EXIT)
+                        .await
+                    {
                         break Err(error);
                     }
                     if let Err(error) = self
@@ -3176,9 +3438,6 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                     break Ok(WasiGuestStatus::Exit(status));
                 }
                 Ok(crate::kernel::engine::wasm::Event::Call(call)) => {
-                    if let Err(error) = self.admit_wasi_import_loop_continue().await {
-                        break Err(error);
-                    }
                     if let Err(error) = self.drive_wasi_call(call).await {
                         break Err(error);
                     }
@@ -3467,9 +3726,15 @@ async fn drive_canonical_wasi_engine<'endpoint, 'guest, C, I, const ROLE: u8>(
 where
     C: Capsule,
     I: LogicalImage<C>,
+    I::Artifact: ArtifactGuestStorage<C, I>,
 {
     loop {
-        match ctx.drive_wasi_guest(I::wasi_budget::<ROLE>()).await {
+        match ctx
+            .drive_wasi_guest(<I::Artifact as ArtifactGuestStorage<C, I>>::wasi_budget::<
+                ROLE,
+            >())
+            .await
+        {
             Ok(WasiGuestStatus::BudgetExpired(_)) => {}
             Ok(WasiGuestStatus::Done) | Ok(WasiGuestStatus::Exit(_)) => {
                 return ctx.pending().await;
@@ -3653,19 +3918,19 @@ pub fn run<I, C>(artifact: I::Artifact) -> I::Exit<C::Report>
 where
     C: Capsule,
     I: LogicalImage<C>,
-    I::Artifact: ArtifactEvidence,
+    I::Artifact: ArtifactEvidence + ArtifactGuestStorage<C, I>,
 {
     let program = C::choreography();
     let projection = derive_projection_caps_from_program::<C>(&program);
     let projected_roles = collect_projected_roles::<C, I>(&program);
     let image_projection =
         derive_projection_caps_for_roles_from_program::<C>(&program, I::REQUESTED_ROLES);
+    assert!(
+        !projection.capacity_overflow && !image_projection.capacity_overflow,
+        "hibana projection metadata exceeded appkit linked metadata capacity"
+    );
     let artifact_len = artifact.byte_len();
     let wasi_guest_bytes = artifact.wasi_bytes();
-    assert!(
-        artifact.validate(image_projection.wasi_imports),
-        "logical image artifact must be a WASI Preview 1 artifact or explicit NoWasi"
-    );
     assert!(
         C::Placement::requested_roles::<I>() == I::REQUESTED_ROLES,
         "logical image requested roles must match capsule placement"
@@ -3726,6 +3991,7 @@ where
 mod tests {
     use super::*;
     use core::cell::Cell;
+    use core::pin::Pin;
     use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
     use std::boxed::Box;
     use std::sync::{
@@ -3743,12 +4009,15 @@ mod tests {
                 advanced::{LoopBreakKind, LoopContinueKind},
             },
             ids::SessionId,
+            policy::{ResolverContext, ResolverError, ResolverRef, RouteResolution},
             program::Projectable,
             runtime::{Config, CounterClock, DefaultLabelUniverse},
         },
     };
 
-    use crate::choreography::protocol::{FdWriteDone, LABEL_WASI_FD_WRITE_RET, PollReady};
+    use crate::choreography::protocol::{
+        FdWriteDone, LABEL_WASI_FD_WRITE_RET, PollReady, RouteControl,
+    };
 
     const SECTION_TYPE: u8 = 1;
     const SECTION_IMPORT: u8 = 2;
@@ -3769,10 +4038,37 @@ mod tests {
     const TEST_CARRIER_ROLES: usize = HIBANA_TYPED_ROLE_DOMAIN_SIZE as usize;
     const TEST_CARRIER_QUEUE_DEPTH: usize = 16;
     const TEST_CARRIER_FRAME_BYTES: usize = 256;
+    const TEST_TIMER_ROUTE_POLICY: u16 = 56;
+    const TEST_RESPONSE_READY_CONTROL_LABEL: u8 = 120;
+    const TEST_TIMER_EXPIRED_CONTROL_LABEL: u8 = 121;
+    const TEST_RESPONSE_PAYLOAD_LABEL: u8 = 133;
+    const TEST_TIMER_EXPIRED_PAYLOAD_LABEL: u8 = 134;
+    const TEST_TIMER_ROUTE_DONE_LABEL: u8 = 135;
+    const TEST_TIMER_FIRED_FACT_LABEL: u8 = 136;
+    const TEST_TIMER_ROUTE_ACK_LABEL: u8 = 137;
+
+    type TestResponseRouteKind = RouteControl<TEST_RESPONSE_READY_CONTROL_LABEL, 0>;
+    type TestResponseRoute = g::Msg<
+        TEST_RESPONSE_READY_CONTROL_LABEL,
+        GenericCapToken<TestResponseRouteKind>,
+        TestResponseRouteKind,
+    >;
+    type TestTimerExpiredRouteKind = RouteControl<TEST_TIMER_EXPIRED_CONTROL_LABEL, 1>;
+    type TestTimerExpiredRoute = g::Msg<
+        TEST_TIMER_EXPIRED_CONTROL_LABEL,
+        GenericCapToken<TestTimerExpiredRouteKind>,
+        TestTimerExpiredRouteKind,
+    >;
+    type TestResponseReady = g::Msg<TEST_RESPONSE_PAYLOAD_LABEL, u8>;
+    type TestTimerExpired = g::Msg<TEST_TIMER_EXPIRED_PAYLOAD_LABEL, u8>;
+    type TestTimerRouteDone = g::Msg<TEST_TIMER_ROUTE_DONE_LABEL, u8>;
+    type TestTimerFiredFact = g::Msg<TEST_TIMER_FIRED_FACT_LABEL, u8>;
+    type TestTimerRouteAck = g::Msg<TEST_TIMER_ROUTE_ACK_LABEL, u8>;
 
     #[derive(Clone, Copy, Debug)]
     struct AttachedQueueTestFrame {
         occupied: bool,
+        lane: u8,
         frame_label: hibana::integration::transport::FrameLabel,
         len: usize,
         bytes: [u8; TEST_CARRIER_FRAME_BYTES],
@@ -3781,6 +4077,7 @@ mod tests {
     impl AttachedQueueTestFrame {
         const EMPTY: Self = Self {
             occupied: false,
+            lane: 0,
             frame_label: hibana::integration::transport::FrameLabel::new(0),
             len: 0,
             bytes: [0; TEST_CARRIER_FRAME_BYTES],
@@ -3803,6 +4100,7 @@ mod tests {
 
         fn push_back(
             &mut self,
+            lane: u8,
             frame_label: hibana::integration::transport::FrameLabel,
             payload: hibana::integration::wire::Payload<'_>,
         ) -> Result<(), hibana::integration::transport::TransportError> {
@@ -3812,6 +4110,7 @@ mod tests {
             }
             let idx = (self.head + self.len) % TEST_CARRIER_QUEUE_DEPTH;
             self.frames[idx].occupied = true;
+            self.frames[idx].lane = lane;
             self.frames[idx].frame_label = frame_label;
             self.frames[idx].len = bytes.len();
             self.frames[idx].bytes[..bytes.len()].copy_from_slice(bytes);
@@ -3821,6 +4120,7 @@ mod tests {
 
         fn push_front(
             &mut self,
+            lane: u8,
             frame_label: hibana::integration::transport::FrameLabel,
             bytes: &[u8],
         ) {
@@ -3833,21 +4133,39 @@ mod tests {
                 self.head - 1
             };
             self.frames[self.head].occupied = true;
+            self.frames[self.head].lane = lane;
             self.frames[self.head].frame_label = frame_label;
             self.frames[self.head].len = bytes.len();
             self.frames[self.head].bytes[..bytes.len()].copy_from_slice(bytes);
             self.len += 1;
         }
 
-        fn pop_front(&mut self) -> Option<AttachedQueueTestFrame> {
+        fn pop_front(&mut self, lane: u8) -> Option<AttachedQueueTestFrame> {
             if self.len == 0 {
                 return None;
             }
-            let idx = self.head;
+            let mut matched = None;
+            for offset in 0..self.len {
+                let idx = (self.head + offset) % TEST_CARRIER_QUEUE_DEPTH;
+                if self.frames[idx].occupied && self.frames[idx].lane == lane {
+                    matched = Some(idx);
+                    break;
+                }
+            }
+            let idx = matched?;
             let frame = self.frames[idx];
-            self.frames[idx] = AttachedQueueTestFrame::EMPTY;
-            self.head = (self.head + 1) % TEST_CARRIER_QUEUE_DEPTH;
+            let tail = (self.head + self.len - 1) % TEST_CARRIER_QUEUE_DEPTH;
+            let mut cursor = idx;
+            while cursor != tail {
+                let next = (cursor + 1) % TEST_CARRIER_QUEUE_DEPTH;
+                self.frames[cursor] = self.frames[next];
+                cursor = next;
+            }
+            self.frames[tail] = AttachedQueueTestFrame::EMPTY;
             self.len -= 1;
+            if self.len == 0 {
+                self.head = 0;
+            }
             if frame.occupied { Some(frame) } else { None }
         }
     }
@@ -3898,6 +4216,7 @@ mod tests {
     struct AttachedQueueTestTx {
         local_role: u8,
         session_id: u32,
+        lane: u8,
         sent_frames: u16,
     }
 
@@ -3905,6 +4224,7 @@ mod tests {
     struct AttachedQueueTestRx {
         local_role: u8,
         session_id: u32,
+        lane: u8,
         requeued_frames: u16,
         frame_label: Option<hibana::integration::transport::FrameLabel>,
         hint_frame_label: Cell<Option<hibana::integration::transport::FrameLabel>>,
@@ -3924,16 +4244,23 @@ mod tests {
             Self: 'a;
         type Metrics = ();
 
-        fn open<'a>(&'a self, local_role: u8, session_id: u32) -> (Self::Tx<'a>, Self::Rx<'a>) {
+        fn open<'a>(
+            &'a self,
+            local_role: u8,
+            session_id: u32,
+            lane: u8,
+        ) -> (Self::Tx<'a>, Self::Rx<'a>) {
             (
                 AttachedQueueTestTx {
                     local_role,
                     session_id,
+                    lane,
                     sent_frames: 0,
                 },
                 AttachedQueueTestRx {
                     local_role,
                     session_id,
+                    lane,
                     requeued_frames: 0,
                     frame_label: None,
                     hint_frame_label: Cell::new(None),
@@ -3962,8 +4289,14 @@ mod tests {
             if peer >= TEST_CARRIER_ROLES {
                 return Poll::Ready(Err(hibana::integration::transport::TransportError::Failed));
             }
-            self.queues.lock().expect("test carrier queue lock").by_role[peer]
-                .push_back(outgoing.frame_label(), outgoing.payload())?;
+            if outgoing.lane() != tx.lane {
+                return Poll::Ready(Err(hibana::integration::transport::TransportError::Failed));
+            }
+            self.queues.lock().expect("test carrier queue lock").by_role[peer].push_back(
+                outgoing.lane(),
+                outgoing.frame_label(),
+                outgoing.payload(),
+            )?;
             tx.sent_frames = tx.sent_frames.saturating_add(1);
             cx.waker().wake_by_ref();
             Poll::Ready(Ok(()))
@@ -3988,10 +4321,13 @@ mod tests {
             }
             let Some(frame) = self.queues.lock().expect("test carrier queue lock").by_role
                 [local_role]
-                .pop_front()
+                .pop_front(rx.lane)
             else {
                 return Poll::Pending;
             };
+            if frame.lane != rx.lane {
+                return Poll::Ready(Err(hibana::integration::transport::TransportError::Failed));
+            }
             self.queues
                 .lock()
                 .expect("test carrier queue lock")
@@ -4011,7 +4347,7 @@ mod tests {
                 let local_role = rx.local_role as usize;
                 if local_role < TEST_CARRIER_ROLES {
                     self.queues.lock().expect("test carrier queue lock").by_role[local_role]
-                        .push_front(frame_label, &rx.bytes[..rx.len]);
+                        .push_front(rx.lane, frame_label, &rx.bytes[..rx.len]);
                 }
             }
             self.queues
@@ -4044,7 +4380,7 @@ mod tests {
                 (rx.local_role as usize) < TEST_CARRIER_ROLES,
                 "attached receive role must be valid"
             );
-            let hint = rx.hint_frame_label.get();
+            let hint = rx.hint_frame_label.take();
             if hint.is_some() {
                 self.queues
                     .lock()
@@ -4074,6 +4410,7 @@ mod tests {
     struct MemoryGrowCapsule;
     struct MemoryGrowLocal;
     struct MemoryGrowPlacement;
+    struct TimerRouteAttachCapsule;
     static BRIDGE_WASI_GUEST_ARENA: WasiGuestArena = WasiGuestArena::empty();
     static NO_LOOP_WASI_GUEST_ARENA: WasiGuestArena = WasiGuestArena::empty();
     static MEMORY_GROW_WASI_GUEST_ARENA: WasiGuestArena = WasiGuestArena::empty();
@@ -4274,6 +4611,85 @@ mod tests {
         }
     }
 
+    impl Capsule for TimerRouteAttachCapsule {
+        type Universe = DefaultLabelUniverse;
+        type Placement = NoLoopPlacement;
+        type Local = NoLoopLocal;
+        type Report = ();
+
+        fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
+            g::seq(
+                g::send::<g::Role<0>, g::Role<1>, TestTimerFiredFact, 1>(),
+                g::seq(
+                    g::route(
+                        g::seq(
+                            g::send::<g::Role<1>, g::Role<1>, TestResponseRoute, 1>()
+                                .policy::<TEST_TIMER_ROUTE_POLICY>(),
+                            g::send::<g::Role<1>, g::Role<0>, TestResponseReady, 1>(),
+                        ),
+                        g::seq(
+                            g::send::<g::Role<1>, g::Role<1>, TestTimerExpiredRoute, 1>()
+                                .policy::<TEST_TIMER_ROUTE_POLICY>(),
+                            g::send::<g::Role<1>, g::Role<0>, TestTimerExpired, 1>(),
+                        ),
+                    ),
+                    g::seq(
+                        g::send::<g::Role<0>, g::Role<1>, TestTimerRouteDone, 1>(),
+                        g::send::<g::Role<1>, g::Role<0>, TestTimerRouteAck, 1>(),
+                    ),
+                ),
+            )
+        }
+    }
+
+    impl Placement<TimerRouteAttachCapsule> for NoLoopPlacement {
+        fn role_kind(role: u8) -> RoleKind {
+            match role {
+                0 => RoleKind::Driver,
+                1 => RoleKind::Engine,
+                _ => RoleKind::Boundary,
+            }
+        }
+    }
+
+    impl Localside<TimerRouteAttachCapsule> for NoLoopLocal {
+        type Error = Infallible;
+
+        fn engine<'endpoint, 'guest, const ROLE: u8>(
+            ctx: EngineCtx<'endpoint, 'guest, TimerRouteAttachCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+
+        fn driver<'a, const ROLE: u8>(
+            ctx: DriverCtx<'a, TimerRouteAttachCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+
+        fn boundary<'a, const ROLE: u8>(
+            ctx: BoundaryCtx<'a, TimerRouteAttachCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+
+        fn link<'a, const ROLE: u8>(
+            ctx: LinkCtx<'a, TimerRouteAttachCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+
+        fn supervisor<'a, const ROLE: u8>(
+            ctx: SupervisorCtx<'a, TimerRouteAttachCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+    }
+
+    fn test_timer_route_resolver(_: ResolverContext) -> Result<RouteResolution, ResolverError> {
+        Ok(RouteResolution::Arm(1))
+    }
+
     impl LogicalImage<BridgeCapsule> for crate::site::Local<BridgeImage> {
         type Artifact = WasiImage<'static>;
         type Exit<R> = RunReport<R, Self>;
@@ -4293,7 +4709,9 @@ mod tests {
         fn carrier<'a>() -> Self::Carrier<'a> {
             AttachedQueueTestCarrier::new()
         }
+    }
 
+    impl WasiGuestImage<BridgeCapsule> for crate::site::Local<BridgeImage> {
         fn wasi_guest_storage<'guest, const ROLE: u8>() -> WasiGuestStorage<'guest> {
             assert!(ROLE < 2);
             BRIDGE_WASI_GUEST_ARENA.storage()
@@ -4479,6 +4897,34 @@ mod tests {
         let waker = noop_waker();
         let mut task_context = Context::from_waker(&waker);
         let mut future = core::pin::pin!(future);
+        let mut poll_round = 0u8;
+        while poll_round < rounds {
+            if let Poll::Ready(output) = future.as_mut().poll(&mut task_context) {
+                return Some(output);
+            }
+            poll_round += 1;
+        }
+        None
+    }
+
+    fn poll_once_pending<F>(future: Pin<&mut F>)
+    where
+        F: core::future::Future,
+    {
+        let waker = noop_waker();
+        let mut task_context = Context::from_waker(&waker);
+        match future.poll(&mut task_context) {
+            Poll::Pending => {}
+            Poll::Ready(_) => panic!("future completed before peer progress"),
+        }
+    }
+
+    fn poll_pinned_ready<F>(mut future: Pin<&mut F>, rounds: u8) -> Option<F::Output>
+    where
+        F: core::future::Future,
+    {
+        let waker = noop_waker();
+        let mut task_context = Context::from_waker(&waker);
         let mut poll_round = 0u8;
         while poll_round < rounds {
             if let Poll::Ready(output) = future.as_mut().poll(&mut task_context) {
@@ -5094,8 +5540,9 @@ mod tests {
             RoleEndpointCtx::new(engine_endpoint),
             endpoint_carrier,
             Some(module.as_slice()),
-            <crate::site::Local<BridgeImage> as LogicalImage<BridgeCapsule>>::wasi_guest_storage::<0>(
-            ),
+            Some(<crate::site::Local<BridgeImage> as WasiGuestImage<
+                BridgeCapsule,
+            >>::wasi_guest_storage::<0>()),
         );
         let mut driver_ctx: DriverCtx<'_, BridgeCapsule, 1> = DriverCtx::new(
             RoleEndpointCtx::new(driver_endpoint),
@@ -5135,10 +5582,55 @@ mod tests {
     }
 
     #[test]
-    fn drive_wasi_guest_requires_projected_loop_control_phase() {
+    fn projection_metadata_marks_only_canonical_wasi_loop_import_heads() {
+        let bridge = <BridgeCapsule as Capsule>::choreography();
+        let bridge_projection = derive_projection_caps_from_program::<BridgeCapsule>(&bridge);
+        assert!(label_array_contains(
+            bridge_projection.wasi_loop_continue_head_labels,
+            bridge_projection.wasi_loop_continue_head_count,
+            LABEL_WASI_FD_WRITE,
+        ));
+        assert!(!label_array_contains(
+            bridge_projection.wasi_loop_continue_head_labels,
+            bridge_projection.wasi_loop_continue_head_count,
+            LABEL_WASI_POLL_ONEOFF,
+        ));
+
+        let no_loop = <NoLoopCapsule as Capsule>::choreography();
+        let no_loop_projection = derive_projection_caps_from_program::<NoLoopCapsule>(&no_loop);
+        assert_eq!(no_loop_projection.wasi_loop_continue_head_count, 0);
+        assert_eq!(no_loop_projection.wasi_loop_break_head_count, 0);
+    }
+
+    #[test]
+    fn projection_metadata_capacity_overflow_is_not_silent() {
+        let mut loop_head_visitor = ProjectionCapsVisitor::new();
+        for label in 0..17 {
+            loop_head_visitor.push_wasi_loop_continue_head_label(label);
+        }
+        assert!(loop_head_visitor.caps.capacity_overflow);
+        assert_eq!(
+            loop_head_visitor.caps.wasi_loop_continue_head_count,
+            loop_head_visitor.caps.wasi_loop_continue_head_labels.len() as u8
+        );
+
+        let mut eff_visitor = ProjectionCapsVisitor::new();
+        for eff_index in 0..17 {
+            eff_visitor.push_loop_continue_eff(eff_index);
+        }
+        assert!(eff_visitor.caps.capacity_overflow);
+        assert_eq!(
+            eff_visitor.loop_continue_eff_count,
+            eff_visitor.loop_continue_eff_indices.len() as u8
+        );
+    }
+
+    #[test]
+    fn drive_wasi_guest_allows_linear_import_without_loop_control() {
         let module = fd_write_guest_module();
         let program = <NoLoopCapsule as Capsule>::choreography();
         let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
+        let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
         let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let clock = CounterClock::new();
@@ -5147,11 +5639,11 @@ mod tests {
             AttachedQueueTestCarrier,
             DefaultLabelUniverse,
             CounterClock,
-            1,
+            2,
         >::new(&clock);
         let rendezvous = kit
             .add_rendezvous_from_config(
-                Config::new(&mut tap_buf, &mut slab, 0..8, 1, CounterClock::new(), None),
+                Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new(), None),
                 carrier,
             )
             .expect("register appkit carrier rendezvous");
@@ -5159,11 +5651,14 @@ mod tests {
         let engine_endpoint = kit
             .enter::<0, _>(rendezvous, session, &role0, NoBinding)
             .expect("enter no-loop engine role");
+        let driver_endpoint = kit
+            .enter::<1, _>(rendezvous, session, &role1, NoBinding)
+            .expect("enter no-loop driver role");
         let projection = derive_projection_caps_from_program::<NoLoopCapsule>(&program);
         let endpoint_carrier = EndpointCarrierFacts::new(
             ImageId(3),
             SiteId(1),
-            RoleSet::single(0),
+            RoleSet::from_bits(0b11),
             TEST_ATTACHED_QUEUE_CARRIER,
             projection,
         );
@@ -5171,17 +5666,62 @@ mod tests {
             RoleEndpointCtx::new(engine_endpoint),
             endpoint_carrier,
             Some(module.as_slice()),
-            NO_LOOP_WASI_GUEST_ARENA.storage(),
+            Some(NO_LOOP_WASI_GUEST_ARENA.storage()),
         );
-        let result = poll_bounded(
-            engine_ctx.drive_wasi_guest(BudgetRun::new(1, 0, 128, 0)),
-            16,
-        )
-        .expect("missing loop-control phase must fail instead of falling back");
-        assert!(matches!(
-            result,
-            Err(WasiGuestError::EndpointRejected(0x5745_6000))
-        ));
+        let mut driver_ctx: DriverCtx<'_, NoLoopCapsule, 1> = DriverCtx::new(
+            RoleEndpointCtx::new(driver_endpoint),
+            endpoint_carrier,
+            DriverFacts::EMPTY,
+        );
+        let engine = engine_ctx.drive_wasi_guest(BudgetRun::new(1, 0, 128, 0));
+        let driver = async move {
+            let request = driver_ctx
+                .endpoint()
+                .recv::<g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>()
+                .await
+                .expect("linear driver receives fd_write without loop-control prelude");
+            let EngineReq::FdWrite(write) = request else {
+                panic!("expected linear fd_write request");
+            };
+            assert_eq!(write.fd(), 1);
+            assert_eq!(write.as_bytes(), b"hello");
+            let reply = EngineRet::FdWriteDone(FdWriteDone::new(write.fd(), write.len() as u8));
+            driver_ctx
+                .endpoint()
+                .flow::<g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>>()
+                .expect("linear driver opens fd_write reply flow")
+                .send(&reply)
+                .await
+                .expect("linear driver sends fd_write reply");
+        };
+        let waker = noop_waker();
+        let mut task_context = Context::from_waker(&waker);
+        let mut engine = core::pin::pin!(engine);
+        let mut driver = core::pin::pin!(driver);
+        let mut engine_result = None;
+        let mut driver_done = false;
+        let mut poll_round = 0u8;
+        while poll_round < 16 {
+            if engine_result.is_none() {
+                if let Poll::Ready(result) = engine.as_mut().poll(&mut task_context) {
+                    engine_result = Some(result);
+                }
+            }
+            if !driver_done {
+                if let Poll::Ready(()) = driver.as_mut().poll(&mut task_context) {
+                    driver_done = true;
+                }
+            }
+            if engine_result.is_some() && driver_done {
+                break;
+            }
+            poll_round += 1;
+        }
+        assert!(
+            driver_done,
+            "linear driver did not receive fd_write request; engine_result={engine_result:?}"
+        );
+        assert!(matches!(engine_result, Some(Ok(WasiGuestStatus::Done))));
     }
 
     #[test]
@@ -5225,7 +5765,7 @@ mod tests {
             RoleEndpointCtx::new(engine_endpoint),
             endpoint_carrier,
             Some(module.as_slice()),
-            MEMORY_GROW_WASI_GUEST_ARENA.storage(),
+            Some(MEMORY_GROW_WASI_GUEST_ARENA.storage()),
         );
         let driver_ctx: DriverCtx<'_, MemoryGrowCapsule, 1> = DriverCtx::new(
             RoleEndpointCtx::new(driver_endpoint),
@@ -5285,6 +5825,378 @@ mod tests {
             RUN_BRIDGE_ENGINE_DONE.load(Ordering::SeqCst),
             0,
             "WASI P1 engine roles are driven by appkit, not user Localside::engine"
+        );
+    }
+
+    #[test]
+    fn carved_in_place_session_kit_attaches_single_nonzero_role() {
+        let clock = CounterClock::new();
+        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut slab_storage = Box::new([0u8; APPKIT_ATTACH_SLAB_BYTES]);
+        let (kit_storage, rendezvous_slab) = carve_session_kit_storage::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            APPKIT_SESSION_RV_SLOTS,
+        >(&mut slab_storage[..]);
+        let kit = hibana::integration::SessionKit::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            APPKIT_SESSION_RV_SLOTS,
+        >::init_in_place(kit_storage, &clock);
+        let rendezvous = kit
+            .add_rendezvous_from_config(
+                Config::new(
+                    &mut tap_buf,
+                    rendezvous_slab,
+                    0..8,
+                    1,
+                    CounterClock::new(),
+                    None,
+                ),
+                AttachedQueueTestCarrier::new(),
+            )
+            .expect("register carved in-place carrier rendezvous");
+        let program = <NoLoopCapsule as Capsule>::choreography();
+        let role1 = program.project::<1>();
+        let endpoint = kit
+            .enter::<1, _>(rendezvous, SessionId::new(0x99), &role1, NoBinding)
+            .expect("carved in-place kit must attach a single nonzero role");
+        let endpoint_ctx = RoleEndpointCtx::<NoLoopCapsule, 1>::new(endpoint);
+        assert_eq!(endpoint_ctx.role(), 1);
+    }
+
+    #[test]
+    fn embedded_sized_timer_route_role1_attach_after_resolver_registration() {
+        let clock = CounterClock::new();
+        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut slab_storage = Box::new([0u8; 112 * 1024]);
+        let (kit_storage, rendezvous_slab) = carve_session_kit_storage::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            APPKIT_SESSION_RV_SLOTS,
+        >(&mut slab_storage[..]);
+        let kit = hibana::integration::SessionKit::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            APPKIT_SESSION_RV_SLOTS,
+        >::init_in_place(kit_storage, &clock);
+        let rendezvous = kit
+            .add_rendezvous_from_config(
+                Config::new(
+                    &mut tap_buf,
+                    rendezvous_slab,
+                    0..8,
+                    1,
+                    CounterClock::new(),
+                    None,
+                ),
+                AttachedQueueTestCarrier::new(),
+            )
+            .expect("register embedded-sized timer route rendezvous");
+        let program = <TimerRouteAttachCapsule as Capsule>::choreography();
+        let role1 = program.project::<1>();
+        kit.set_resolver::<TEST_TIMER_ROUTE_POLICY, 1>(
+            rendezvous,
+            &role1,
+            ResolverRef::route_fn(test_timer_route_resolver),
+        )
+        .expect("register timer route resolver before role1 attach");
+        let endpoint = kit
+            .enter::<1, _>(rendezvous, SessionId::new(0x57), &role1, NoBinding)
+            .expect("embedded-sized role1 timer route attach must survive resolver registration");
+        let endpoint_ctx = RoleEndpointCtx::<TimerRouteAttachCapsule, 1>::new(endpoint);
+        assert_eq!(endpoint_ctx.role(), 1);
+    }
+
+    #[test]
+    fn embedded_sized_split_timer_route_decodes_then_tails() {
+        let clock0 = CounterClock::new();
+        let clock1 = CounterClock::new();
+        let mut tap0 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap1 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut slab0 = Box::new([0u8; 96 * 1024]);
+        let mut slab1 = Box::new([0u8; 112 * 1024]);
+        let (kit0_storage, rendezvous0_slab) = carve_session_kit_storage::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            APPKIT_SESSION_RV_SLOTS,
+        >(&mut slab0[..]);
+        let (kit1_storage, rendezvous1_slab) = carve_session_kit_storage::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            APPKIT_SESSION_RV_SLOTS,
+        >(&mut slab1[..]);
+        let kit0 = hibana::integration::SessionKit::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            APPKIT_SESSION_RV_SLOTS,
+        >::init_in_place(kit0_storage, &clock0);
+        let kit1 = hibana::integration::SessionKit::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            APPKIT_SESSION_RV_SLOTS,
+        >::init_in_place(kit1_storage, &clock1);
+        let carrier = AttachedQueueTestCarrier::new();
+        let rendezvous0 = kit0
+            .add_rendezvous_from_config(
+                Config::new(
+                    &mut tap0,
+                    rendezvous0_slab,
+                    0..8,
+                    1,
+                    CounterClock::new(),
+                    None,
+                ),
+                carrier.clone(),
+            )
+            .expect("register embedded-sized driver rendezvous");
+        let rendezvous1 = kit1
+            .add_rendezvous_from_config(
+                Config::new(
+                    &mut tap1,
+                    rendezvous1_slab,
+                    0..8,
+                    1,
+                    CounterClock::new(),
+                    None,
+                ),
+                carrier,
+            )
+            .expect("register embedded-sized engine rendezvous");
+        let program = <TimerRouteAttachCapsule as Capsule>::choreography();
+        let role0 = program.project::<0>();
+        let role1 = program.project::<1>();
+        kit0.set_resolver::<TEST_TIMER_ROUTE_POLICY, 0>(
+            rendezvous0,
+            &role0,
+            ResolverRef::route_fn(test_timer_route_resolver),
+        )
+        .expect("register driver timer route resolver");
+        kit1.set_resolver::<TEST_TIMER_ROUTE_POLICY, 1>(
+            rendezvous1,
+            &role1,
+            ResolverRef::route_fn(test_timer_route_resolver),
+        )
+        .expect("register engine timer route resolver");
+        let session = SessionId::new(0x58);
+        let mut driver = kit0
+            .enter::<0, _>(rendezvous0, session, &role0, NoBinding)
+            .expect("enter embedded-sized driver timer route role");
+        let mut engine = kit1
+            .enter::<1, _>(rendezvous1, session, &role1, NoBinding)
+            .expect("enter embedded-sized engine timer route role");
+
+        poll_ready(
+            driver
+                .flow::<TestTimerFiredFact>()
+                .expect("driver opens timer fact flow")
+                .send(&1),
+        )
+        .expect("driver sends timer fact");
+        let fact =
+            poll_ready(engine.recv::<TestTimerFiredFact>()).expect("engine receives timer fact");
+        assert_eq!(fact, 1);
+
+        poll_ready(
+            engine
+                .flow::<TestTimerExpiredRoute>()
+                .expect("engine opens timer-expired route control")
+                .send(()),
+        )
+        .expect("engine sends timer-expired route control");
+        poll_ready(
+            engine
+                .flow::<TestTimerExpired>()
+                .expect("engine opens timer-expired payload flow")
+                .send(&1),
+        )
+        .expect("engine sends timer-expired payload");
+
+        let branch = poll_ready(driver.offer()).expect("driver offers timer route branch");
+        assert_eq!(branch.label(), TEST_TIMER_EXPIRED_PAYLOAD_LABEL);
+        let expired = poll_ready(branch.decode::<TestTimerExpired>())
+            .expect("driver decodes timer-expired payload");
+        assert_eq!(expired, 1);
+
+        poll_ready(
+            driver
+                .flow::<TestTimerRouteDone>()
+                .expect("driver opens timer route done flow")
+                .send(&1),
+        )
+        .expect("driver sends timer route done");
+        let done = poll_ready(engine.recv::<TestTimerRouteDone>())
+            .expect("engine receives timer route done");
+        assert_eq!(done, 1);
+        poll_ready(
+            engine
+                .flow::<TestTimerRouteAck>()
+                .expect("engine opens timer route ack flow")
+                .send(&1),
+        )
+        .expect("engine sends timer route ack");
+        let ack = poll_ready(driver.recv::<TestTimerRouteAck>())
+            .expect("driver receives timer route ack");
+        assert_eq!(ack, 1);
+    }
+
+    #[test]
+    fn embedded_sized_split_timer_route_recv_future_progresses_after_pending() {
+        let clock0 = CounterClock::new();
+        let clock1 = CounterClock::new();
+        let mut tap0 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap1 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut slab0 = Box::new([0u8; 96 * 1024]);
+        let mut slab1 = Box::new([0u8; 112 * 1024]);
+        let (kit0_storage, rendezvous0_slab) = carve_session_kit_storage::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            APPKIT_SESSION_RV_SLOTS,
+        >(&mut slab0[..]);
+        let (kit1_storage, rendezvous1_slab) = carve_session_kit_storage::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            APPKIT_SESSION_RV_SLOTS,
+        >(&mut slab1[..]);
+        let kit0 = hibana::integration::SessionKit::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            APPKIT_SESSION_RV_SLOTS,
+        >::init_in_place(kit0_storage, &clock0);
+        let kit1 = hibana::integration::SessionKit::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            APPKIT_SESSION_RV_SLOTS,
+        >::init_in_place(kit1_storage, &clock1);
+        let carrier = AttachedQueueTestCarrier::new();
+        let rendezvous0 = kit0
+            .add_rendezvous_from_config(
+                Config::new(
+                    &mut tap0,
+                    rendezvous0_slab,
+                    0..8,
+                    1,
+                    CounterClock::new(),
+                    None,
+                ),
+                carrier.clone(),
+            )
+            .expect("register pending driver rendezvous");
+        let rendezvous1 = kit1
+            .add_rendezvous_from_config(
+                Config::new(
+                    &mut tap1,
+                    rendezvous1_slab,
+                    0..8,
+                    1,
+                    CounterClock::new(),
+                    None,
+                ),
+                carrier,
+            )
+            .expect("register pending engine rendezvous");
+        let program = <TimerRouteAttachCapsule as Capsule>::choreography();
+        let role0 = program.project::<0>();
+        let role1 = program.project::<1>();
+        kit0.set_resolver::<TEST_TIMER_ROUTE_POLICY, 0>(
+            rendezvous0,
+            &role0,
+            ResolverRef::route_fn(test_timer_route_resolver),
+        )
+        .expect("register pending driver timer route resolver");
+        kit1.set_resolver::<TEST_TIMER_ROUTE_POLICY, 1>(
+            rendezvous1,
+            &role1,
+            ResolverRef::route_fn(test_timer_route_resolver),
+        )
+        .expect("register pending engine timer route resolver");
+        let session = SessionId::new(0x59);
+        let mut driver = kit0
+            .enter::<0, _>(rendezvous0, session, &role0, NoBinding)
+            .expect("enter pending driver timer route role");
+        let mut engine = kit1
+            .enter::<1, _>(rendezvous1, session, &role1, NoBinding)
+            .expect("enter pending engine timer route role");
+
+        poll_ready(
+            driver
+                .flow::<TestTimerFiredFact>()
+                .expect("driver opens pending timer fact flow")
+                .send(&1),
+        )
+        .expect("driver sends pending timer fact");
+        assert_eq!(
+            poll_ready(engine.recv::<TestTimerFiredFact>())
+                .expect("engine receives pending timer fact"),
+            1
+        );
+
+        poll_ready(
+            engine
+                .flow::<TestTimerExpiredRoute>()
+                .expect("engine opens pending timer-expired route control")
+                .send(()),
+        )
+        .expect("engine sends pending timer-expired route control");
+        poll_ready(
+            engine
+                .flow::<TestTimerExpired>()
+                .expect("engine opens pending timer-expired payload flow")
+                .send(&1),
+        )
+        .expect("engine sends pending timer-expired payload");
+
+        let branch = poll_ready(driver.offer()).expect("driver offers pending timer route branch");
+        assert_eq!(branch.label(), TEST_TIMER_EXPIRED_PAYLOAD_LABEL);
+        assert_eq!(
+            poll_ready(branch.decode::<TestTimerExpired>())
+                .expect("driver decodes pending timer-expired payload"),
+            1
+        );
+
+        {
+            let done_recv = engine.recv::<TestTimerRouteDone>();
+            let mut done_recv = core::pin::pin!(done_recv);
+            poll_once_pending(done_recv.as_mut());
+
+            poll_ready(
+                driver
+                    .flow::<TestTimerRouteDone>()
+                    .expect("driver opens pending timer route done flow")
+                    .send(&1),
+            )
+            .expect("driver sends pending timer route done after peer has parked");
+            assert_eq!(
+                poll_pinned_ready(done_recv.as_mut(), 16)
+                    .expect("engine pending recv must complete after peer send")
+                    .expect("engine receives pending timer route done"),
+                1
+            );
+        }
+
+        poll_ready(
+            engine
+                .flow::<TestTimerRouteAck>()
+                .expect("engine opens pending timer route ack flow")
+                .send(&1),
+        )
+        .expect("engine sends pending timer route ack");
+        assert_eq!(
+            poll_ready(driver.recv::<TestTimerRouteAck>())
+                .expect("driver receives pending timer route ack"),
+            1
         );
     }
 }

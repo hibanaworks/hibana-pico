@@ -76,6 +76,8 @@ case "$pattern" in
     ;;
   timer-route)
     bin_name="baker-timer-route"
+    expected_core1_stage="4849000a"
+    allow_core1_ready="0"
     expected_result="48495452"
     features="${HIBANA_PICO_FEATURES-}"
     ;;
@@ -155,6 +157,12 @@ result_addr="$(symbol_addr HIBANA_DEMO_RESULT)"
 stage_addr="$(symbol_addr HIBANA_DEMO_FAILURE_STAGE)"
 hardfault_pc_addr="$(symbol_addr HIBANA_DEMO_HARDFAULT_PC)"
 hardfault_lr_addr="$(symbol_addr HIBANA_DEMO_HARDFAULT_LR)"
+hardfault_r0_addr="$(symbol_addr HIBANA_DEMO_HARDFAULT_R0)"
+hardfault_r1_addr="$(symbol_addr HIBANA_DEMO_HARDFAULT_R1)"
+hardfault_r2_addr="$(symbol_addr HIBANA_DEMO_HARDFAULT_R2)"
+hardfault_r3_addr="$(symbol_addr HIBANA_DEMO_HARDFAULT_R3)"
+hardfault_r12_addr="$(symbol_addr HIBANA_DEMO_HARDFAULT_R12)"
+hardfault_sp_addr="$(symbol_addr HIBANA_DEMO_HARDFAULT_SP)"
 core0_stack_addr="$(symbol_addr HIBANA_DEMO_CORE0_STACK_MAX_USED_BYTES)"
 core1_stack_addr="$(symbol_addr HIBANA_DEMO_CORE1_STACK_MAX_USED_BYTES)"
 core0_stage_addr="$(symbol_addr HIBANA_DEMO_CORE0_STAGE)"
@@ -177,8 +185,17 @@ choreofs_last_object_addr="$(symbol_addr HIBANA_CHOREOFS_LAST_OBJECT)"
 choreofs_led_mask_addr="$(symbol_addr HIBANA_CHOREOFS_LED_MASK)"
 choreofs_seen_led_mask_addr="$(symbol_addr HIBANA_CHOREOFS_SEEN_LED_MASK)"
 choreofs_driver_trace_addr="$(symbol_addr HIBANA_CHOREOFS_DRIVER_TRACE)"
-choreofs_sio_trace_count_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TRACE_COUNT)"
-choreofs_sio_trace_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TRACE)"
+choreofs_sio_trace_core0_count_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TRACE_CORE0_COUNT)"
+choreofs_sio_trace_core0_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TRACE_CORE0)"
+choreofs_sio_trace_core1_count_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TRACE_CORE1_COUNT)"
+choreofs_sio_trace_core1_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TRACE_CORE1)"
+choreofs_sio_core0_to_core1_tx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_CORE0_TO_CORE1_TX_COUNT)"
+choreofs_sio_core0_to_core1_rx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_CORE0_TO_CORE1_RX_COUNT)"
+choreofs_sio_core1_to_core0_tx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_CORE1_TO_CORE0_TX_COUNT)"
+choreofs_sio_core1_to_core0_rx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_CORE1_TO_CORE0_RX_COUNT)"
+choreofs_sio_role1_pending_seen_core0_tx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_ROLE1_PENDING_SEEN_CORE0_TX)"
+choreofs_sio_role1_poll_seen_core0_tx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_ROLE1_POLL_SEEN_CORE0_TX)"
+choreofs_sio_role1_ready_seen_core0_tx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_ROLE1_READY_SEEN_CORE0_TX)"
 
 result=""
 stage=""
@@ -186,11 +203,12 @@ deadline=$((SECONDS + timeout_seconds))
 while :; do
   result="$(read_word "$result_addr")"
   stage="$(read_word "$stage_addr")"
+  core0_stage="$(read_word "$core0_stage_addr")"
   core1_stage="$(read_word "$core1_stage_addr")"
   if [[ "$expect_panic_marker" == "1" && "$result" == "$expected_result" ]]; then
     break
   fi
-  if [[ "$result" == "$expected_result" && ( "$core1_stage" == "$expected_core1_stage" || ( "$allow_core1_ready" == "1" && "$core1_stage" == "4849000a" ) ) ]]; then
+  if [[ "$result" == "$expected_result" && "$core0_stage" == "4849000a" && ( "$core1_stage" == "$expected_core1_stage" || ( "$allow_core1_ready" == "1" && "$core1_stage" == "4849000a" ) ) ]]; then
     break
   fi
   if [[ "$result" == "48494641" ]]; then
@@ -209,8 +227,20 @@ printf 'result_addr=%s result=0x%s expected=0x%s\n' "$result_addr" "$result" "$e
 printf 'stage_addr=%s stage=0x%s\n' "$stage_addr" "$stage"
 hardfault_pc="$(read_word "$hardfault_pc_addr")"
 hardfault_lr="$(read_word "$hardfault_lr_addr")"
+hardfault_r0="$(read_word "$hardfault_r0_addr")"
+hardfault_r1="$(read_word "$hardfault_r1_addr")"
+hardfault_r2="$(read_word "$hardfault_r2_addr")"
+hardfault_r3="$(read_word "$hardfault_r3_addr")"
+hardfault_r12="$(read_word "$hardfault_r12_addr")"
+hardfault_sp="$(read_word "$hardfault_sp_addr")"
 printf 'hardfault_pc_addr=%s pc=0x%s\n' "$hardfault_pc_addr" "$hardfault_pc"
 printf 'hardfault_lr_addr=%s lr=0x%s\n' "$hardfault_lr_addr" "$hardfault_lr"
+printf 'hardfault_r0_addr=%s r0=0x%s\n' "$hardfault_r0_addr" "$hardfault_r0"
+printf 'hardfault_r1_addr=%s r1=0x%s\n' "$hardfault_r1_addr" "$hardfault_r1"
+printf 'hardfault_r2_addr=%s r2=0x%s\n' "$hardfault_r2_addr" "$hardfault_r2"
+printf 'hardfault_r3_addr=%s r3=0x%s\n' "$hardfault_r3_addr" "$hardfault_r3"
+printf 'hardfault_r12_addr=%s r12=0x%s\n' "$hardfault_r12_addr" "$hardfault_r12"
+printf 'hardfault_sp_addr=%s sp=0x%s\n' "$hardfault_sp_addr" "$hardfault_sp"
 core0_stack="$(read_word "$core0_stack_addr")"
 core1_stack="$(read_word "$core1_stack_addr")"
 printf 'core0_stack_high_water_addr=%s used=0x%s\n' "$core0_stack_addr" "$core0_stack"
@@ -248,11 +278,26 @@ choreofs_last_object="$(read_word "$choreofs_last_object_addr")"
 choreofs_led_mask="$(read_word "$choreofs_led_mask_addr")"
 choreofs_seen_led_mask="$(read_word "$choreofs_seen_led_mask_addr")"
 choreofs_driver_trace="$(read_word "$choreofs_driver_trace_addr")"
-choreofs_sio_trace_count="$(read_word "$choreofs_sio_trace_count_addr")"
+choreofs_sio_trace_core0_count="$(read_word "$choreofs_sio_trace_core0_count_addr")"
+choreofs_sio_trace_core1_count="$(read_word "$choreofs_sio_trace_core1_count_addr")"
+choreofs_sio_core0_to_core1_tx="$(read_word "$choreofs_sio_core0_to_core1_tx_addr")"
+choreofs_sio_core0_to_core1_rx="$(read_word "$choreofs_sio_core0_to_core1_rx_addr")"
+choreofs_sio_core1_to_core0_tx="$(read_word "$choreofs_sio_core1_to_core0_tx_addr")"
+choreofs_sio_core1_to_core0_rx="$(read_word "$choreofs_sio_core1_to_core0_rx_addr")"
+choreofs_sio_role1_pending_seen_core0_tx="$(read_word "$choreofs_sio_role1_pending_seen_core0_tx_addr")"
+choreofs_sio_role1_poll_seen_core0_tx="$(read_word "$choreofs_sio_role1_poll_seen_core0_tx_addr")"
+choreofs_sio_role1_ready_seen_core0_tx="$(read_word "$choreofs_sio_role1_ready_seen_core0_tx_addr")"
 watchdog_tick="$(read_mmio_word 0x4005802c)"
 clk_ref_ctrl="$(read_mmio_word 0x40008030)"
 clk_ref_selected="$(read_mmio_word 0x40008038)"
+clk_sys_ctrl="$(read_mmio_word 0x4000803c)"
+clk_sys_selected="$(read_mmio_word 0x40008044)"
+clk_peri_ctrl="$(read_mmio_word 0x40008048)"
+clk_peri_selected="$(read_mmio_word 0x40008050)"
 xosc_status="$(read_mmio_word 0x40024004)"
+pll_sys_cs="$(read_mmio_word 0x40028000)"
+pll_sys_fbdiv="$(read_mmio_word 0x40028008)"
+pll_sys_prim="$(read_mmio_word 0x4002800c)"
 printf 'choreofs_engine_status_addr=%s status=0x%s\n' "$choreofs_engine_status_addr" "$choreofs_engine_status"
 printf 'choreofs_engine_error_code_addr=%s code=0x%s\n' "$choreofs_engine_error_code_addr" "$choreofs_engine_error_code"
 printf 'choreofs_path_open_count_addr=%s count=0x%s\n' "$choreofs_path_open_count_addr" "$choreofs_path_open_count"
@@ -264,22 +309,47 @@ printf 'choreofs_last_object_addr=%s object=0x%s\n' "$choreofs_last_object_addr"
 printf 'choreofs_led_mask_addr=%s mask=0x%s\n' "$choreofs_led_mask_addr" "$choreofs_led_mask"
 printf 'choreofs_seen_led_mask_addr=%s mask=0x%s\n' "$choreofs_seen_led_mask_addr" "$choreofs_seen_led_mask"
 printf 'choreofs_driver_trace_addr=%s trace=0x%s\n' "$choreofs_driver_trace_addr" "$choreofs_driver_trace"
-printf 'choreofs_sio_trace_count_addr=%s count=0x%s\n' "$choreofs_sio_trace_count_addr" "$choreofs_sio_trace_count"
+printf 'choreofs_sio_trace_core0_count_addr=%s count=0x%s\n' "$choreofs_sio_trace_core0_count_addr" "$choreofs_sio_trace_core0_count"
+printf 'choreofs_sio_trace_core1_count_addr=%s count=0x%s\n' "$choreofs_sio_trace_core1_count_addr" "$choreofs_sio_trace_core1_count"
+printf 'choreofs_sio_core0_to_core1_tx_addr=%s count=0x%s\n' "$choreofs_sio_core0_to_core1_tx_addr" "$choreofs_sio_core0_to_core1_tx"
+printf 'choreofs_sio_core0_to_core1_rx_addr=%s count=0x%s\n' "$choreofs_sio_core0_to_core1_rx_addr" "$choreofs_sio_core0_to_core1_rx"
+printf 'choreofs_sio_core1_to_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_core1_to_core0_tx_addr" "$choreofs_sio_core1_to_core0_tx"
+printf 'choreofs_sio_core1_to_core0_rx_addr=%s count=0x%s\n' "$choreofs_sio_core1_to_core0_rx_addr" "$choreofs_sio_core1_to_core0_rx"
+printf 'choreofs_sio_role1_pending_seen_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_role1_pending_seen_core0_tx_addr" "$choreofs_sio_role1_pending_seen_core0_tx"
+printf 'choreofs_sio_role1_poll_seen_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_role1_poll_seen_core0_tx_addr" "$choreofs_sio_role1_poll_seen_core0_tx"
+printf 'choreofs_sio_role1_ready_seen_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_role1_ready_seen_core0_tx_addr" "$choreofs_sio_role1_ready_seen_core0_tx"
 printf 'baker_clock_watchdog_tick=0x%s\n' "$watchdog_tick"
 printf 'baker_clock_clk_ref_ctrl=0x%s\n' "$clk_ref_ctrl"
 printf 'baker_clock_clk_ref_selected=0x%s\n' "$clk_ref_selected"
+printf 'baker_clock_clk_sys_ctrl=0x%s\n' "$clk_sys_ctrl"
+printf 'baker_clock_clk_sys_selected=0x%s\n' "$clk_sys_selected"
+printf 'baker_clock_clk_peri_ctrl=0x%s\n' "$clk_peri_ctrl"
+printf 'baker_clock_clk_peri_selected=0x%s\n' "$clk_peri_selected"
 printf 'baker_clock_xosc_status=0x%s\n' "$xosc_status"
-trace_count_dec="$((16#$choreofs_sio_trace_count))"
-if (( trace_count_dec > 8 )); then
-  trace_count_dec=8
-fi
-trace_idx=0
-while (( trace_idx < trace_count_dec )); do
-  trace_addr="$(printf '0x%x' "$((choreofs_sio_trace_addr + trace_idx * 4))")"
-  trace_word="$(read_word "$trace_addr")"
-  printf 'choreofs_sio_trace[%d]_addr=%s value=0x%s\n' "$trace_idx" "$trace_addr" "$trace_word"
-  trace_idx=$((trace_idx + 1))
-done
+printf 'baker_clock_pll_sys_cs=0x%s\n' "$pll_sys_cs"
+printf 'baker_clock_pll_sys_fbdiv=0x%s\n' "$pll_sys_fbdiv"
+printf 'baker_clock_pll_sys_prim=0x%s\n' "$pll_sys_prim"
+print_sio_trace() {
+  local name="$1"
+  local base_addr="$2"
+  local count_hex="$3"
+  local count_dec="$((16#$count_hex))"
+  if (( count_dec > 16 )); then
+    count_dec=16
+  fi
+  local trace_idx=0
+  while (( trace_idx < count_dec )); do
+    local trace_addr
+    local trace_word
+    trace_addr="$(printf '0x%x' "$((base_addr + trace_idx * 4))")"
+    trace_word="$(read_word "$trace_addr")"
+    printf '%s[%d]_addr=%s value=0x%s\n' "$name" "$trace_idx" "$trace_addr" "$trace_word"
+    trace_idx=$((trace_idx + 1))
+  done
+}
+
+print_sio_trace choreofs_sio_trace_core0 "$choreofs_sio_trace_core0_addr" "$choreofs_sio_trace_core0_count"
+print_sio_trace choreofs_sio_trace_core1 "$choreofs_sio_trace_core1_addr" "$choreofs_sio_trace_core1_count"
 
 if [[ "$result" != "$expected_result" ]]; then
   echo "Baker hardware pattern $pattern failed: result mismatch" >&2
@@ -344,7 +414,14 @@ fi
 
 watchdog_tick_dec="$((16#$watchdog_tick))"
 clk_ref_selected_dec="$((16#$clk_ref_selected))"
+clk_sys_ctrl_dec="$((16#$clk_sys_ctrl))"
+clk_sys_selected_dec="$((16#$clk_sys_selected))"
+clk_peri_ctrl_dec="$((16#$clk_peri_ctrl))"
+clk_peri_selected_dec="$((16#$clk_peri_selected))"
 xosc_status_dec="$((16#$xosc_status))"
+pll_sys_cs_dec="$((16#$pll_sys_cs))"
+pll_sys_fbdiv_dec="$((16#$pll_sys_fbdiv))"
+pll_sys_prim_dec="$((16#$pll_sys_prim))"
 if (( (watchdog_tick_dec & 0x200) == 0 || (watchdog_tick_dec & 0x1ff) != 12 )); then
   echo "Baker hardware pattern $pattern failed: watchdog tick is not 1MHz from 12MHz XOSC" >&2
   exit 1
@@ -355,6 +432,22 @@ if (( (clk_ref_selected_dec & 0x4) == 0 )); then
 fi
 if (( (xosc_status_dec & 0x80000000) == 0 )); then
   echo "Baker hardware pattern $pattern failed: XOSC is not stable" >&2
+  exit 1
+fi
+if (( (pll_sys_cs_dec & 0x80000000) == 0 || pll_sys_fbdiv_dec != 125 )); then
+  echo "Baker hardware pattern $pattern failed: PLL_SYS is not locked at the 125MHz feedback divider" >&2
+  exit 1
+fi
+if (( ((pll_sys_prim_dec >> 16) & 0x7) != 6 || ((pll_sys_prim_dec >> 12) & 0x7) != 2 )); then
+  echo "Baker hardware pattern $pattern failed: PLL_SYS post dividers are not 6 and 2" >&2
+  exit 1
+fi
+if (( (clk_sys_ctrl_dec & 0x1) != 1 || ((clk_sys_ctrl_dec >> 5) & 0x7) != 0 || (clk_sys_selected_dec & 0x2) == 0 )); then
+  echo "Baker hardware pattern $pattern failed: clk_sys did not select PLL_SYS" >&2
+  exit 1
+fi
+if (( (clk_peri_ctrl_dec & 0x800) == 0 || ((clk_peri_ctrl_dec >> 5) & 0x7) != 0 || (clk_peri_selected_dec & 0x1) == 0 )); then
+  echo "Baker hardware pattern $pattern failed: clk_peri did not select clk_sys" >&2
   exit 1
 fi
 

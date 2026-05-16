@@ -10,35 +10,59 @@ if ! rustup target list --installed | rg -q '^wasm32-wasip1$'; then
 fi
 
 target_dir="$ROOT/target/wasip1-apps"
-wasip1_rustflags="${RUSTFLAGS:-} -C link-arg=--initial-memory=65536 -C link-arg=--max-memory=65536 -C link-arg=-zstack-size=4096"
-
-RUSTFLAGS="$wasip1_rustflags" \
-CARGO_TARGET_DIR="$target_dir" \
-  cargo build \
-    --manifest-path examples/wasip1-guests/swarm-node-apps/Cargo.toml \
-    --target wasm32-wasip1 \
-    --release \
-    --bins
-
-RUSTFLAGS="$wasip1_rustflags" \
-CARGO_TARGET_DIR="$target_dir" \
-  cargo build \
-    --manifest-path examples/wasip1-guests/wasip1-smoke-apps/Cargo.toml \
-    --target wasm32-wasip1 \
-    --release \
-    --bins
-
-RUSTFLAGS="$wasip1_rustflags" \
-CARGO_TARGET_DIR="$target_dir" \
-  cargo build \
-    --manifest-path examples/baker-firmware/wasip1/traffic/Cargo.toml \
-    --target wasm32-wasip1 \
-    --release \
-    --bins
-
 artifact_dir="$target_dir/wasm32-wasip1/release"
+wasip1_rustflags="${RUSTFLAGS:-} -C link-arg=--initial-memory=65536 -C link-arg=--max-memory=65536 -C link-arg=-zstack-size=4096"
+expected_wasms=(
+  wasip1-clock.wasm
+  wasip1-exit.wasm
+  wasip1-infinite-loop.wasm
+  wasip1-led-choreofs-traffic-cycle.wasm
+  wasip1-memory-grow-ok.wasm
+  wasip1-memory-grow-stale-lease.wasm
+  wasip1-random.wasm
+  wasip1-std-bad-path.wasm
+  wasip1-std-choreofs-append.wasm
+  wasip1-std-choreofs-read.wasm
+  wasip1-std-choreofs-static-write.wasm
+  wasip1-std-core-coverage.wasm
+  wasip1-stderr.wasm
+  wasip1-stdin.wasm
+  wasip1-stdout.wasm
+  wasip1-timer.wasm
+  wasip1-trap.wasm
+)
 
-while IFS= read -r wasm; do
+rm -rf "$artifact_dir"
+
+RUSTFLAGS="$wasip1_rustflags" \
+CARGO_TARGET_DIR="$target_dir" \
+  cargo build \
+    --manifest-path guest/wasip1-programs/Cargo.toml \
+    --target wasm32-wasip1 \
+    --release \
+    --bins
+
+RUSTFLAGS="$wasip1_rustflags" \
+CARGO_TARGET_DIR="$target_dir" \
+  cargo build \
+    --manifest-path examples/baker-firmware/wasip1/guest/Cargo.toml \
+    --target wasm32-wasip1 \
+    --release \
+    --bins
+
+expected_list="$(mktemp "${TMPDIR:-/tmp}/hibana-pico-expected-wasm.XXXXXX")"
+actual_list="$(mktemp "${TMPDIR:-/tmp}/hibana-pico-actual-wasm.XXXXXX")"
+trap 'rm -f "$expected_list" "$actual_list"' EXIT
+
+printf '%s\n' "${expected_wasms[@]}" | sort > "$expected_list"
+find "$artifact_dir" -maxdepth 1 -type f -name '*.wasm' -exec basename {} \; | sort > "$actual_list"
+if ! diff -u "$expected_list" "$actual_list"; then
+  echo "WASI P1 guest artifact set differs from expected current outputs" >&2
+  exit 1
+fi
+
+while IFS= read -r artifact; do
+  wasm="$artifact_dir/$artifact"
   if [[ ! -s "$wasm" ]]; then
     echo "missing or empty WASI P1 guest artifact: $wasm" >&2
     exit 1
@@ -51,6 +75,6 @@ while IFS= read -r wasm; do
     echo "WASI P1 guest artifact contains forbidden P2/WIT/Component surface: $wasm" >&2
     exit 1
   fi
-done < <(find "$artifact_dir" -maxdepth 1 -type f -name '*.wasm' | sort)
+done < "$expected_list"
 
 echo "wasip1 guest artifacts ok"

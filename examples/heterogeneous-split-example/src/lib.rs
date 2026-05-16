@@ -1,9 +1,6 @@
 #![no_std]
 
-use core::{
-    cell::UnsafeCell,
-    sync::atomic::{AtomicBool, AtomicU8, Ordering},
-};
+use core::ptr::{read_volatile, write_volatile};
 
 use hibana::{
     g,
@@ -19,54 +16,63 @@ pub struct ControlArtifacts;
 
 const HETEROGENEOUS_CARRIER: appkit::CarrierKind = appkit::CarrierKind::new(3001);
 const EXAMPLE_FRAME_BYTES: usize = 32;
+const EXAMPLE_LANE_SLOTS: u8 = 4;
 
-static ROLE0_PHASE: AtomicU8 = AtomicU8::new(0);
-static ROLE0_TO_ROLE1_SENT: AtomicU8 = AtomicU8::new(0);
-static ROLE0_TO_ROLE1_RECV: AtomicU8 = AtomicU8::new(0);
-static ROLE1_TO_ROLE2_SENT: AtomicU8 = AtomicU8::new(0);
-static ROLE1_TO_ROLE2_RECV: AtomicU8 = AtomicU8::new(0);
-static ROLE2_TO_ROLE0_SENT: AtomicU8 = AtomicU8::new(0);
+static mut ROLE0_PHASE: u8 = 0;
+static mut ROLE0_TO_ROLE1_SENT: u8 = 0;
+static mut ROLE0_TO_ROLE1_RECV: u8 = 0;
+static mut ROLE1_TO_ROLE2_SENT: u8 = 0;
+static mut ROLE1_TO_ROLE2_RECV: u8 = 0;
+static mut ROLE2_TO_ROLE0_SENT: u8 = 0;
 
-struct ExampleFrameSlot {
-    occupied: AtomicBool,
-    session_id: UnsafeCell<u32>,
-    sender: UnsafeCell<u8>,
-    peer: UnsafeCell<u8>,
-    label: UnsafeCell<hibana::integration::transport::FrameLabel>,
-    len: UnsafeCell<usize>,
-    bytes: UnsafeCell<[u8; EXAMPLE_FRAME_BYTES]>,
+fn read_counter(counter: *const u8) -> u8 {
+    unsafe { read_volatile(counter) }
 }
 
-unsafe impl Sync for ExampleFrameSlot {}
+fn write_counter(counter: *mut u8, value: u8) {
+    unsafe {
+        write_volatile(counter, value);
+    }
+}
+
+fn bump_counter(counter: *mut u8) {
+    let next = read_counter(counter).wrapping_add(1);
+    write_counter(counter, next);
+}
+
+struct ExampleFrameSlot {
+    ready: bool,
+    session_id: u32,
+    sender: u8,
+    peer: u8,
+    label: hibana::integration::transport::FrameLabel,
+    len: usize,
+    bytes: [u8; EXAMPLE_FRAME_BYTES],
+}
 
 impl ExampleFrameSlot {
     const fn empty() -> Self {
         Self {
-            occupied: AtomicBool::new(false),
-            session_id: UnsafeCell::new(0),
-            sender: UnsafeCell::new(0),
-            peer: UnsafeCell::new(0),
-            label: UnsafeCell::new(hibana::integration::transport::FrameLabel::new(0)),
-            len: UnsafeCell::new(0),
-            bytes: UnsafeCell::new([0; EXAMPLE_FRAME_BYTES]),
+            ready: false,
+            session_id: 0,
+            sender: 0,
+            peer: 0,
+            label: hibana::integration::transport::FrameLabel::new(0),
+            len: 0,
+            bytes: [0; EXAMPLE_FRAME_BYTES],
         }
     }
 
-    fn clear(&self) {
-        self.occupied.store(false, Ordering::Release);
+    fn clear(&mut self) {
+        *self = Self::empty();
     }
 
     fn matches(&self, session_id: u32, peer: u8) -> bool {
-        if !self.occupied.load(Ordering::Acquire) {
-            return false;
-        }
-        let stored_session_id = unsafe { *self.session_id.get() };
-        let stored_peer = unsafe { *self.peer.get() };
-        stored_session_id == session_id && stored_peer == peer
+        self.ready && self.session_id == session_id && self.peer == peer
     }
 
     fn push(
-        &self,
+        &mut self,
         session_id: u32,
         sender: u8,
         peer: u8,
@@ -77,22 +83,21 @@ impl ExampleFrameSlot {
         if bytes.len() > EXAMPLE_FRAME_BYTES {
             return Err(hibana::integration::transport::TransportError::Failed);
         }
-        if self.occupied.swap(true, Ordering::AcqRel) {
+        if self.ready {
             return Err(hibana::integration::transport::TransportError::Failed);
         }
-        unsafe {
-            *self.session_id.get() = session_id;
-            *self.sender.get() = sender;
-            *self.peer.get() = peer;
-            *self.label.get() = label;
-            *self.len.get() = bytes.len();
-            (&mut *self.bytes.get())[..bytes.len()].copy_from_slice(bytes);
-        }
+        self.session_id = session_id;
+        self.sender = sender;
+        self.peer = peer;
+        self.label = label;
+        self.len = bytes.len();
+        self.bytes[..bytes.len()].copy_from_slice(bytes);
+        self.ready = true;
         Ok(())
     }
 
     fn pop_into<'a>(
-        &self,
+        &mut self,
         session_id: u32,
         peer: u8,
         rx: &'a mut ExampleRx,
@@ -100,10 +105,8 @@ impl ExampleFrameSlot {
         if !self.matches(session_id, peer) {
             return None;
         }
-        let len = unsafe { *self.len.get() };
-        unsafe {
-            rx.bytes[..len].copy_from_slice(&(&*self.bytes.get())[..len]);
-        }
+        let len = self.len;
+        rx.bytes[..len].copy_from_slice(&self.bytes[..len]);
         self.clear();
         Some(hibana::integration::wire::Payload::new(&rx.bytes[..len]))
     }
@@ -116,16 +119,76 @@ impl ExampleFrameSlot {
         if !self.matches(session_id, peer) {
             return None;
         }
-        Some(unsafe { *self.label.get() })
+        Some(self.label)
     }
 }
 
-static EXAMPLE_FRAME_0_TO_1: ExampleFrameSlot = ExampleFrameSlot::empty();
-static EXAMPLE_FRAME_1_TO_2: ExampleFrameSlot = ExampleFrameSlot::empty();
-static EXAMPLE_FRAME_2_TO_0: ExampleFrameSlot = ExampleFrameSlot::empty();
+struct ExampleEdgeSlots {
+    lane0: ExampleFrameSlot,
+    lane1: ExampleFrameSlot,
+    lane2: ExampleFrameSlot,
+    lane3: ExampleFrameSlot,
+}
 
-#[cfg(feature = "wasm-engine-core")]
-static HETEROGENEOUS_WASI_GUEST_ARENA: appkit::WasiGuestArena = appkit::WasiGuestArena::empty();
+impl ExampleEdgeSlots {
+    const fn empty() -> Self {
+        Self {
+            lane0: ExampleFrameSlot::empty(),
+            lane1: ExampleFrameSlot::empty(),
+            lane2: ExampleFrameSlot::empty(),
+            lane3: ExampleFrameSlot::empty(),
+        }
+    }
+
+    fn slot(&self, lane: u8) -> Option<&ExampleFrameSlot> {
+        match lane {
+            0 => Some(&self.lane0),
+            1 => Some(&self.lane1),
+            2 => Some(&self.lane2),
+            3 => Some(&self.lane3),
+            _ => None,
+        }
+    }
+
+    fn slot_mut(&mut self, lane: u8) -> Option<&mut ExampleFrameSlot> {
+        match lane {
+            0 => Some(&mut self.lane0),
+            1 => Some(&mut self.lane1),
+            2 => Some(&mut self.lane2),
+            3 => Some(&mut self.lane3),
+            _ => None,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.lane0.clear();
+        self.lane1.clear();
+        self.lane2.clear();
+        self.lane3.clear();
+    }
+}
+
+static mut EXAMPLE_FRAME_0_TO_1: ExampleEdgeSlots = ExampleEdgeSlots::empty();
+static mut EXAMPLE_FRAME_1_TO_2: ExampleEdgeSlots = ExampleEdgeSlots::empty();
+static mut EXAMPLE_FRAME_2_TO_0: ExampleEdgeSlots = ExampleEdgeSlots::empty();
+
+fn edge_slots_for_send(local_role: u8, peer: u8) -> Option<*mut ExampleEdgeSlots> {
+    match (local_role, peer) {
+        (0, 1) => Some(core::ptr::addr_of_mut!(EXAMPLE_FRAME_0_TO_1)),
+        (1, 2) => Some(core::ptr::addr_of_mut!(EXAMPLE_FRAME_1_TO_2)),
+        (2, 0) => Some(core::ptr::addr_of_mut!(EXAMPLE_FRAME_2_TO_0)),
+        _ => None,
+    }
+}
+
+fn edge_slots_for_recv(local_role: u8) -> Option<*mut ExampleEdgeSlots> {
+    match local_role {
+        0 => Some(core::ptr::addr_of_mut!(EXAMPLE_FRAME_2_TO_0)),
+        1 => Some(core::ptr::addr_of_mut!(EXAMPLE_FRAME_0_TO_1)),
+        2 => Some(core::ptr::addr_of_mut!(EXAMPLE_FRAME_1_TO_2)),
+        _ => None,
+    }
+}
 
 #[cfg(all(not(test), target_os = "none"))]
 const HETEROGENEOUS_ATTACH_SLAB_BYTES: usize = 32 * 1024;
@@ -153,10 +216,12 @@ pub struct ExampleCarrier;
 pub struct ExampleTx {
     local_role: u8,
     session_id: u32,
+    lane: u8,
 }
 pub struct ExampleRx {
     local_role: u8,
     session_id: u32,
+    lane: u8,
     bytes: [u8; EXAMPLE_FRAME_BYTES],
 }
 
@@ -172,15 +237,23 @@ impl hibana::integration::Transport for ExampleCarrier {
         Self: 'a;
     type Metrics = ();
 
-    fn open<'a>(&'a self, local_role: u8, session_id: u32) -> (Self::Tx<'a>, Self::Rx<'a>) {
+    fn open<'a>(
+        &'a self,
+        local_role: u8,
+        session_id: u32,
+        lane: u8,
+    ) -> (Self::Tx<'a>, Self::Rx<'a>) {
+        assert!(lane < EXAMPLE_LANE_SLOTS);
         (
             ExampleTx {
                 local_role,
                 session_id,
+                lane,
             },
             ExampleRx {
                 local_role,
                 session_id,
+                lane,
                 bytes: [0; EXAMPLE_FRAME_BYTES],
             },
         )
@@ -197,20 +270,35 @@ impl hibana::integration::Transport for ExampleCarrier {
     {
         assert_ne!(tx.session_id, 0);
         assert_ne!(outgoing.peer(), tx.local_role);
-        let slot = match (tx.local_role, outgoing.peer()) {
+        if outgoing.lane() != tx.lane {
+            return core::task::Poll::Ready(Err(
+                hibana::integration::transport::TransportError::Failed,
+            ));
+        }
+        let edge = match edge_slots_for_send(tx.local_role, outgoing.peer()) {
+            Some(edge) => edge,
+            None => {
+                return core::task::Poll::Ready(Err(
+                    hibana::integration::transport::TransportError::Failed,
+                ));
+            }
+        };
+        match (tx.local_role, outgoing.peer()) {
             (0, 1) => {
-                ROLE0_TO_ROLE1_SENT.fetch_add(1, Ordering::AcqRel);
-                &EXAMPLE_FRAME_0_TO_1
+                bump_counter(core::ptr::addr_of_mut!(ROLE0_TO_ROLE1_SENT));
             }
             (1, 2) => {
-                ROLE1_TO_ROLE2_SENT.fetch_add(1, Ordering::AcqRel);
-                &EXAMPLE_FRAME_1_TO_2
+                bump_counter(core::ptr::addr_of_mut!(ROLE1_TO_ROLE2_SENT));
             }
             (2, 0) => {
-                ROLE2_TO_ROLE0_SENT.fetch_add(1, Ordering::AcqRel);
-                &EXAMPLE_FRAME_2_TO_0
+                bump_counter(core::ptr::addr_of_mut!(ROLE2_TO_ROLE0_SENT));
             }
-            _ => {
+            _ => {}
+        };
+        let edge = unsafe { &mut *edge };
+        let slot = match edge.slot_mut(outgoing.lane()) {
+            Some(slot) => slot,
+            None => {
                 return core::task::Poll::Ready(Err(
                     hibana::integration::transport::TransportError::Failed,
                 ));
@@ -242,11 +330,18 @@ impl hibana::integration::Transport for ExampleCarrier {
         assert_ne!(rx.session_id, 0);
         let local_role = rx.local_role;
         let session_id = rx.session_id;
-        let slot = match local_role {
-            0 => &EXAMPLE_FRAME_2_TO_0,
-            1 => &EXAMPLE_FRAME_0_TO_1,
-            2 => &EXAMPLE_FRAME_1_TO_2,
-            _ => {
+        let edge = match edge_slots_for_recv(local_role) {
+            Some(edge) => edge,
+            None => {
+                return core::task::Poll::Ready(Err(
+                    hibana::integration::transport::TransportError::Failed,
+                ));
+            }
+        };
+        let edge = unsafe { &mut *edge };
+        let slot = match edge.slot_mut(rx.lane) {
+            Some(slot) => slot,
+            None => {
                 return core::task::Poll::Ready(Err(
                     hibana::integration::transport::TransportError::Failed,
                 ));
@@ -256,10 +351,10 @@ impl hibana::integration::Transport for ExampleCarrier {
             Some(payload) => {
                 match local_role {
                     1 => {
-                        ROLE0_TO_ROLE1_RECV.fetch_add(1, Ordering::AcqRel);
+                        bump_counter(core::ptr::addr_of_mut!(ROLE0_TO_ROLE1_RECV));
                     }
                     2 => {
-                        ROLE1_TO_ROLE2_RECV.fetch_add(1, Ordering::AcqRel);
+                        bump_counter(core::ptr::addr_of_mut!(ROLE1_TO_ROLE2_RECV));
                     }
                     _ => {}
                 }
@@ -275,6 +370,7 @@ impl hibana::integration::Transport for ExampleCarrier {
     fn requeue<'a>(&'a self, rx: &'a mut Self::Rx<'a>) {
         assert_ne!(rx.session_id, 0);
         core::hint::black_box(rx.local_role);
+        core::hint::black_box(rx.lane);
     }
 
     fn drain_events(
@@ -295,12 +391,9 @@ impl hibana::integration::Transport for ExampleCarrier {
         &'a self,
         rx: &'a Self::Rx<'a>,
     ) -> Option<hibana::integration::transport::FrameLabel> {
-        let slot = match rx.local_role {
-            0 => &EXAMPLE_FRAME_2_TO_0,
-            1 => &EXAMPLE_FRAME_0_TO_1,
-            2 => &EXAMPLE_FRAME_1_TO_2,
-            _ => return None,
-        };
+        let edge = edge_slots_for_recv(rx.local_role)?;
+        let edge = unsafe { &*edge };
+        let slot = edge.slot(rx.lane)?;
         slot.frame_label(rx.session_id, rx.local_role)
     }
 
@@ -353,7 +446,7 @@ impl appkit::Localside<Control> for ControlLocal {
                 .send(&())
                 .await
                 .expect("role0 sends through example carrier");
-            ROLE0_PHASE.store(1, Ordering::Release);
+            write_counter(core::ptr::addr_of_mut!(ROLE0_PHASE), 1);
             ctx.pending().await
         }
     }
@@ -444,12 +537,6 @@ impl appkit::LogicalImage<Control> for site::Local<image::LinuxControl> {
     fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
         LINUX_CONTROL_ATTACH_STORAGE.lease()
     }
-
-    #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        core::hint::black_box(ROLE);
-        HETEROGENEOUS_WASI_GUEST_ARENA.storage()
-    }
 }
 
 impl appkit::LogicalImage<Control> for site::Local<image::M33Realtime> {
@@ -477,12 +564,6 @@ impl appkit::LogicalImage<Control> for site::Local<image::M33Realtime> {
     #[cfg(all(not(test), target_os = "none"))]
     fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
         M33_REALTIME_ATTACH_STORAGE.lease()
-    }
-
-    #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        core::hint::black_box(ROLE);
-        HETEROGENEOUS_WASI_GUEST_ARENA.storage()
     }
 }
 
@@ -512,26 +593,22 @@ impl appkit::LogicalImage<Control> for site::Local<image::Rp2040Io> {
     fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
         RP2040_IO_ATTACH_STORAGE.lease()
     }
-
-    #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        core::hint::black_box(ROLE);
-        HETEROGENEOUS_WASI_GUEST_ARENA.storage()
-    }
 }
 
 pub static ARTIFACTS: ControlArtifacts = ControlArtifacts;
 
 fn reset_live_carrier_evidence() {
-    ROLE0_PHASE.store(0, Ordering::Release);
-    ROLE0_TO_ROLE1_SENT.store(0, Ordering::Release);
-    ROLE0_TO_ROLE1_RECV.store(0, Ordering::Release);
-    ROLE1_TO_ROLE2_SENT.store(0, Ordering::Release);
-    ROLE1_TO_ROLE2_RECV.store(0, Ordering::Release);
-    ROLE2_TO_ROLE0_SENT.store(0, Ordering::Release);
-    EXAMPLE_FRAME_0_TO_1.clear();
-    EXAMPLE_FRAME_1_TO_2.clear();
-    EXAMPLE_FRAME_2_TO_0.clear();
+    write_counter(core::ptr::addr_of_mut!(ROLE0_PHASE), 0);
+    write_counter(core::ptr::addr_of_mut!(ROLE0_TO_ROLE1_SENT), 0);
+    write_counter(core::ptr::addr_of_mut!(ROLE0_TO_ROLE1_RECV), 0);
+    write_counter(core::ptr::addr_of_mut!(ROLE1_TO_ROLE2_SENT), 0);
+    write_counter(core::ptr::addr_of_mut!(ROLE1_TO_ROLE2_RECV), 0);
+    write_counter(core::ptr::addr_of_mut!(ROLE2_TO_ROLE0_SENT), 0);
+    unsafe {
+        (&mut *core::ptr::addr_of_mut!(EXAMPLE_FRAME_0_TO_1)).clear();
+        (&mut *core::ptr::addr_of_mut!(EXAMPLE_FRAME_1_TO_2)).clear();
+        (&mut *core::ptr::addr_of_mut!(EXAMPLE_FRAME_2_TO_0)).clear();
+    }
 }
 
 pub fn assert_single_role_image<R, I>(
@@ -566,20 +643,20 @@ pub fn assert_peer_manifests() {
     let linux = appkit::run::<site::Local<image::LinuxControl>, Control>(
         ARTIFACTS.for_image::<site::Local<image::LinuxControl>>(),
     );
-    assert_eq!(ROLE0_PHASE.load(Ordering::Acquire), 1);
-    assert_eq!(ROLE0_TO_ROLE1_SENT.load(Ordering::Acquire), 1);
-    assert_eq!(ROLE0_TO_ROLE1_RECV.load(Ordering::Acquire), 0);
+    assert_eq!(read_counter(core::ptr::addr_of!(ROLE0_PHASE)), 1);
+    assert_eq!(read_counter(core::ptr::addr_of!(ROLE0_TO_ROLE1_SENT)), 1);
+    assert_eq!(read_counter(core::ptr::addr_of!(ROLE0_TO_ROLE1_RECV)), 0);
     let m33 = appkit::run::<site::Local<image::M33Realtime>, Control>(
         ARTIFACTS.for_image::<site::Local<image::M33Realtime>>(),
     );
-    assert_eq!(ROLE0_TO_ROLE1_RECV.load(Ordering::Acquire), 1);
-    assert_eq!(ROLE1_TO_ROLE2_SENT.load(Ordering::Acquire), 1);
-    assert_eq!(ROLE1_TO_ROLE2_RECV.load(Ordering::Acquire), 0);
+    assert_eq!(read_counter(core::ptr::addr_of!(ROLE0_TO_ROLE1_RECV)), 1);
+    assert_eq!(read_counter(core::ptr::addr_of!(ROLE1_TO_ROLE2_SENT)), 1);
+    assert_eq!(read_counter(core::ptr::addr_of!(ROLE1_TO_ROLE2_RECV)), 0);
     let rp2040 = appkit::run::<site::Local<image::Rp2040Io>, Control>(
         ARTIFACTS.for_image::<site::Local<image::Rp2040Io>>(),
     );
-    assert_eq!(ROLE1_TO_ROLE2_RECV.load(Ordering::Acquire), 1);
-    assert_eq!(ROLE2_TO_ROLE0_SENT.load(Ordering::Acquire), 1);
+    assert_eq!(read_counter(core::ptr::addr_of!(ROLE1_TO_ROLE2_RECV)), 1);
+    assert_eq!(read_counter(core::ptr::addr_of!(ROLE2_TO_ROLE0_SENT)), 1);
     assert_eq!(
         linux.manifest().choreography_session_id,
         m33.manifest().choreography_session_id
@@ -591,4 +668,104 @@ pub fn assert_peer_manifests() {
     assert!(linux.manifest().can_attach_peer(&m33.manifest()));
     assert!(m33.manifest().can_attach_peer(&rp2040.manifest()));
     assert!(rp2040.manifest().can_attach_peer(&linux.manifest()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rx(role: u8, session_id: u32, lane: u8) -> ExampleRx {
+        ExampleRx {
+            local_role: role,
+            session_id,
+            lane,
+            bytes: [0; EXAMPLE_FRAME_BYTES],
+        }
+    }
+
+    #[test]
+    fn frame_slot_publishes_only_complete_ready_frames() {
+        let mut slot = ExampleFrameSlot::empty();
+        let label = hibana::integration::transport::FrameLabel::new(31);
+        let payload = hibana::integration::wire::Payload::new(b"abc");
+        let mut receiver = rx(1, 7, 0);
+
+        assert!(slot.pop_into(7, 1, &mut receiver).is_none());
+        assert!(slot.push(7, 0, 1, label, payload).is_ok());
+        assert_eq!(slot.frame_label(7, 1), Some(label));
+        assert!(
+            slot.push(
+                7,
+                0,
+                1,
+                hibana::integration::transport::FrameLabel::new(32),
+                hibana::integration::wire::Payload::new(b"def"),
+            )
+            .is_err()
+        );
+
+        let received = match slot.pop_into(7, 1, &mut receiver) {
+            Some(payload) => payload,
+            None => panic!("ready frame must be visible to the matching receiver"),
+        };
+        assert_eq!(received.as_bytes(), b"abc");
+        assert!(slot.pop_into(7, 1, &mut receiver).is_none());
+    }
+
+    #[test]
+    fn edge_slots_are_lane_scoped() {
+        let mut edge = ExampleEdgeSlots::empty();
+        let label0 = hibana::integration::transport::FrameLabel::new(31);
+        let label1 = hibana::integration::transport::FrameLabel::new(41);
+
+        assert!(
+            edge.slot_mut(0)
+                .expect("lane 0 slot must exist")
+                .push(
+                    9,
+                    0,
+                    1,
+                    label0,
+                    hibana::integration::wire::Payload::new(b"lane0"),
+                )
+                .is_ok()
+        );
+        assert!(
+            edge.slot_mut(1)
+                .expect("lane 1 slot must exist")
+                .push(
+                    9,
+                    0,
+                    1,
+                    label1,
+                    hibana::integration::wire::Payload::new(b"lane1"),
+                )
+                .is_ok()
+        );
+
+        let mut receiver0 = rx(1, 9, 0);
+        let mut receiver1 = rx(1, 9, 1);
+        let received0 =
+            match edge
+                .slot_mut(0)
+                .expect("lane 0 slot must exist")
+                .pop_into(9, 1, &mut receiver0)
+            {
+                Some(payload) => payload,
+                None => panic!("lane 0 payload must be ready"),
+            };
+        let received1 =
+            match edge
+                .slot_mut(1)
+                .expect("lane 1 slot must exist")
+                .pop_into(9, 1, &mut receiver1)
+            {
+                Some(payload) => payload,
+                None => panic!("lane 1 payload must be ready"),
+            };
+
+        assert_eq!(received0.as_bytes(), b"lane0");
+        assert_eq!(received1.as_bytes(), b"lane1");
+        assert!(edge.slot(4).is_none());
+    }
 }

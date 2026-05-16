@@ -1,7 +1,7 @@
 # CYW43439 Firmware Artifacts
 
 This directory is for local Raspberry Pi Pico W / Pico 2 W CYW43439 Wi-Fi
-firmware artifacts used by the Hibana/Pico QEMU load-prefix smoke.
+firmware artifacts used by the Hibana/Pico QEMU load-prefix proof.
 
 Do not commit the generated firmware blobs, manifest, disassembly excerpt, or
 local license copy. They are intentionally ignored by git. Users should fetch

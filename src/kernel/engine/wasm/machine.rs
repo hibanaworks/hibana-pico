@@ -418,7 +418,7 @@ impl FuncType {
 pub(super) struct Import<'a> {
     pub function_index: u32,
     pub host: HostImport,
-    _module: core::marker::PhantomData<&'a [u8]>,
+    module_bytes: core::marker::PhantomData<&'a [u8]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1253,7 +1253,7 @@ impl<'a> Module<'a> {
             self.imports[index] = Some(Import {
                 function_index: index as u32,
                 host,
-                _module: core::marker::PhantomData,
+                module_bytes: core::marker::PhantomData,
             });
             self.import_type_indices[index] = type_index;
         }
@@ -1906,28 +1906,6 @@ fn decode_core_misc_instr(reader: &mut Reader<'_>) -> Result<MiscInstr, WasmErro
         }),
         _ => Err(WasmError::Unsupported("unsupported misc opcode")),
     }
-}
-
-fn validate_core_wasip1_imports(
-    module: &Module<'_>,
-    handlers: Wasip1HandlerSet,
-) -> Result<(), WasmError> {
-    for import in module
-        .imports
-        .iter()
-        .copied()
-        .flatten()
-        .take(module.import_count)
-    {
-        let HostImport::Wasip1(name) = import.host;
-        let Some(syscall) = name.supported_syscall() else {
-            return Err(WasmError::Unsupported(disabled_wasip1_import_message(name)));
-        };
-        if !handlers.supports(syscall) {
-            return Err(WasmError::Unsupported(disabled_wasip1_import_message(name)));
-        }
-    }
-    Ok(())
 }
 
 fn disabled_wasip1_import_message(name: Wasip1ImportName) -> &'static str {
@@ -3849,7 +3827,6 @@ impl<'a> Vm<'a> {
             let core = core::ptr::addr_of_mut!((*dst).core);
             let core_module = core::ptr::addr_of_mut!((*core).module);
             Module::parse_in_place(core_module, module)?;
-            validate_core_wasip1_imports(&*core_module, handlers)?;
             Interpreter::init_from_parsed_module_in_place(core)?;
             core::ptr::addr_of_mut!((*dst).handlers).write(handlers);
             core::ptr::addr_of_mut!((*dst).done).write(false);
@@ -5122,8 +5099,10 @@ mod tests {
             0x41, 0x01, 0x10, 0x00, 0x1a, 0x0b,
         ];
 
+        let mut disabled_guest = TestVm::new(CORE_WASIP1_FD_WRITE_GUEST, Wasip1HandlerSet::EMPTY)
+            .expect("static fd_write import is load evidence, not admission authority");
         assert!(matches!(
-            TestVm::new(CORE_WASIP1_FD_WRITE_GUEST, Wasip1HandlerSet::EMPTY),
+            disabled_guest.resume(test_budget()),
             Err(WasmError::Unsupported(
                 "wasip1 fd_write disabled by feature profile"
             ))
@@ -5171,8 +5150,10 @@ mod tests {
                         ],
                         true,
                     );
+                    let mut disabled_guest = TestVm::new(&fd_read, Wasip1HandlerSet::PICO_MIN)
+                        .expect("static fd_read import is not admission authority");
                     assert!(matches!(
-                        TestVm::new(&fd_read, Wasip1HandlerSet::PICO_MIN),
+                        disabled_guest.resume(test_budget()),
                         Err(WasmError::Unsupported(
                             "wasip1 fd_read disabled by feature profile"
                         ))
@@ -5306,12 +5287,11 @@ mod tests {
                         &[TestWasmArg::I32(3)],
                         false,
                     );
+                    let mut guest = TestVm::new(&module, Wasip1HandlerSet::FULL)
+                        .expect("static unsupported import is not admission authority");
                     assert!(
-                        matches!(
-                            TestVm::new(&module, Wasip1HandlerSet::FULL),
-                            Err(WasmError::Unsupported(_))
-                        ),
-                        "{} should be rejected by the active WASI P1 surface",
+                        matches!(guest.resume(test_budget()), Err(WasmError::Unsupported(_))),
+                        "{} should fault only when the unsupported WASI P1 import is called",
                         unsupported.name()
                     );
                 }
@@ -5324,8 +5304,10 @@ mod tests {
                         &[TestWasmArg::I32(1), TestWasmArg::I32(88)],
                         true,
                     );
+                    let mut disabled_guest = TestVm::new(&clock_res, Wasip1HandlerSet::PICO_MIN)
+                        .expect("static clock_res_get import is not admission authority");
                     assert!(matches!(
-                        TestVm::new(&clock_res, Wasip1HandlerSet::PICO_MIN),
+                        disabled_guest.resume(test_budget()),
                         Err(WasmError::Unsupported(
                             "wasip1 clock_res_get disabled by feature profile"
                         ))
