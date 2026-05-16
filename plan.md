@@ -2350,6 +2350,10 @@ Required:
 - partial send state belongs to the lane-local `Tx`, but partial receive state
   belongs to the physical local-role/core stream parser; it must not be owned by
   each lane-local `Rx`
+- Hibana's protocol state does not need shared atomics. The core model is
+  affine endpoint ownership: a continuation is owned, moved, or absent. Route
+  readiness, loop state, ChoreoFS facts, ledger facts, and WASI guest ownership
+  must not be represented as shared atomic flags.
 - ownership first: if physical ownership can express the state, that is the
   design
 - do not replace ownership with an atomic mailbox just because the target has
@@ -2359,17 +2363,22 @@ Required:
   complexity
 - true shared concurrent ownership may use read-modify-write atomics when the
   target provides them; this is allowed because it is the simplest and fastest
-  ownership primitive for that job
+  ownership primitive for that job. Such atomics are site/carrier implementation
+  mechanics only; they are never choreography progress, route evidence,
+  resolver state, WASI admission, or guest-storage ownership.
 - RP2040/thumbv6m SIO carrier code must not require pointer-width RMW atomics;
   the Baker SIO carrier is core-owned and structured without atomic slot
   ownership
-- appkit embedded WASI guest storage uses an atomic lease on targets with
-  pointer-width RMW atomics and a single-owner lease on targets without them;
-  atomics are never a hidden portability requirement for bare-metal images
-- on no-atomic targets the WASI guest arena is intentionally not `Sync`; each
-  physical artifact must provide a separate owner arena for each logical image
-  that can run a WASI guest
+- appkit embedded WASI guest storage uses a single-owner arena lease on every
+  target; atomics are never a hidden portability requirement for bare-metal
+  images
+- the WASI guest arena is intentionally not `Sync`; each physical artifact must
+  provide a separate owner arena for each logical image that can run a WASI
+  guest
 - `NoWasi` logical images must not lease WASI guest storage
+- Baker route examples must not use shared atomic readiness flags. Timer facts
+  and route control tags must move as choreography-visible messages over
+  Endpoint/carrier; the resolver selects only at the explicit route point.
 - `recv_frame_hint` is a route-observation hint-drain: it must not consume
   payload bytes, and it must not yield the same frame label twice before fresh
   receive state is staged by `poll_recv` or `requeue`
@@ -2920,6 +2929,9 @@ Different target triples.
 - RP2040 core0/core1 split uses `example-defined rp2040_sio::SIO` as a real materialized carrier.
 - Every cross-site link carries typed choreography frames only.
 - Every external boundary is typed and endpoint-driven.
+- Hibana protocol state is affine ownership, not shared atomic state.
+- Shared atomics must not model route readiness, protocol progress, loop state,
+  ChoreoFS facts, ledger facts, WASI admission, or guest-storage ownership.
 - Site may host engine capacity but may not complete or authorize WASI P1 imports.
 - `RouteKey<Target>` is a derived witness, not app-level authority.
 - ChoreoFS is a bounded path/object fact resolver, not host filesystem / POSIX compatibility / hidden fallback.

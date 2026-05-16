@@ -86,6 +86,16 @@ if rg -n -S 'RefCell|CarrierAttachState|AttachedCarrierFrame|push_attached_frame
   exit 1
 fi
 
+if rg -n -S 'AtomicBool|compare_exchange\(false, true|unsafe impl Sync for WasiGuestArena|pub fn storage<.*&'\''static self' src/appkit.rs; then
+  echo "plan gate failed: WASI guest arena must be single-owner storage, not a shared atomic lease" >&2
+  exit 1
+fi
+
+if rg -n -S 'Atomic(Bool|U|I|Ptr)|Ordering|compare_exchange|fetch_|load\(Ordering|store\(.*Ordering' examples/baker-firmware/src; then
+  echo "plan gate failed: Baker examples must not use shared atomic readiness/state flags" >&2
+  exit 1
+fi
+
 if rg -n -S 'rp2040-boot2|rp2040_boot2' examples/baker-firmware/Cargo.toml examples/baker-firmware/src; then
   echo "plan gate failed: Baker boot code must live in the Baker example, not an external boot crate" >&2
   exit 1

@@ -1,8 +1,6 @@
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_std)]
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_main)]
 
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use baker_firmware::{BakerArtifacts, BakerCapsuleFacts, BakerPlacement};
 use hibana::{
     g,
@@ -33,8 +31,6 @@ type TimerExpired = g::Msg<LABEL_TIMER_EXPIRED_MESSAGE, u8>;
 type TimerRouteDone = g::Msg<LABEL_TIMER_ROUTE_DONE, u8>;
 type TimerFiredFact = g::Msg<LABEL_TIMER_FIRED_FACT, u8>;
 type TimerRouteAck = g::Msg<LABEL_TIMER_ROUTE_ACK, u8>;
-
-static TIMER_FACT_READY: AtomicBool = AtomicBool::new(false);
 
 pub struct TimerRoute;
 pub struct TimerRouteLocal;
@@ -72,11 +68,7 @@ fn timer_route_resolver(context: ResolverContext) -> Result<RouteResolution, Res
         return Err(ResolverError::reject());
     }
 
-    if TIMER_FACT_READY.load(Ordering::Acquire) {
-        Ok(RouteResolution::Arm(1))
-    } else {
-        Ok(RouteResolution::Defer { retry_hint: 1 })
-    }
+    Ok(RouteResolution::Arm(1))
 }
 
 impl appkit::Capsule for TimerRoute {
@@ -142,7 +134,6 @@ impl appkit::Localside<TimerRoute> for TimerRouteLocal {
                 if fact != 1 {
                     return Err(TimerRouteError::RuntimeViolation);
                 }
-                TIMER_FACT_READY.store(true, Ordering::Release);
                 baker_firmware::record_choreofs_engine_status(0x5452_0110);
                 baker_firmware::record_choreofs_driver_trace(0x5452_0110);
 
@@ -182,7 +173,6 @@ impl appkit::Localside<TimerRoute> for TimerRouteLocal {
             if ROLE == 0 {
                 baker_firmware::record_choreofs_driver_trace(0x5452_000f);
                 baker_firmware::baker_poll_delay(100);
-                TIMER_FACT_READY.store(true, Ordering::Release);
                 baker_firmware::record_choreofs_driver_trace(0x5452_0010);
 
                 let fact = ctx.endpoint().flow::<TimerFiredFact>()?;

@@ -129,9 +129,8 @@ provides read-modify-write atomics, use those atomics because they are the
 simplest and fastest ownership primitive for that job. RP2040/thumbv6m SIO does
 not provide pointer-width RMW atomics, and it does not need them: the Baker SIO
 carrier is core-owned and structured without atomic slot ownership. Appkit's
-embedded WASI guest arena uses an atomic lease on targets with pointer-width RMW
-atomics and a single-owner lease on targets without them; atomics are never a hidden
-portability requirement for bare-metal images. On no-atomic targets the
+embedded WASI guest arena uses a single-owner arena lease on every target;
+atomics are never a hidden portability requirement for bare-metal images. The
 arena is intentionally not `Sync`, and the physical artifact must provide a
 separate owner arena for each logical image that can run a WASI guest. A
 `NoWasi` logical image must not lease guest storage at all.
@@ -192,6 +191,8 @@ deadline-fault:
 
 timer-route:
   Timer/clock fact -> resolver-selected route arm over RP2040 SIO
+  No shared atomic readiness flag; TimerFiredFact plus the projected route
+  control tag are the evidence observed by the resolver path.
 ```
 
 The Baker hardware proof set also checks that failure evidence and preview

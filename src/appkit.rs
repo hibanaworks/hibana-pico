@@ -20,9 +20,6 @@ use core::future::Future;
 #[cfg(any(feature = "wasm-engine-core", all(not(test), target_os = "none")))]
 use core::cell::UnsafeCell;
 
-#[cfg(all(feature = "wasm-engine-core", target_has_atomic = "ptr"))]
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use crate::choreography::protocol::{
     EngineReq, EngineRet, LABEL_WASI_ARGS_GET, LABEL_WASI_ARGS_GET_RET, LABEL_WASI_ARGS_SIZES_GET,
     LABEL_WASI_ARGS_SIZES_GET_RET, LABEL_WASI_CLOCK_RES_GET, LABEL_WASI_CLOCK_RES_GET_RET,
@@ -393,11 +390,7 @@ where
 #[cfg(feature = "wasm-engine-core")]
 pub struct WasiGuestArena {
     bytes: UnsafeCell<[u8; APPKIT_WASI_GUEST_BYTES]>,
-    #[cfg(target_has_atomic = "ptr")]
-    occupied: AtomicBool,
-    #[cfg(not(target_has_atomic = "ptr"))]
     occupied: UnsafeCell<bool>,
-    #[cfg(not(target_has_atomic = "ptr"))]
     owner: PhantomData<*mut ()>,
 }
 
@@ -405,11 +398,7 @@ pub struct WasiGuestArena {
 impl WasiGuestArena {
     const EMPTY: Self = Self {
         bytes: UnsafeCell::new([0; APPKIT_WASI_GUEST_BYTES]),
-        #[cfg(target_has_atomic = "ptr")]
-        occupied: AtomicBool::new(false),
-        #[cfg(not(target_has_atomic = "ptr"))]
         occupied: UnsafeCell::new(false),
-        #[cfg(not(target_has_atomic = "ptr"))]
         owner: PhantomData,
     };
 
@@ -425,31 +414,13 @@ impl WasiGuestArena {
         );
     }
 
-    #[cfg(target_has_atomic = "ptr")]
-    pub fn storage<'guest>(&'static self) -> WasiGuestStorage<'guest> {
-        Self::assert_guest_alignment();
-        #[cfg(target_has_atomic = "ptr")]
-        while self
-            .occupied
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            core::hint::spin_loop();
-        }
-        WasiGuestStorage {
-            occupied: &self.occupied,
-            ptr: unsafe { (*self.bytes.get()).as_mut_ptr().cast() },
-        }
-    }
-
-    /// Lease a no-atomic arena through its single physical owner.
+    /// Lease an arena through its single physical owner.
     ///
     /// # Safety
     ///
     /// `arena` must be the unique live owner for the current logical image. No
     /// other core, interrupt, or task may call this function for the same arena
     /// until the returned [`WasiGuestStorage`] is dropped.
-    #[cfg(not(target_has_atomic = "ptr"))]
     pub unsafe fn storage_from_owner<'guest>(arena: *mut Self) -> WasiGuestStorage<'guest> {
         Self::assert_guest_alignment();
         assert!(!arena.is_null(), "WASI guest arena owner pointer is null");
@@ -469,14 +440,7 @@ impl WasiGuestArena {
 unsafe impl<const N: usize> Sync for EmbeddedFutureArena<N> {}
 
 #[cfg(feature = "wasm-engine-core")]
-#[cfg(target_has_atomic = "ptr")]
-unsafe impl Sync for WasiGuestArena {}
-
-#[cfg(feature = "wasm-engine-core")]
 pub struct WasiGuestStorage<'guest> {
-    #[cfg(target_has_atomic = "ptr")]
-    occupied: &'static AtomicBool,
-    #[cfg(not(target_has_atomic = "ptr"))]
     occupied: *mut bool,
     ptr: *mut crate::kernel::engine::wasm::Guest<'guest>,
 }
@@ -491,9 +455,6 @@ impl<'guest> WasiGuestStorage<'guest> {
 #[cfg(feature = "wasm-engine-core")]
 impl Drop for WasiGuestStorage<'_> {
     fn drop(&mut self) {
-        #[cfg(target_has_atomic = "ptr")]
-        self.occupied.store(false, Ordering::Release);
-        #[cfg(not(target_has_atomic = "ptr"))]
         unsafe {
             *self.occupied = false;
         }
@@ -3990,14 +3951,12 @@ where
 #[cfg(all(test, feature = "wasm-engine-core", feature = "wasip1-sys-fd-write"))]
 mod tests {
     use super::*;
-    use core::cell::Cell;
+    use core::cell::{Cell, UnsafeCell};
     use core::pin::Pin;
     use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
     use std::boxed::Box;
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicU8, Ordering},
-    };
+    use std::sync::{Arc, Mutex};
+    use std::thread_local;
     use std::vec::Vec;
 
     use hibana::{
@@ -4411,12 +4370,50 @@ mod tests {
     struct MemoryGrowLocal;
     struct MemoryGrowPlacement;
     struct TimerRouteAttachCapsule;
-    static BRIDGE_WASI_GUEST_ARENA: WasiGuestArena = WasiGuestArena::empty();
-    static NO_LOOP_WASI_GUEST_ARENA: WasiGuestArena = WasiGuestArena::empty();
-    static MEMORY_GROW_WASI_GUEST_ARENA: WasiGuestArena = WasiGuestArena::empty();
+    thread_local! {
+        static BRIDGE_WASI_GUEST_ARENA: UnsafeCell<WasiGuestArena> =
+            const { UnsafeCell::new(WasiGuestArena::empty()) };
+        static NO_LOOP_WASI_GUEST_ARENA: UnsafeCell<WasiGuestArena> =
+            const { UnsafeCell::new(WasiGuestArena::empty()) };
+        static MEMORY_GROW_WASI_GUEST_ARENA: UnsafeCell<WasiGuestArena> =
+            const { UnsafeCell::new(WasiGuestArena::empty()) };
+    }
 
-    static RUN_BRIDGE_ENGINE_DONE: AtomicU8 = AtomicU8::new(0);
-    static RUN_BRIDGE_DRIVER_DONE: AtomicU8 = AtomicU8::new(0);
+    thread_local! {
+        static RUN_BRIDGE_ENGINE_DONE: Cell<u8> = const { Cell::new(0) };
+        static RUN_BRIDGE_DRIVER_DONE: Cell<u8> = const { Cell::new(0) };
+    }
+
+    fn set_run_bridge_engine_done(value: u8) {
+        RUN_BRIDGE_ENGINE_DONE.with(|cell| cell.set(value));
+    }
+
+    fn set_run_bridge_driver_done(value: u8) {
+        RUN_BRIDGE_DRIVER_DONE.with(|cell| cell.set(value));
+    }
+
+    fn run_bridge_engine_done() -> u8 {
+        RUN_BRIDGE_ENGINE_DONE.with(Cell::get)
+    }
+
+    fn run_bridge_driver_done() -> u8 {
+        RUN_BRIDGE_DRIVER_DONE.with(Cell::get)
+    }
+
+    fn lease_bridge_wasi_guest_storage<'guest>() -> WasiGuestStorage<'guest> {
+        BRIDGE_WASI_GUEST_ARENA
+            .with(|arena| unsafe { WasiGuestArena::storage_from_owner(arena.get()) })
+    }
+
+    fn lease_no_loop_wasi_guest_storage<'guest>() -> WasiGuestStorage<'guest> {
+        NO_LOOP_WASI_GUEST_ARENA
+            .with(|arena| unsafe { WasiGuestArena::storage_from_owner(arena.get()) })
+    }
+
+    fn lease_memory_grow_wasi_guest_storage<'guest>() -> WasiGuestStorage<'guest> {
+        MEMORY_GROW_WASI_GUEST_ARENA
+            .with(|arena| unsafe { WasiGuestArena::storage_from_owner(arena.get()) })
+    }
 
     impl Capsule for BridgeCapsule {
         type Universe = DefaultLabelUniverse;
@@ -4460,7 +4457,7 @@ mod tests {
                 if ROLE == 0 {
                     let status = ctx.drive_wasi_guest(BudgetRun::new(1, 0, 128, 0)).await?;
                     assert_eq!(status, WasiGuestStatus::Done);
-                    RUN_BRIDGE_ENGINE_DONE.store(1, Ordering::SeqCst);
+                    set_run_bridge_engine_done(1);
                 }
                 ctx.pending().await
             }
@@ -4473,7 +4470,7 @@ mod tests {
                 let mut ctx = ctx;
                 if ROLE == 1 {
                     reply_to_fd_write(&mut ctx).await;
-                    RUN_BRIDGE_DRIVER_DONE.store(1, Ordering::SeqCst);
+                    set_run_bridge_driver_done(1);
                 }
                 ctx.pending().await
             }
@@ -4714,7 +4711,7 @@ mod tests {
     impl WasiGuestImage<BridgeCapsule> for crate::site::Local<BridgeImage> {
         fn wasi_guest_storage<'guest, const ROLE: u8>() -> WasiGuestStorage<'guest> {
             assert!(ROLE < 2);
-            BRIDGE_WASI_GUEST_ARENA.storage()
+            lease_bridge_wasi_guest_storage()
         }
     }
 
@@ -5666,7 +5663,7 @@ mod tests {
             RoleEndpointCtx::new(engine_endpoint),
             endpoint_carrier,
             Some(module.as_slice()),
-            Some(NO_LOOP_WASI_GUEST_ARENA.storage()),
+            Some(lease_no_loop_wasi_guest_storage()),
         );
         let mut driver_ctx: DriverCtx<'_, NoLoopCapsule, 1> = DriverCtx::new(
             RoleEndpointCtx::new(driver_endpoint),
@@ -5765,7 +5762,7 @@ mod tests {
             RoleEndpointCtx::new(engine_endpoint),
             endpoint_carrier,
             Some(module.as_slice()),
-            Some(MEMORY_GROW_WASI_GUEST_ARENA.storage()),
+            Some(lease_memory_grow_wasi_guest_storage()),
         );
         let driver_ctx: DriverCtx<'_, MemoryGrowCapsule, 1> = DriverCtx::new(
             RoleEndpointCtx::new(driver_endpoint),
@@ -5806,8 +5803,8 @@ mod tests {
 
     #[test]
     fn run_drives_wasi_guest_import_completion_through_endpoint_carrier() {
-        RUN_BRIDGE_ENGINE_DONE.store(0, Ordering::SeqCst);
-        RUN_BRIDGE_DRIVER_DONE.store(0, Ordering::SeqCst);
+        set_run_bridge_engine_done(0);
+        set_run_bridge_driver_done(0);
         let module = fd_write_guest_module().into_boxed_slice();
         let module: &'static [u8] = Box::leak(module);
         let report =
@@ -5820,9 +5817,9 @@ mod tests {
                 .contains(&crate::choreography::protocol::LABEL_WASI_IMPORT_LOOP_CONTINUE_CONTROL),
             "auto loop-control must be visible in projection metadata"
         );
-        assert_eq!(RUN_BRIDGE_DRIVER_DONE.load(Ordering::SeqCst), 1);
+        assert_eq!(run_bridge_driver_done(), 1);
         assert_eq!(
-            RUN_BRIDGE_ENGINE_DONE.load(Ordering::SeqCst),
+            run_bridge_engine_done(),
             0,
             "WASI P1 engine roles are driven by appkit, not user Localside::engine"
         );

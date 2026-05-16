@@ -906,10 +906,7 @@ mod rp2040_sio {
     }
 }
 
-#[cfg(all(feature = "wasm-engine-core", target_has_atomic = "ptr"))]
-static BAKER_ENGINE_WASI_GUEST_ARENA: appkit::WasiGuestArena = appkit::WasiGuestArena::empty();
-
-#[cfg(all(feature = "wasm-engine-core", not(target_has_atomic = "ptr")))]
+#[cfg(feature = "wasm-engine-core")]
 static mut BAKER_ENGINE_WASI_GUEST_ARENA: appkit::WasiGuestArena = appkit::WasiGuestArena::empty();
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -937,11 +934,6 @@ fn baker_engine_attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
 #[cfg(feature = "wasm-engine-core")]
 fn baker_engine_wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
     core::hint::black_box(ROLE);
-    #[cfg(target_has_atomic = "ptr")]
-    {
-        BAKER_ENGINE_WASI_GUEST_ARENA.storage()
-    }
-    #[cfg(not(target_has_atomic = "ptr"))]
     unsafe {
         appkit::WasiGuestArena::storage_from_owner(core::ptr::addr_of_mut!(
             BAKER_ENGINE_WASI_GUEST_ARENA

@@ -109,7 +109,6 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
             "self.wasi_guest_bytes.is_some()",
             "pub struct WasiGuestArena",
             "pub unsafe fn storage_from_owner",
-            "unsafe impl Sync for WasiGuestArena",
             "pub struct WasiGuestStorage<'guest>",
             "Guest::init_in_place(ptr, module)?;",
             "pub struct CarrierKind",
@@ -227,6 +226,11 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
             "Box::pin",
             "std::vec![",
             "Guest::new(bytes)",
+            "pub fn storage<'guest>(&'static self)",
+            "unsafe impl Sync for WasiGuestArena",
+            "AtomicBool",
+            "compare_exchange(false, true",
+            "occupied.store(false",
             "feature = \"platform-host-native\"",
             "platform-host-native",
             "feature = \"platform-linux\"",
@@ -650,7 +654,9 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         timer_route_bin,
         &[
             "impl appkit::Capsule for TimerRoute",
+            "TimerFiredFact",
             "fn timer_route_resolver",
+            "Ok(RouteResolution::Arm(1))",
             "registry.policy::<TIMER_ROUTE_POLICY, 0>",
             "registry.policy::<TIMER_ROUTE_POLICY, 1>",
             "ctx.endpoint().offer().await?",
@@ -658,6 +664,19 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "let done = ctx.endpoint().recv::<TimerRouteDone>().await?;",
             "if done != 1",
             "baker_firmware::run::<TimerRoute>()",
+        ],
+    );
+    assert_absent(
+        "examples/baker-firmware/src/bin/timer_route.rs",
+        timer_route_bin,
+        &[
+            "AtomicBool",
+            "Ordering",
+            "TIMER_FACT_READY",
+            "compare_exchange",
+            "fetch_",
+            "load(Ordering",
+            "store(true, Ordering",
         ],
     );
     assert_present(
@@ -689,8 +708,7 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "simplest and fastest ownership primitive",
             "RP2040/thumbv6m SIO does",
             "core-owned and structured without atomic slot ownership",
-            "uses an atomic lease on targets with pointer-width RMW",
-            "single-owner lease on targets without them",
+            "embedded WASI guest arena uses a single-owner arena lease",
             "atomics are never a hidden",
             "portability requirement for bare-metal images",
             "arena is intentionally not `Sync`",
@@ -713,6 +731,9 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "SIO `poll_send` / `poll_recv` are non-blocking carrier polls",
             "partial receive state",
             "physical local-role/core stream parser",
+            "Hibana's protocol state does not need shared atomics",
+            "affine endpoint ownership",
+            "must not be represented as shared atomic flags",
             "ownership first",
             "if physical ownership can express the state, that is the",
             "do not replace ownership with an atomic mailbox",
@@ -721,8 +742,7 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "true shared concurrent ownership may use read-modify-write atomics",
             "simplest and fastest",
             "RP2040/thumbv6m SIO carrier code must not require pointer-width RMW atomics",
-            "uses an atomic lease on targets with",
-            "single-owner lease on targets without them",
+            "embedded WASI guest storage uses a single-owner arena lease",
             "arena is intentionally not `Sync`",
             "separate owner arena for each logical image",
             "`NoWasi` logical images must not lease WASI guest storage",
@@ -849,7 +869,7 @@ fn cargo_uses_hibana_release_requirement_and_no_demo_meaning_features() {
     assert_present(
         "Cargo.toml",
         cargo,
-        &["hibana = { version = \"0.5.0\", default-features = false }"],
+        &["hibana = { version = \"0.5.1\", default-features = false }"],
     );
     assert_absent(
         "Cargo.toml",

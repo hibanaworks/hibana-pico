@@ -34,11 +34,13 @@ use hibana_pico::{
     site,
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::VecDeque,
-    sync::atomic::{AtomicUsize, Ordering},
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
+
+#[cfg(feature = "wasm-engine-core")]
+use std::cell::UnsafeCell;
 
 const WASM_FD_WRITE: &[u8] = b"\0asm\x01\0\0\0\
     \x01\x04\x01\x60\x00\x00\
@@ -815,10 +817,20 @@ mod image {
     pub struct ChoreoFsRuntime;
 }
 
-static COUNTING_ENGINE_POLLS: AtomicUsize = AtomicUsize::new(0);
-static COUNTING_DRIVER_POLLS: AtomicUsize = AtomicUsize::new(0);
-static COUNTING_BOUNDARY_POLLS: AtomicUsize = AtomicUsize::new(0);
-static CHOREOFS_RUNTIME_COMPLETIONS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static COUNTING_ENGINE_POLLS: Cell<usize> = const { Cell::new(0) };
+    static COUNTING_DRIVER_POLLS: Cell<usize> = const { Cell::new(0) };
+    static COUNTING_BOUNDARY_POLLS: Cell<usize> = const { Cell::new(0) };
+    static CHOREOFS_RUNTIME_COMPLETIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn increment_cell(cell: &'static std::thread::LocalKey<Cell<usize>>) {
+    cell.with(|count| count.set(count.get() + 1));
+}
+
+fn read_cell(cell: &'static std::thread::LocalKey<Cell<usize>>) -> usize {
+    cell.with(Cell::get)
+}
 const CHOREOFS_RUNTIME_OBJECT: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
     b"device/led/green",
     appkit::ObjectId(7),
@@ -1109,21 +1121,21 @@ impl appkit::Localside<CountingCapsule> for CountingLocal {
     fn engine<'endpoint, 'guest, const ROLE: u8>(
         ctx: appkit::EngineCtx<'endpoint, 'guest, CountingCapsule, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        COUNTING_ENGINE_POLLS.fetch_add(1, Ordering::SeqCst);
+        increment_cell(&COUNTING_ENGINE_POLLS);
         ctx.pending()
     }
 
     fn driver<'a, const ROLE: u8>(
         ctx: appkit::DriverCtx<'a, CountingCapsule, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        COUNTING_DRIVER_POLLS.fetch_add(1, Ordering::SeqCst);
+        increment_cell(&COUNTING_DRIVER_POLLS);
         ctx.pending()
     }
 
     fn boundary<'a, const ROLE: u8>(
         ctx: appkit::BoundaryCtx<'a, CountingCapsule, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        COUNTING_BOUNDARY_POLLS.fetch_add(1, Ordering::SeqCst);
+        increment_cell(&COUNTING_BOUNDARY_POLLS);
         ctx.pending()
     }
 
@@ -1253,7 +1265,7 @@ impl appkit::Localside<ChoreoFsRuntimeCapsule> for ChoreoFsRuntimeLocal {
                 )))
                 .await
                 .expect("send fd_write reply through endpoint");
-            CHOREOFS_RUNTIME_COMPLETIONS.fetch_add(1, Ordering::SeqCst);
+            increment_cell(&CHOREOFS_RUNTIME_COMPLETIONS);
             ctx.pending().await
         }
     }
@@ -2065,12 +2077,16 @@ fn exercise_fd_write_endpoint_round_trip(program: &impl Projectable<DefaultLabel
 }
 
 #[cfg(feature = "wasm-engine-core")]
-static HOST_CAPSULE_WASI_GUEST_ARENA: appkit::WasiGuestArena = appkit::WasiGuestArena::empty();
+thread_local! {
+    static HOST_CAPSULE_WASI_GUEST_ARENA: UnsafeCell<appkit::WasiGuestArena> =
+        const { UnsafeCell::new(appkit::WasiGuestArena::empty()) };
+}
 
 #[cfg(feature = "wasm-engine-core")]
 fn host_capsule_wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
     core::hint::black_box(ROLE);
-    HOST_CAPSULE_WASI_GUEST_ARENA.storage()
+    HOST_CAPSULE_WASI_GUEST_ARENA
+        .with(|arena| unsafe { appkit::WasiGuestArena::storage_from_owner(arena.get()) })
 }
 
 impl appkit::LogicalImage<RichCapsule> for site::Local<image::Composite> {
@@ -2331,9 +2347,9 @@ fn role_set_distinguishes_storage_width_from_hibana_typed_role_domain() {
 
 #[test]
 fn run_polls_localside_for_attached_role_kinds() {
-    let before_engine = COUNTING_ENGINE_POLLS.load(Ordering::SeqCst);
-    let before_driver = COUNTING_DRIVER_POLLS.load(Ordering::SeqCst);
-    let before_boundary = COUNTING_BOUNDARY_POLLS.load(Ordering::SeqCst);
+    let before_engine = read_cell(&COUNTING_ENGINE_POLLS);
+    let before_driver = read_cell(&COUNTING_DRIVER_POLLS);
+    let before_boundary = read_cell(&COUNTING_BOUNDARY_POLLS);
     let artifacts = CountingArtifacts;
     let image_artifact = <CountingArtifacts as appkit::ArtifactBundle<CountingCapsule>>::for_image::<
         site::Local<image::Counting>,
@@ -2352,24 +2368,15 @@ fn run_polls_localside_for_attached_role_kinds() {
             supervisor: 0,
         }
     );
-    assert_eq!(
-        COUNTING_ENGINE_POLLS.load(Ordering::SeqCst),
-        before_engine + 1
-    );
-    assert_eq!(
-        COUNTING_DRIVER_POLLS.load(Ordering::SeqCst),
-        before_driver + 1
-    );
-    assert_eq!(
-        COUNTING_BOUNDARY_POLLS.load(Ordering::SeqCst),
-        before_boundary + 1
-    );
+    assert_eq!(read_cell(&COUNTING_ENGINE_POLLS), before_engine + 1);
+    assert_eq!(read_cell(&COUNTING_DRIVER_POLLS), before_driver + 1);
+    assert_eq!(read_cell(&COUNTING_BOUNDARY_POLLS), before_boundary + 1);
 }
 
 #[test]
 #[cfg(all(feature = "wasm-engine-core", feature = "wasip1-sys-path-open"))]
 fn choreofs_facts_are_consumed_by_driver_ctx_during_endpoint_progress() {
-    let before = CHOREOFS_RUNTIME_COMPLETIONS.load(Ordering::SeqCst);
+    let before = read_cell(&CHOREOFS_RUNTIME_COMPLETIONS);
     let wasm = leak_wasm(path_open_fd_write_guest_module());
     let report = appkit::run::<site::Local<image::ChoreoFsRuntime>, ChoreoFsRuntimeCapsule>(
         appkit::WasiImage::from_static(wasm),
@@ -2382,10 +2389,7 @@ fn choreofs_facts_are_consumed_by_driver_ctx_during_endpoint_progress() {
         appkit::WasiImports::FD_WRITE.union(appkit::WasiImports::PATH_OPEN)
     );
     assert_eq!(report.endpoint_carrier().wasi_completion_pair_count(), 2);
-    assert_eq!(
-        CHOREOFS_RUNTIME_COMPLETIONS.load(Ordering::SeqCst),
-        before + 1
-    );
+    assert_eq!(read_cell(&CHOREOFS_RUNTIME_COMPLETIONS), before + 1);
 }
 
 #[test]
