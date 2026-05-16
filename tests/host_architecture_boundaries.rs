@@ -101,15 +101,15 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
             "pub trait LogicalImage",
             "const REQUESTED_ROLES: RoleSet;",
             "pub trait WasiGuestImage",
-            "fn wasi_guest_storage<'guest, const ROLE: u8>() -> WasiGuestStorage<'guest>;",
+            "fn wasi_guest_lease<'guest, const ROLE: u8>() -> WasiGuestLease<'guest>;",
             "fn wasi_budget<const ROLE: u8>() -> BudgetRun",
             "pub trait ArtifactGuestStorage",
             "NoWasi` never leases storage",
             "drive_canonical_wasi_engine",
             "self.wasi_guest_bytes.is_some()",
             "pub struct WasiGuestArena",
-            "pub unsafe fn storage_from_owner",
-            "pub struct WasiGuestStorage<'guest>",
+            "pub fn lease<'guest>(&'guest mut self)",
+            "pub struct WasiGuestLease<'guest>",
             "Guest::init_in_place(ptr, module)?;",
             "pub struct CarrierKind",
             "pub struct PeerImageSet",
@@ -216,9 +216,9 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
             "direct syscall completion",
             "Rp2040Sio",
             "SioTransport",
-            "ActiveWasiGuestStorage",
-            "InlineWasiGuestStorage",
-            "StaticWasiGuestStorage",
+            "ActiveWasiGuestLease",
+            "InlineWasiGuestLease",
+            "StaticWasiGuestLease",
             "MaybeUninit<crate::kernel::engine::wasm::Guest",
             "Box<crate::kernel::engine::wasm::Guest",
             "Box<dyn Future",
@@ -227,6 +227,9 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
             "std::vec![",
             "Guest::new(bytes)",
             "pub fn storage<'guest>(&'static self)",
+            "pub fn storage<'guest>(&'guest mut self)",
+            "pub unsafe fn storage_from_owner",
+            "storage_from_owner(",
             "unsafe impl Sync for WasiGuestArena",
             "AtomicBool",
             "compare_exchange(false, true",
@@ -429,7 +432,6 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
     let timer_route_bin = include_str!("../examples/baker-firmware/src/bin/timer_route.rs");
     let baker_hardware_script = include_str!("../scripts/run_baker_link_hardware_pattern.sh");
     let readme = include_str!("../README.md");
-    let plan = include_str!("../plan.md");
 
     assert_present(
         "examples/baker-firmware/src/lib.rs",
@@ -457,8 +459,9 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "fn rx_accumulator(local_role: u8) -> *mut SioRxAccumulator",
             "sio_rx_accumulator_is_local_role_owned_across_lanes",
             "BAKER_ENGINE_WASI_GUEST_ARENA",
-            "baker_engine_wasi_guest_storage",
-            "storage_from_owner(core::ptr::addr_of_mut!(",
+            "baker_engine_wasi_guest_lease",
+            "addr_of_mut!(BAKER_ENGINE_WASI_GUEST_ARENA)",
+            "arena.lease()",
             "fifo::try_push(word)",
             "fifo::try_pop()",
             "context.waker().wake_by_ref()",
@@ -506,7 +509,7 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "pub fn push_blocking",
             "pub fn pop_blocking",
             "static BAKER_WASI_GUEST_ARENA",
-            "fn baker_wasi_guest_storage",
+            "fn baker_wasi_guest_lease",
             "baker_control_engine_one_cycle",
             "baker_control_driver_one_cycle",
             "baker_many_reentry_engine",
@@ -722,39 +725,6 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "An import becomes meaningful only when the guest actually calls it",
         ],
     );
-    assert_present(
-        "plan.md",
-        plan,
-        &[
-            "transport `open(local_role, session_id, lane)` receives and preserves",
-            "SIO writes the lane into carrier frame metadata",
-            "SIO `poll_send` / `poll_recv` are non-blocking carrier polls",
-            "partial receive state",
-            "physical local-role/core stream parser",
-            "Hibana's protocol state does not need shared atomics",
-            "affine endpoint ownership",
-            "must not be represented as shared atomic flags",
-            "ownership first",
-            "if physical ownership can express the state, that is the",
-            "do not replace ownership with an atomic mailbox",
-            "read-modify-write atomics are a second-line primitive",
-            "cannot be made single-owner without adding more",
-            "true shared concurrent ownership may use read-modify-write atomics",
-            "simplest and fastest",
-            "RP2040/thumbv6m SIO carrier code must not require pointer-width RMW atomics",
-            "embedded WASI guest storage uses a single-owner arena lease",
-            "arena is intentionally not `Sync`",
-            "separate owner arena for each logical image",
-            "`NoWasi` logical images must not lease WASI guest storage",
-            "WASI guest storage is supplied by `WasiGuestImage`",
-            "`NoWasi` logical images do not implement `WasiGuestImage`",
-            "do not expose dummy storage hooks",
-            "`recv_frame_hint` is a route-observation hint-drain",
-            "static import table is not authority",
-            "appkit must not reject a `WasiImage` because static imports exceed",
-            "unsupported imports are terminal only when actually called",
-        ],
-    );
 }
 
 #[test]
@@ -796,8 +766,8 @@ fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
         hetero,
         &[
             "WASI_GUEST_ARENA",
-            "wasi_guest_storage",
-            "storage_from_owner(core::ptr::addr_of_mut!(",
+            "wasi_guest_lease",
+            "storage_from_owner(",
         ],
     );
     assert_present(
@@ -863,18 +833,18 @@ fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
 }
 
 #[test]
-fn cargo_uses_hibana_release_requirement_and_no_demo_meaning_features() {
+fn cargo_keeps_plan_private_and_no_demo_meaning_features() {
     let cargo = include_str!("../Cargo.toml");
+    let ignore = include_str!("../.gitignore");
 
-    assert_present(
-        "Cargo.toml",
-        cargo,
-        &["hibana = { version = \"0.5.1\", default-features = false }"],
-    );
+    assert_present("Cargo.toml", cargo, &["exclude = [\"/plan.md\"]"]);
+    assert_present(".gitignore", ignore, &["/plan.md"]);
     assert_absent(
         "Cargo.toml",
         cargo,
         &[
+            "hibana = { path",
+            "hibana = { git",
             "baker-choreofs-demo",
             "baker-choreofs-bad-path-demo",
             "baker-choreofs-bad-payload-demo",
@@ -891,46 +861,50 @@ fn cargo_uses_hibana_release_requirement_and_no_demo_meaning_features() {
 }
 
 #[test]
-fn plan_fixes_failure_deadline_cancellation_as_fail_closed_evidence() {
-    let plan = include_str!("../plan.md");
+fn readme_fixes_failure_deadline_cancellation_as_fail_closed_evidence() {
+    let readme = include_str!("../README.md");
     let lib = include_str!("../src/lib.rs");
     let appkit = include_str!("../src/appkit.rs");
 
     assert_present(
-        "plan.md",
-        plan,
+        "README.md",
+        readme,
         &[
-            "### Failure / Deadline / Cancellation Constitution",
             "Committed Hibana wait semantics are `Progress | Fault`.",
-            "Rust public APIs expose committed progress as `Ok(progress) | Err(domain evidence)`.",
-            "Committed Fault is terminal evidence, not a route arm.",
-            "Hibana also has non-consuming preview/probe points.",
-            "A preview/probe mismatch is not protocol progress",
+            "committed progress as `Ok(progress) | Err(domain evidence)`",
+            "Committed Fault is terminal",
+            "evidence, not a route arm",
+            "Hibana also has non-consuming preview/probe points",
+            "a preview/probe mismatch is",
+            "not protocol progress and cannot select hidden progress",
             "Timeout is not a public API.",
-            "Deadline is an operational fuse.",
+            "A deadline is\nan internal fuse",
             "A protocol-visible timeout must be written as choreography: Timer / clock /",
-            "Public Hibana exposes only these error evidence envelopes:",
             "EndpointError",
             "ResolverError",
             "AttachError",
-            "There is no wide `HibanaError` for localside.",
-            "Retry after an operational fault is a new choreography instance / new session generation.",
-            "Failure never authorizes hidden progress.",
+            "there is no wide `HibanaError` for localside",
+            "Retry after an operational fault is a new",
+            "choreography instance / new session generation",
+            "Failure never authorizes hidden",
+            "progress.",
         ],
     );
     assert_present(
-        "plan.md",
-        plan,
+        "README.md",
+        readme,
         &[
-            "### Failure / Deadline / Cancellation Gate",
             "wait semantics are `Progress | Fault`",
             "no public timeout API",
-            "no public cancel / reconnect / same-generation recovery API",
+            "no public cancel /",
+            "reconnect / same-generation recovery API",
             "no public wide `HibanaError`",
-            "no public `EndpointErrorKind` / `ResolverErrorKind` / `AttachErrorKind` decision surface",
+            "no public `EndpointErrorKind` / `ResolverErrorKind` /",
+            "`AttachErrorKind` decision surface",
             "preview/probe `Err` is non-progress and cannot select hidden progress",
-            "operational deadline expiry poisons the current session generation",
-            "protocol-visible timeout uses resolver-selected explicit route arm",
+            "Operational deadline expiry is different",
+            "it poisons the current session generation",
+            "Protocol-visible timeout uses resolver-selected explicit route arm",
         ],
     );
 

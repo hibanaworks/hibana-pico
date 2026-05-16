@@ -932,13 +932,10 @@ fn baker_engine_attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
 }
 
 #[cfg(feature = "wasm-engine-core")]
-fn baker_engine_wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
+fn baker_engine_wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
     core::hint::black_box(ROLE);
-    unsafe {
-        appkit::WasiGuestArena::storage_from_owner(core::ptr::addr_of_mut!(
-            BAKER_ENGINE_WASI_GUEST_ARENA
-        ))
-    }
+    let arena = unsafe { &mut *core::ptr::addr_of_mut!(BAKER_ENGINE_WASI_GUEST_ARENA) };
+    arena.lease()
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -2119,8 +2116,8 @@ impl<C> appkit::WasiGuestImage<C> for EngineImage
 where
     C: BakerCapsuleFacts,
 {
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        baker_engine_wasi_guest_storage::<ROLE>()
+    fn wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
+        baker_engine_wasi_guest_lease::<ROLE>()
     }
 }
 

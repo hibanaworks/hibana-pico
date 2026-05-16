@@ -34,13 +34,10 @@ use hibana_pico::{
     site,
 };
 use std::{
-    cell::{Cell, RefCell},
+    cell::{Cell, UnsafeCell},
     collections::VecDeque,
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
-
-#[cfg(feature = "wasm-engine-core")]
-use std::cell::UnsafeCell;
 
 const WASM_FD_WRITE: &[u8] = b"\0asm\x01\0\0\0\
     \x01\x04\x01\x60\x00\x00\
@@ -576,14 +573,20 @@ impl TestLocalQueues {
 }
 
 struct TestLocalQueueCarrier {
-    queues: RefCell<TestLocalQueues>,
+    queues: UnsafeCell<TestLocalQueues>,
 }
 
 impl TestLocalQueueCarrier {
     fn new() -> Self {
         Self {
-            queues: RefCell::new(TestLocalQueues::EMPTY),
+            queues: UnsafeCell::new(TestLocalQueues::EMPTY),
         }
+    }
+
+    fn queues(&self) -> &mut TestLocalQueues {
+        // These host tests poll one role at a time on one thread. The queue is
+        // a local carrier medium, not protocol state or cross-thread sharing.
+        unsafe { &mut *self.queues.get() }
     }
 }
 
@@ -653,7 +656,7 @@ impl hibana::integration::Transport for TestLocalQueueCarrier {
         if outgoing.lane() != tx.lane {
             return Poll::Ready(Err(TransportError::Failed));
         }
-        let result = self.queues.borrow_mut().by_role[peer].push_back(
+        let result = self.queues().by_role[peer].push_back(
             outgoing.lane(),
             outgoing.frame_label(),
             outgoing.payload(),
@@ -676,7 +679,7 @@ impl hibana::integration::Transport for TestLocalQueueCarrier {
         if local_role >= TEST_CARRIER_ROLES {
             return Poll::Ready(Err(TransportError::Failed));
         }
-        let Some(frame) = self.queues.borrow_mut().by_role[local_role].pop_front(rx.lane) else {
+        let Some(frame) = self.queues().by_role[local_role].pop_front(rx.lane) else {
             return Poll::Pending;
         };
         if frame.lane != rx.lane {
@@ -691,7 +694,7 @@ impl hibana::integration::Transport for TestLocalQueueCarrier {
         if let Some(frame) = rx.frame.take() {
             let local_role = rx.local_role as usize;
             if local_role < TEST_CARRIER_ROLES {
-                self.queues.borrow_mut().by_role[local_role].push_front(frame);
+                self.queues().by_role[local_role].push_front(frame);
             }
         }
     }
@@ -1324,7 +1327,7 @@ struct MemoryFrame {
 }
 
 struct MemoryTransport {
-    queues: [RefCell<VecDeque<MemoryFrame>>; MEMORY_ROLE_COUNT],
+    queues: [UnsafeCell<VecDeque<MemoryFrame>>; MEMORY_ROLE_COUNT],
 }
 
 struct MemoryTx {
@@ -1344,9 +1347,16 @@ impl MemoryTransport {
         Self {
             queues: std::array::from_fn(|role| {
                 assert!(role < MEMORY_ROLE_COUNT);
-                RefCell::new(VecDeque::new())
+                UnsafeCell::new(VecDeque::new())
             }),
         }
+    }
+
+    fn queue(&self, role: usize) -> &mut VecDeque<MemoryFrame> {
+        assert!(role < MEMORY_ROLE_COUNT);
+        // The memory transport is a single-threaded test carrier. Its queue is
+        // only mutated during one poll operation and never models protocol authority.
+        unsafe { &mut *self.queues[role].get() }
     }
 }
 
@@ -1400,7 +1410,7 @@ impl Transport for MemoryTransport {
         if outgoing.lane() != tx.lane {
             return Poll::Ready(Err(TransportError::Failed));
         }
-        self.queues[peer].borrow_mut().push_back(MemoryFrame {
+        self.queue(peer).push_back(MemoryFrame {
             lane: outgoing.lane(),
             bytes: outgoing.payload().as_bytes().to_vec(),
         });
@@ -1423,7 +1433,7 @@ impl Transport for MemoryTransport {
             rx.delivered = false;
         }
         if rx.current.is_none() {
-            let mut queue = self.queues[rx.role as usize].borrow_mut();
+            let queue = self.queue(rx.role as usize);
             let mut selected = None;
             for idx in 0..queue.len() {
                 if queue[idx].lane == rx.lane {
@@ -1444,12 +1454,10 @@ impl Transport for MemoryTransport {
 
     fn requeue<'a>(&'a self, rx: &'a mut Self::Rx<'a>) {
         if let Some(bytes) = rx.current.take() {
-            self.queues[rx.role as usize]
-                .borrow_mut()
-                .push_front(MemoryFrame {
-                    lane: rx.lane,
-                    bytes,
-                });
+            self.queue(rx.role as usize).push_front(MemoryFrame {
+                lane: rx.lane,
+                bytes,
+            });
         }
         rx.delivered = false;
     }
@@ -2083,10 +2091,12 @@ thread_local! {
 }
 
 #[cfg(feature = "wasm-engine-core")]
-fn host_capsule_wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
+fn host_capsule_wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
     core::hint::black_box(ROLE);
-    HOST_CAPSULE_WASI_GUEST_ARENA
-        .with(|arena| unsafe { appkit::WasiGuestArena::storage_from_owner(arena.get()) })
+    HOST_CAPSULE_WASI_GUEST_ARENA.with(|arena| {
+        let arena = unsafe { &mut *arena.get() };
+        arena.lease()
+    })
 }
 
 impl appkit::LogicalImage<RichCapsule> for site::Local<image::Composite> {
@@ -2112,8 +2122,8 @@ impl appkit::LogicalImage<RichCapsule> for site::Local<image::Composite> {
 
 #[cfg(feature = "wasm-engine-core")]
 impl appkit::WasiGuestImage<RichCapsule> for site::Local<image::Composite> {
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        host_capsule_wasi_guest_storage::<ROLE>()
+    fn wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
+        host_capsule_wasi_guest_lease::<ROLE>()
     }
 }
 
@@ -2182,8 +2192,8 @@ impl appkit::LogicalImage<RichCapsule> for site::Local<image::WrappedExit> {
 
 #[cfg(feature = "wasm-engine-core")]
 impl appkit::WasiGuestImage<RichCapsule> for site::Local<image::WrappedExit> {
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        host_capsule_wasi_guest_storage::<ROLE>()
+    fn wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
+        host_capsule_wasi_guest_lease::<ROLE>()
     }
 }
 
@@ -2210,8 +2220,8 @@ impl appkit::LogicalImage<IncompleteCapsule> for site::Local<image::Composite> {
 
 #[cfg(feature = "wasm-engine-core")]
 impl appkit::WasiGuestImage<IncompleteCapsule> for site::Local<image::Composite> {
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        host_capsule_wasi_guest_storage::<ROLE>()
+    fn wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
+        host_capsule_wasi_guest_lease::<ROLE>()
     }
 }
 
@@ -2263,8 +2273,8 @@ impl appkit::LogicalImage<ChoreoFsRuntimeCapsule> for site::Local<image::ChoreoF
 
 #[cfg(feature = "wasm-engine-core")]
 impl appkit::WasiGuestImage<ChoreoFsRuntimeCapsule> for site::Local<image::ChoreoFsRuntime> {
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> appkit::WasiGuestStorage<'guest> {
-        host_capsule_wasi_guest_storage::<ROLE>()
+    fn wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
+        host_capsule_wasi_guest_lease::<ROLE>()
     }
 }
 

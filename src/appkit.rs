@@ -414,24 +414,20 @@ impl WasiGuestArena {
         );
     }
 
-    /// Lease an arena through its single physical owner.
+    /// Lease this arena through its single physical owner.
     ///
-    /// # Safety
-    ///
-    /// `arena` must be the unique live owner for the current logical image. No
-    /// other core, interrupt, or task may call this function for the same arena
-    /// until the returned [`WasiGuestStorage`] is dropped.
-    pub unsafe fn storage_from_owner<'guest>(arena: *mut Self) -> WasiGuestStorage<'guest> {
+    /// This is storage for one WASI VM instance, not a shared protocol channel.
+    /// The caller must own the logical image-local arena as ordinary Rust
+    /// mutable state before calling this method.
+    pub fn lease<'guest>(&'guest mut self) -> WasiGuestLease<'guest> {
         Self::assert_guest_alignment();
-        assert!(!arena.is_null(), "WASI guest arena owner pointer is null");
-        let arena = unsafe { &mut *arena };
         unsafe {
-            assert!(!*arena.occupied.get(), "WASI guest arena is already leased");
-            *arena.occupied.get() = true;
+            assert!(!*self.occupied.get(), "WASI guest arena is already leased");
+            *self.occupied.get() = true;
         }
-        WasiGuestStorage {
-            occupied: arena.occupied.get(),
-            ptr: unsafe { (*arena.bytes.get()).as_mut_ptr().cast() },
+        WasiGuestLease {
+            occupied: self.occupied.get(),
+            ptr: unsafe { (*self.bytes.get()).as_mut_ptr().cast() },
         }
     }
 }
@@ -440,20 +436,20 @@ impl WasiGuestArena {
 unsafe impl<const N: usize> Sync for EmbeddedFutureArena<N> {}
 
 #[cfg(feature = "wasm-engine-core")]
-pub struct WasiGuestStorage<'guest> {
+pub struct WasiGuestLease<'guest> {
     occupied: *mut bool,
     ptr: *mut crate::kernel::engine::wasm::Guest<'guest>,
 }
 
 #[cfg(feature = "wasm-engine-core")]
-impl<'guest> WasiGuestStorage<'guest> {
+impl<'guest> WasiGuestLease<'guest> {
     fn guest_ptr(&mut self) -> *mut crate::kernel::engine::wasm::Guest<'guest> {
         self.ptr
     }
 }
 
 #[cfg(feature = "wasm-engine-core")]
-impl Drop for WasiGuestStorage<'_> {
+impl Drop for WasiGuestLease<'_> {
     fn drop(&mut self) {
         unsafe {
             *self.occupied = false;
@@ -1061,7 +1057,7 @@ pub trait LogicalImage<C: Capsule>: Sized {
 /// Site-local storage facts required only by logical images that actually run a WASI guest.
 #[cfg(feature = "wasm-engine-core")]
 pub trait WasiGuestImage<C: Capsule>: LogicalImage<C> {
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> WasiGuestStorage<'guest>;
+    fn wasi_guest_lease<'guest, const ROLE: u8>() -> WasiGuestLease<'guest>;
 
     fn wasi_budget<const ROLE: u8>() -> BudgetRun {
         core::hint::black_box(ROLE);
@@ -1227,7 +1223,7 @@ pub trait ArtifactEvidence: artifact_seal::Sealed {
 #[doc(hidden)]
 pub trait ArtifactGuestStorage<C: Capsule, I: LogicalImage<C>>: ArtifactEvidence {
     #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> Option<WasiGuestStorage<'guest>>;
+    fn wasi_guest_lease<'guest, const ROLE: u8>() -> Option<WasiGuestLease<'guest>>;
 
     #[cfg(feature = "wasm-engine-core")]
     fn wasi_budget<const ROLE: u8>() -> BudgetRun {
@@ -1475,8 +1471,8 @@ where
     C: Capsule,
     I: WasiGuestImage<C>,
 {
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> Option<WasiGuestStorage<'guest>> {
-        Some(I::wasi_guest_storage::<ROLE>())
+    fn wasi_guest_lease<'guest, const ROLE: u8>() -> Option<WasiGuestLease<'guest>> {
+        Some(I::wasi_guest_lease::<ROLE>())
     }
 
     fn wasi_budget<const ROLE: u8>() -> BudgetRun {
@@ -1510,7 +1506,7 @@ where
     I: LogicalImage<C>,
 {
     #[cfg(feature = "wasm-engine-core")]
-    fn wasi_guest_storage<'guest, const ROLE: u8>() -> Option<WasiGuestStorage<'guest>> {
+    fn wasi_guest_lease<'guest, const ROLE: u8>() -> Option<WasiGuestLease<'guest>> {
         core::hint::black_box(ROLE);
         None
     }
@@ -2247,9 +2243,8 @@ where
             RoleKind::Engine => {
                 #[cfg(feature = "wasm-engine-core")]
                 let guest_storage =
-                    <ImageTy::Artifact as ArtifactGuestStorage<C, ImageTy>>::wasi_guest_storage::<
-                        ROLE,
-                    >();
+                    <ImageTy::Artifact as ArtifactGuestStorage<C, ImageTy>>::wasi_guest_lease::<ROLE>(
+                    );
                 #[cfg(feature = "wasm-engine-core")]
                 let has_wasi_guest = self.wasi_guest_bytes.is_some();
                 #[cfg(feature = "wasm-engine-core")]
@@ -3145,14 +3140,14 @@ impl<'a> DriverFacts<'a> {
 
 #[cfg(feature = "wasm-engine-core")]
 struct WasiGuestSlot<'guest> {
-    storage: Option<WasiGuestStorage<'guest>>,
+    storage: Option<WasiGuestLease<'guest>>,
     initialized: bool,
 }
 
 #[cfg(feature = "wasm-engine-core")]
 impl<'guest> WasiGuestSlot<'guest> {
     fn init(
-        mut storage: WasiGuestStorage<'guest>,
+        mut storage: WasiGuestLease<'guest>,
         module: &'guest [u8],
     ) -> Result<Self, crate::kernel::engine::wasm::Error> {
         let ptr = storage.guest_ptr();
@@ -3175,7 +3170,7 @@ impl<'guest> WasiGuestSlot<'guest> {
         unsafe { &mut *ptr }
     }
 
-    fn finish(mut self) -> WasiGuestStorage<'guest> {
+    fn finish(mut self) -> WasiGuestLease<'guest> {
         if self.initialized {
             unsafe {
                 let ptr = self
@@ -3216,7 +3211,7 @@ pub struct EngineCtx<'endpoint, 'guest, C: Capsule, const ROLE: u8> {
     #[cfg(feature = "wasm-engine-core")]
     wasi_guest_bytes: Option<&'guest [u8]>,
     #[cfg(feature = "wasm-engine-core")]
-    guest_storage: Option<WasiGuestStorage<'guest>>,
+    guest_storage: Option<WasiGuestLease<'guest>>,
     #[cfg(feature = "wasm-engine-core")]
     guest_slot: Option<WasiGuestSlot<'guest>>,
     #[cfg(not(feature = "wasm-engine-core"))]
@@ -3228,7 +3223,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         endpoint: RoleEndpointCtx<'endpoint, C, ROLE>,
         endpoint_carrier: EndpointCarrierFacts,
         wasi_guest_bytes: Option<&'guest [u8]>,
-        #[cfg(feature = "wasm-engine-core")] guest_storage: Option<WasiGuestStorage<'guest>>,
+        #[cfg(feature = "wasm-engine-core")] guest_storage: Option<WasiGuestLease<'guest>>,
     ) -> Self {
         #[cfg(not(feature = "wasm-engine-core"))]
         core::hint::black_box(wasi_guest_bytes);
@@ -3955,7 +3950,7 @@ mod tests {
     use core::pin::Pin;
     use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
     use std::boxed::Box;
-    use std::sync::{Arc, Mutex};
+    use std::rc::Rc;
     use std::thread_local;
     use std::vec::Vec;
 
@@ -4145,15 +4140,39 @@ mod tests {
         };
     }
 
+    struct AttachedQueueTestStore {
+        queues: UnsafeCell<AttachedQueueTestQueues>,
+    }
+
+    impl AttachedQueueTestStore {
+        fn new() -> Self {
+            Self {
+                queues: UnsafeCell::new(AttachedQueueTestQueues::EMPTY),
+            }
+        }
+
+        fn view<R>(&self, f: impl FnOnce(&AttachedQueueTestQueues) -> R) -> R {
+            // Test carrier execution is single-threaded; cloned carriers model distinct
+            // endpoint handles over one in-process byte queue, not protocol authority.
+            unsafe { f(&*self.queues.get()) }
+        }
+
+        fn edit<R>(&self, f: impl FnOnce(&mut AttachedQueueTestQueues) -> R) -> R {
+            // Test carrier execution is single-threaded; mutable access never crosses
+            // a yield point and is confined to one transport operation.
+            unsafe { f(&mut *self.queues.get()) }
+        }
+    }
+
     #[derive(Clone)]
     struct AttachedQueueTestCarrier {
-        queues: Arc<Mutex<AttachedQueueTestQueues>>,
+        queues: Rc<AttachedQueueTestStore>,
     }
 
     impl AttachedQueueTestCarrier {
         fn new() -> Self {
             Self {
-                queues: Arc::new(Mutex::new(AttachedQueueTestQueues::EMPTY)),
+                queues: Rc::new(AttachedQueueTestStore::new()),
             }
         }
 
@@ -4162,12 +4181,12 @@ mod tests {
             if role >= TEST_CARRIER_ROLES {
                 return 0;
             }
-            self.queues.lock().expect("test carrier queue lock").by_role[role].len
+            self.queues.view(|queues| queues.by_role[role].len)
         }
 
         fn counters(&self) -> (usize, usize, usize) {
-            let queues = self.queues.lock().expect("test carrier queue lock");
-            (queues.recv_count, queues.hint_count, queues.requeue_count)
+            self.queues
+                .view(|queues| (queues.recv_count, queues.hint_count, queues.requeue_count))
         }
     }
 
@@ -4251,11 +4270,13 @@ mod tests {
             if outgoing.lane() != tx.lane {
                 return Poll::Ready(Err(hibana::integration::transport::TransportError::Failed));
             }
-            self.queues.lock().expect("test carrier queue lock").by_role[peer].push_back(
-                outgoing.lane(),
-                outgoing.frame_label(),
-                outgoing.payload(),
-            )?;
+            self.queues.edit(|queues| {
+                queues.by_role[peer].push_back(
+                    outgoing.lane(),
+                    outgoing.frame_label(),
+                    outgoing.payload(),
+                )
+            })?;
             tx.sent_frames = tx.sent_frames.saturating_add(1);
             cx.waker().wake_by_ref();
             Poll::Ready(Ok(()))
@@ -4278,19 +4299,16 @@ mod tests {
             if local_role >= TEST_CARRIER_ROLES {
                 return Poll::Ready(Err(hibana::integration::transport::TransportError::Failed));
             }
-            let Some(frame) = self.queues.lock().expect("test carrier queue lock").by_role
-                [local_role]
-                .pop_front(rx.lane)
+            let Some(frame) = self
+                .queues
+                .edit(|queues| queues.by_role[local_role].pop_front(rx.lane))
             else {
                 return Poll::Pending;
             };
             if frame.lane != rx.lane {
                 return Poll::Ready(Err(hibana::integration::transport::TransportError::Failed));
             }
-            self.queues
-                .lock()
-                .expect("test carrier queue lock")
-                .recv_count += 1;
+            self.queues.edit(|queues| queues.recv_count += 1);
             rx.frame_label = Some(frame.frame_label);
             rx.hint_frame_label.set(Some(frame.frame_label));
             rx.len = frame.len;
@@ -4305,14 +4323,16 @@ mod tests {
             if let Some(frame_label) = rx.frame_label.take() {
                 let local_role = rx.local_role as usize;
                 if local_role < TEST_CARRIER_ROLES {
-                    self.queues.lock().expect("test carrier queue lock").by_role[local_role]
-                        .push_front(rx.lane, frame_label, &rx.bytes[..rx.len]);
+                    self.queues.edit(|queues| {
+                        queues.by_role[local_role].push_front(
+                            rx.lane,
+                            frame_label,
+                            &rx.bytes[..rx.len],
+                        )
+                    });
                 }
             }
-            self.queues
-                .lock()
-                .expect("test carrier queue lock")
-                .requeue_count += 1;
+            self.queues.edit(|queues| queues.requeue_count += 1);
             rx.hint_frame_label.set(None);
             rx.requeued_frames = rx.requeued_frames.saturating_add(1);
         }
@@ -4341,10 +4361,7 @@ mod tests {
             );
             let hint = rx.hint_frame_label.take();
             if hint.is_some() {
-                self.queues
-                    .lock()
-                    .expect("test carrier queue lock")
-                    .hint_count += 1;
+                self.queues.edit(|queues| queues.hint_count += 1);
             }
             hint
         }
@@ -4400,19 +4417,25 @@ mod tests {
         RUN_BRIDGE_DRIVER_DONE.with(Cell::get)
     }
 
-    fn lease_bridge_wasi_guest_storage<'guest>() -> WasiGuestStorage<'guest> {
-        BRIDGE_WASI_GUEST_ARENA
-            .with(|arena| unsafe { WasiGuestArena::storage_from_owner(arena.get()) })
+    fn bridge_wasi_guest_lease<'guest>() -> WasiGuestLease<'guest> {
+        BRIDGE_WASI_GUEST_ARENA.with(|arena| {
+            let arena = unsafe { &mut *arena.get() };
+            arena.lease()
+        })
     }
 
-    fn lease_no_loop_wasi_guest_storage<'guest>() -> WasiGuestStorage<'guest> {
-        NO_LOOP_WASI_GUEST_ARENA
-            .with(|arena| unsafe { WasiGuestArena::storage_from_owner(arena.get()) })
+    fn no_loop_wasi_guest_lease<'guest>() -> WasiGuestLease<'guest> {
+        NO_LOOP_WASI_GUEST_ARENA.with(|arena| {
+            let arena = unsafe { &mut *arena.get() };
+            arena.lease()
+        })
     }
 
-    fn lease_memory_grow_wasi_guest_storage<'guest>() -> WasiGuestStorage<'guest> {
-        MEMORY_GROW_WASI_GUEST_ARENA
-            .with(|arena| unsafe { WasiGuestArena::storage_from_owner(arena.get()) })
+    fn memory_grow_wasi_guest_lease<'guest>() -> WasiGuestLease<'guest> {
+        MEMORY_GROW_WASI_GUEST_ARENA.with(|arena| {
+            let arena = unsafe { &mut *arena.get() };
+            arena.lease()
+        })
     }
 
     impl Capsule for BridgeCapsule {
@@ -4709,9 +4732,9 @@ mod tests {
     }
 
     impl WasiGuestImage<BridgeCapsule> for crate::site::Local<BridgeImage> {
-        fn wasi_guest_storage<'guest, const ROLE: u8>() -> WasiGuestStorage<'guest> {
+        fn wasi_guest_lease<'guest, const ROLE: u8>() -> WasiGuestLease<'guest> {
             assert!(ROLE < 2);
-            lease_bridge_wasi_guest_storage()
+            bridge_wasi_guest_lease()
         }
     }
 
@@ -5539,7 +5562,7 @@ mod tests {
             Some(module.as_slice()),
             Some(<crate::site::Local<BridgeImage> as WasiGuestImage<
                 BridgeCapsule,
-            >>::wasi_guest_storage::<0>()),
+            >>::wasi_guest_lease::<0>()),
         );
         let mut driver_ctx: DriverCtx<'_, BridgeCapsule, 1> = DriverCtx::new(
             RoleEndpointCtx::new(driver_endpoint),
@@ -5663,7 +5686,7 @@ mod tests {
             RoleEndpointCtx::new(engine_endpoint),
             endpoint_carrier,
             Some(module.as_slice()),
-            Some(lease_no_loop_wasi_guest_storage()),
+            Some(no_loop_wasi_guest_lease()),
         );
         let mut driver_ctx: DriverCtx<'_, NoLoopCapsule, 1> = DriverCtx::new(
             RoleEndpointCtx::new(driver_endpoint),
@@ -5762,7 +5785,7 @@ mod tests {
             RoleEndpointCtx::new(engine_endpoint),
             endpoint_carrier,
             Some(module.as_slice()),
-            Some(lease_memory_grow_wasi_guest_storage()),
+            Some(memory_grow_wasi_guest_lease()),
         );
         let driver_ctx: DriverCtx<'_, MemoryGrowCapsule, 1> = DriverCtx::new(
             RoleEndpointCtx::new(driver_endpoint),

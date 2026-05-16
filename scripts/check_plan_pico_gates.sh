@@ -4,6 +4,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+if git ls-files --error-unmatch plan.md >/dev/null 2>&1; then
+  echo "plan gate failed: plan.md must be local-only and untracked" >&2
+  exit 1
+fi
+
+if cargo package --list --allow-dirty 2>/dev/null | rg -n '(^|/)plan\.md$'; then
+  echo "plan gate failed: plan.md must not be included in the Cargo package" >&2
+  exit 1
+fi
+
 bash ./scripts/check_wasip1_guest_builds.sh
 cargo check --workspace --all-targets
 cargo check --workspace --all-targets --all-features
@@ -86,7 +96,7 @@ if rg -n -S 'RefCell|CarrierAttachState|AttachedCarrierFrame|push_attached_frame
   exit 1
 fi
 
-if rg -n -S 'AtomicBool|compare_exchange\(false, true|unsafe impl Sync for WasiGuestArena|pub fn storage<.*&'\''static self' src/appkit.rs; then
+if rg -n -S 'AtomicBool|compare_exchange\(false, true|unsafe impl Sync for WasiGuestArena|pub fn storage<.*&'\''static self|pub unsafe fn storage_from_owner|storage_from_owner\(|WasiGuestStorage|wasi_guest_storage' src/appkit.rs; then
   echo "plan gate failed: WASI guest arena must be single-owner storage, not a shared atomic lease" >&2
   exit 1
 fi

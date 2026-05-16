@@ -1,4 +1,5 @@
 target/
+/plan.md
 /integration/cross-repo/target
 /internal/pico_smoke/target
 /internal/pico2_smoke/target

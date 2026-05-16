@@ -3,6 +3,7 @@ name = "hibana-pico"
 version = "0.1.0"
 edition = "2024"
 publish = false
+exclude = ["/plan.md"]
 
 [workspace]
 members = [
@@ -18,7 +19,7 @@ exclude = [
 resolver = "3"
 
 [dependencies]
-hibana = { version = "0.5.1", default-features = false }
+hibana = { version = "0.5.3", default-features = false }
 
 [features]
 default = []

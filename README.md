@@ -177,11 +177,29 @@ before the controller's route decision or materializing payload has been
 observed. That is not progress, and it must not repair missing route state.
 `offer()` waits for projected route evidence before producing a continuation.
 
+Committed Hibana wait semantics are `Progress | Fault`. Rust public APIs expose
+committed progress as `Ok(progress) | Err(domain evidence)` through
+`EndpointError`, `ResolverError`, or `AttachError`. Committed Fault is terminal
+evidence, not a route arm, and there is no wide `HibanaError` for localside.
+Hibana also has non-consuming preview/probe points; a preview/probe mismatch is
+not protocol progress and cannot select hidden progress.
+A preview/probe `Err` is non-progress and cannot select hidden progress.
+
 Operational deadline expiry is different from a protocol timeout. A deadline is
 an internal fuse: it poisons the current session generation and returns domain
 error evidence. It never selects a route arm. If time should choose a branch,
 time must be present in the choreography, for example as a Timer / clock /
 interrupt fact consumed by a resolver-selected route arm.
+A protocol-visible timeout must be written as choreography: Timer / clock /
+interrupt fact plus an explicit resolver-selected route arm.
+Protocol-visible timeout uses resolver-selected explicit route arm evidence.
+
+Timeout is not a public API. There is no public timeout API, no public cancel /
+reconnect / same-generation recovery API, and no public wide `HibanaError`.
+There is no public `EndpointErrorKind` / `ResolverErrorKind` /
+`AttachErrorKind` decision surface. Retry after an operational fault is a new
+choreography instance / new session generation. Failure never authorizes hidden
+progress.
 
 The Baker hardware examples keep both cases separate:
 
