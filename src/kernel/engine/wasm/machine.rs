@@ -264,7 +264,7 @@ pub enum WasmError {
     UnsupportedOpcode(u8),
     StackOverflow,
     StackUnderflow,
-    PendingHostCall,
+    PendingCall,
     PendingRequired,
     PendingMismatch,
     Trap,
@@ -280,7 +280,7 @@ impl WasmError {
             Self::UnsupportedOpcode(opcode) => 0x5703_0000 | opcode as u32,
             Self::StackOverflow => 0x5700_0002,
             Self::StackUnderflow => 0x5700_0003,
-            Self::PendingHostCall => 0x5700_0004,
+            Self::PendingCall => 0x5700_0004,
             Self::PendingRequired => 0x5700_0005,
             Self::PendingMismatch => 0x5700_0006,
             Self::Trap => 0x5700_0007,
@@ -427,20 +427,6 @@ pub(super) enum HostImport {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct HostCall<'a> {
-    pub import: Import<'a>,
-    pub args: [Value; CORE_WASM_MAX_PARAMS],
-    pub arg_count: usize,
-    pub result_count: usize,
-}
-
-impl<'a> HostCall<'a> {
-    fn args(&self) -> &[Value] {
-        &self.args[..self.arg_count]
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemoryGrowEvent {
     pub previous_pages: u32,
     pub requested_pages: u32,
@@ -448,8 +434,8 @@ pub struct MemoryGrowEvent {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ExecutionEvent<'a> {
-    HostImport(HostCall<'a>),
+pub(super) enum ExecutionEvent {
+    Wasip1Call,
     MemoryGrow(MemoryGrowEvent),
     Done,
 }
@@ -464,8 +450,8 @@ pub(super) enum VmEvent {
     ClockTimeGet(ClockTimeGetCall),
     PollOneoff(PollOneoffCall),
     RandomGet(RandomGetCall),
-    PathOpen(PathCall),
-    FdReaddir(PathCall),
+    PathOpen(PathOpenCall),
+    FdReaddir(FdReaddirCall),
     ArgsSizesGet(ArgsSizesGetCall),
     ArgsGet(ArgsGetCall),
     EnvironSizesGet(EnvironSizesGetCall),
@@ -477,54 +463,92 @@ pub(super) enum VmEvent {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum PathOp {
-    FdReaddir,
-    PathOpen,
+enum PendingWasip1Call {
+    FdWrite(FdWriteCall),
+    FdRead(FdReadCall),
+    FdFdstatGet(FdRequestCall),
+    FdClose(FdRequestCall),
+    FdReaddir(FdReaddirCall),
+    ClockResGet(ClockResGetCall),
+    ClockTimeGet(ClockTimeGetCall),
+    PollOneoff(PollOneoffCall),
+    RandomGet(RandomGetCall),
+    PathOpen(PathOpenCall),
+    ArgsSizesGet(ArgsSizesGetCall),
+    ArgsGet(ArgsGetCall),
+    EnvironSizesGet(EnvironSizesGetCall),
+    EnvironGet(EnvironGetCall),
+    ProcExit(u32),
+}
+
+impl PendingWasip1Call {
+    const fn result_count(self) -> usize {
+        match self {
+            Self::ProcExit(_) => 0,
+            _ => 1,
+        }
+    }
+
+    const fn into_event(self) -> VmEvent {
+        match self {
+            Self::FdWrite(call) => VmEvent::FdWrite(call),
+            Self::FdRead(call) => VmEvent::FdRead(call),
+            Self::FdFdstatGet(call) => VmEvent::FdFdstatGet(call),
+            Self::FdClose(call) => VmEvent::FdClose(call),
+            Self::FdReaddir(call) => VmEvent::FdReaddir(call),
+            Self::ClockResGet(call) => VmEvent::ClockResGet(call),
+            Self::ClockTimeGet(call) => VmEvent::ClockTimeGet(call),
+            Self::PollOneoff(call) => VmEvent::PollOneoff(call),
+            Self::RandomGet(call) => VmEvent::RandomGet(call),
+            Self::PathOpen(call) => VmEvent::PathOpen(call),
+            Self::ArgsSizesGet(call) => VmEvent::ArgsSizesGet(call),
+            Self::ArgsGet(call) => VmEvent::ArgsGet(call),
+            Self::EnvironSizesGet(call) => VmEvent::EnvironSizesGet(call),
+            Self::EnvironGet(call) => VmEvent::EnvironGet(call),
+            Self::ProcExit(code) => VmEvent::ProcExit(code),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct PathCall {
-    kind: PathOp,
-    args: [Value; CORE_WASM_MAX_PARAMS],
-    arg_count: usize,
+pub(super) struct PathOpenCall {
+    fd: u8,
+    path_ptr: u32,
+    path_len: u32,
+    rights_base: u64,
+    opened_fd_ptr: u32,
 }
 
-impl PathCall {
-    #[cfg(test)]
-    pub(super) const fn kind(self) -> PathOp {
-        self.kind
+impl PathOpenCall {
+    pub(super) const fn fd(self) -> u8 {
+        self.fd
     }
 
-    #[cfg(all(
-        test,
-        any(feature = "wasip1-sys-path-open", feature = "wasm-engine-core")
-    ))]
-    fn args(&self) -> &[Value] {
-        &self.args[..self.arg_count]
+    pub(super) const fn rights_base(self) -> u64 {
+        self.rights_base
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct FdReaddirCall {
+    fd: u8,
+    buf: u32,
+    buf_len: u32,
+    cookie: u64,
+    bufused: u32,
+}
+
+impl FdReaddirCall {
+    pub(super) const fn fd(self) -> u8 {
+        self.fd
     }
 
-    pub(super) fn arg_i32(&self, index: usize) -> Result<u32, WasmError> {
-        self.args
-            .get(index)
-            .copied()
-            .ok_or(WasmError::Invalid("path import argument missing"))?
-            .as_i32()
+    pub(super) const fn cookie(self) -> u64 {
+        self.cookie
     }
 
-    pub(super) fn arg_i64(&self, index: usize) -> Result<u64, WasmError> {
-        self.args
-            .get(index)
-            .copied()
-            .ok_or(WasmError::Invalid("path import argument missing"))?
-            .as_i64()
-    }
-
-    pub(super) fn fd(&self) -> Result<u8, WasmError> {
-        let fd = self.arg_i32(0)?;
-        if fd > u8::MAX as u32 {
-            return Err(WasmError::Invalid("fd does not fit u8"));
-        }
-        Ok(fd as u8)
+    pub(super) const fn max_len(self) -> usize {
+        self.buf_len as usize
     }
 }
 
@@ -897,8 +921,8 @@ impl<'a> Frame<'a> {
 type Frames<'a> = [Frame<'a>; CORE_WASM_CALL_STACK_CAPACITY];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PendingExecution<'a> {
-    HostImport(HostCall<'a>),
+enum PendingExecution {
+    Wasip1(PendingWasip1Call),
     MemoryGrow(MemoryGrowEvent),
 }
 
@@ -942,7 +966,7 @@ pub(super) struct Interpreter<'a> {
     table_size: usize,
     control_targets: [CoreControlTarget; CORE_WASM_CONTROL_TARGET_CAPACITY],
     control_target_count: usize,
-    pending: Option<PendingExecution<'a>>,
+    pending: Option<PendingExecution>,
     done: bool,
 }
 
@@ -1964,7 +1988,7 @@ fn disabled_wasip1_import_message(name: Wasip1ImportName) -> &'static str {
 
 impl<'a> Interpreter<'a> {
     #[cfg(test)]
-    fn resume(&mut self) -> Result<ExecutionEvent<'a>, WasmError> {
+    fn resume(&mut self) -> Result<ExecutionEvent, WasmError> {
         self.run(TEST_RESUME_FUEL)
     }
 
@@ -1977,12 +2001,12 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    fn run(&mut self, mut fuel: u32) -> Result<ExecutionEvent<'a>, WasmError> {
+    fn run(&mut self, mut fuel: u32) -> Result<ExecutionEvent, WasmError> {
         if self.done {
             return Ok(ExecutionEvent::Done);
         }
         if self.pending.is_some() {
-            return Err(WasmError::PendingHostCall);
+            return Err(WasmError::PendingCall);
         }
 
         loop {
@@ -2002,7 +2026,14 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn exec_instr(&mut self, instr: Instr) -> Result<Option<ExecutionEvent<'a>>, WasmError> {
+    fn pending_wasip1_call(&self) -> Result<PendingWasip1Call, WasmError> {
+        match self.pending.as_ref() {
+            Some(PendingExecution::Wasip1(call)) => Ok(*call),
+            _ => Err(WasmError::Invalid("missing pending wasi import")),
+        }
+    }
+
+    fn exec_instr(&mut self, instr: Instr) -> Result<Option<ExecutionEvent>, WasmError> {
         match instr {
             Instr::Nop => {}
             Instr::Simple(opcode) => return self.exec_simple(opcode),
@@ -2115,11 +2146,7 @@ impl<'a> Interpreter<'a> {
         Ok(None)
     }
 
-    fn exec_u32(
-        &mut self,
-        opcode: u8,
-        value: u32,
-    ) -> Result<Option<ExecutionEvent<'a>>, WasmError> {
+    fn exec_u32(&mut self, opcode: u8, value: u32) -> Result<Option<ExecutionEvent>, WasmError> {
         match opcode {
             OPCODE_BR => self.core_branch(value as usize)?,
             OPCODE_BR_IF => {
@@ -2373,7 +2400,7 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    fn exec_simple(&mut self, opcode: u8) -> Result<Option<ExecutionEvent<'a>>, WasmError> {
+    fn exec_simple(&mut self, opcode: u8) -> Result<Option<ExecutionEvent>, WasmError> {
         match opcode {
             OPCODE_UNREACHABLE => return Err(WasmError::Trap),
             OPCODE_NOP => {}
@@ -2848,19 +2875,41 @@ impl<'a> Interpreter<'a> {
 
     pub(super) fn finish_host_import(&mut self, results: &[Value]) -> Result<(), WasmError> {
         let pending = self.pending.take().ok_or(WasmError::PendingRequired)?;
-        let PendingExecution::HostImport(import) = pending else {
+        let PendingExecution::Wasip1(call) = pending else {
             self.pending = Some(pending);
             return Err(WasmError::PendingMismatch);
         };
-        if results.len() != import.result_count {
+        if results.len() != call.result_count() {
             return Err(WasmError::PendingMismatch);
         }
-        let type_index = self
-            .module
-            .core_func_type_index(import.import.function_index)?;
-        let ty = self.module.core_func_type(type_index)?;
-        for (index, result) in results.iter().copied().enumerate() {
-            if result.kind() != ty.results[index] {
+        for result in results.iter().copied() {
+            if result.kind() != ValueKind::I32 {
+                return Err(WasmError::Invalid("core import result type mismatch"));
+            }
+            self.push_core_value(result)?;
+        }
+        Ok(())
+    }
+
+    fn finish_matching_host_import(
+        &mut self,
+        expected: PendingWasip1Call,
+        results: &[Value],
+    ) -> Result<(), WasmError> {
+        let pending = self.pending.take().ok_or(WasmError::PendingRequired)?;
+        let PendingExecution::Wasip1(call) = pending else {
+            self.pending = Some(pending);
+            return Err(WasmError::PendingMismatch);
+        };
+        if call != expected {
+            self.pending = Some(PendingExecution::Wasip1(call));
+            return Err(WasmError::PendingMismatch);
+        }
+        if results.len() != call.result_count() {
+            return Err(WasmError::PendingMismatch);
+        }
+        for result in results.iter().copied() {
+            if result.kind() != ValueKind::I32 {
                 return Err(WasmError::Invalid("core import result type mismatch"));
             }
             self.push_core_value(result)?;
@@ -2947,14 +2996,17 @@ impl<'a> Interpreter<'a> {
         let body = self.module.core_function_body(function_index)?;
         let type_index = self.module.core_func_type_index(function_index)?;
         let ty = self.module.core_func_type(type_index)?;
-        let mut args = [Value::I32(0); CORE_WASM_MAX_PARAMS];
-        for index in (0..ty.param_count).rev() {
-            let value = self.pop_core_value()?;
+        let arg_start = self
+            .value_len
+            .checked_sub(ty.param_count)
+            .ok_or(WasmError::StackUnderflow)?;
+        for index in 0..ty.param_count {
+            let value = self.values[arg_start + index];
             if value.kind() != ty.params[index] {
                 return Err(WasmError::Invalid("core call argument type mismatch"));
             }
-            args[index] = value;
         }
+        self.value_len = arg_start;
         {
             let slot = self
                 .frames
@@ -2965,8 +3017,8 @@ impl<'a> Interpreter<'a> {
             slot.local_count = body.local_count;
             slot.local_kinds = body.local_kinds;
 
-            for (index, arg) in args.iter().copied().take(ty.param_count).enumerate() {
-                slot.locals[index] = arg;
+            for index in 0..ty.param_count {
+                slot.locals[index] = self.values[arg_start + index];
             }
             for index in ty.param_count..body.local_count {
                 slot.locals[index] = Value::zero(body.local_kinds[index]);
@@ -2991,7 +3043,299 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    fn call_core_import(&mut self, function_index: u32) -> Result<ExecutionEvent<'a>, WasmError> {
+    fn expect_import_signature(
+        ty: FuncType,
+        params: &[ValueKind],
+        result_count: usize,
+        message: &'static str,
+    ) -> Result<(), WasmError> {
+        if ty.param_count != params.len() || ty.result_count != result_count {
+            return Err(WasmError::Invalid(message));
+        }
+        for (index, expected) in params.iter().copied().enumerate() {
+            if ty.params[index] != expected {
+                return Err(WasmError::Invalid(message));
+            }
+        }
+        Ok(())
+    }
+
+    fn pop_import_fd(&mut self) -> Result<u8, WasmError> {
+        let fd = self.pop_core_i32()?;
+        if fd > u8::MAX as u32 {
+            return Err(WasmError::Invalid("fd does not fit u8"));
+        }
+        Ok(fd as u8)
+    }
+
+    fn begin_wasip1_import(
+        &mut self,
+        name: Wasip1ImportName,
+        ty: FuncType,
+    ) -> Result<PendingWasip1Call, WasmError> {
+        match name {
+            Wasip1ImportName::FdWrite => {
+                Self::expect_import_signature(
+                    ty,
+                    &[
+                        ValueKind::I32,
+                        ValueKind::I32,
+                        ValueKind::I32,
+                        ValueKind::I32,
+                    ],
+                    1,
+                    "fd_write import signature mismatch",
+                )?;
+                let nwritten = self.pop_core_i32()?;
+                let iovs_len = self.pop_core_i32()?;
+                let iovs = self.pop_core_i32()?;
+                let fd = self.pop_import_fd()?;
+                Ok(PendingWasip1Call::FdWrite(FdWriteCall {
+                    fd,
+                    iovs,
+                    iovs_len,
+                    nwritten,
+                }))
+            }
+            Wasip1ImportName::FdRead => {
+                Self::expect_import_signature(
+                    ty,
+                    &[
+                        ValueKind::I32,
+                        ValueKind::I32,
+                        ValueKind::I32,
+                        ValueKind::I32,
+                    ],
+                    1,
+                    "fd_read import signature mismatch",
+                )?;
+                let nread = self.pop_core_i32()?;
+                let iovs_len = self.pop_core_i32()?;
+                let iovs = self.pop_core_i32()?;
+                let fd = self.pop_import_fd()?;
+                Ok(PendingWasip1Call::FdRead(FdReadCall {
+                    fd,
+                    iovs,
+                    iovs_len,
+                    nread,
+                }))
+            }
+            Wasip1ImportName::FdFdstatGet => {
+                Self::expect_import_signature(
+                    ty,
+                    &[ValueKind::I32, ValueKind::I32],
+                    1,
+                    "fd_fdstat_get import signature mismatch",
+                )?;
+                let out_ptr = self.pop_core_i32()?;
+                let fd = self.pop_import_fd()?;
+                Ok(PendingWasip1Call::FdFdstatGet(FdRequestCall {
+                    fd,
+                    out_ptr,
+                }))
+            }
+            Wasip1ImportName::FdClose => {
+                Self::expect_import_signature(
+                    ty,
+                    &[ValueKind::I32],
+                    1,
+                    "fd_close import signature mismatch",
+                )?;
+                let fd = self.pop_import_fd()?;
+                Ok(PendingWasip1Call::FdClose(FdRequestCall { fd, out_ptr: 0 }))
+            }
+            Wasip1ImportName::FdReaddir => {
+                Self::expect_import_signature(
+                    ty,
+                    &[
+                        ValueKind::I32,
+                        ValueKind::I32,
+                        ValueKind::I32,
+                        ValueKind::I64,
+                        ValueKind::I32,
+                    ],
+                    1,
+                    "fd_readdir import signature mismatch",
+                )?;
+                let bufused = self.pop_core_i32()?;
+                let cookie = self.pop_core_i64()?;
+                let buf_len = self.pop_core_i32()?;
+                let buf = self.pop_core_i32()?;
+                let fd = self.pop_import_fd()?;
+                Ok(PendingWasip1Call::FdReaddir(FdReaddirCall {
+                    fd,
+                    buf,
+                    buf_len,
+                    cookie,
+                    bufused,
+                }))
+            }
+            Wasip1ImportName::ClockResGet => {
+                Self::expect_import_signature(
+                    ty,
+                    &[ValueKind::I32, ValueKind::I32],
+                    1,
+                    "clock_res_get import signature mismatch",
+                )?;
+                let resolution_ptr = self.pop_core_i32()?;
+                let clock_id = self.pop_core_i32()?;
+                Ok(PendingWasip1Call::ClockResGet(ClockResGetCall {
+                    clock_id,
+                    resolution_ptr,
+                }))
+            }
+            Wasip1ImportName::ClockTimeGet => {
+                Self::expect_import_signature(
+                    ty,
+                    &[ValueKind::I32, ValueKind::I64, ValueKind::I32],
+                    1,
+                    "clock_time_get import signature mismatch",
+                )?;
+                let time_ptr = self.pop_core_i32()?;
+                let precision = self.pop_core_i64()?;
+                let clock_id = self.pop_core_i32()?;
+                Ok(PendingWasip1Call::ClockTimeGet(ClockTimeGetCall {
+                    clock_id,
+                    precision,
+                    time_ptr,
+                }))
+            }
+            Wasip1ImportName::PollOneoff => {
+                Self::expect_import_signature(
+                    ty,
+                    &[
+                        ValueKind::I32,
+                        ValueKind::I32,
+                        ValueKind::I32,
+                        ValueKind::I32,
+                    ],
+                    1,
+                    "poll_oneoff import signature mismatch",
+                )?;
+                let nevents = self.pop_core_i32()?;
+                let nsubscriptions = self.pop_core_i32()?;
+                let out_ptr = self.pop_core_i32()?;
+                let in_ptr = self.pop_core_i32()?;
+                Ok(PendingWasip1Call::PollOneoff(PollOneoffCall {
+                    in_ptr,
+                    out_ptr,
+                    nsubscriptions,
+                    nevents,
+                }))
+            }
+            Wasip1ImportName::RandomGet => {
+                Self::expect_import_signature(
+                    ty,
+                    &[ValueKind::I32, ValueKind::I32],
+                    1,
+                    "random_get import signature mismatch",
+                )?;
+                let buf_len = self.pop_core_i32()?;
+                let buf = self.pop_core_i32()?;
+                Ok(PendingWasip1Call::RandomGet(RandomGetCall { buf, buf_len }))
+            }
+            Wasip1ImportName::PathOpen => {
+                Self::expect_import_signature(
+                    ty,
+                    &[
+                        ValueKind::I32,
+                        ValueKind::I32,
+                        ValueKind::I32,
+                        ValueKind::I32,
+                        ValueKind::I32,
+                        ValueKind::I64,
+                        ValueKind::I64,
+                        ValueKind::I32,
+                        ValueKind::I32,
+                    ],
+                    1,
+                    "path_open import signature mismatch",
+                )?;
+                let opened_fd_ptr = self.pop_core_i32()?;
+                self.pop_core_i32()?;
+                self.pop_core_i64()?;
+                let rights_base = self.pop_core_i64()?;
+                self.pop_core_i32()?;
+                let path_len = self.pop_core_i32()?;
+                let path_ptr = self.pop_core_i32()?;
+                self.pop_core_i32()?;
+                let fd = self.pop_import_fd()?;
+                Ok(PendingWasip1Call::PathOpen(PathOpenCall {
+                    fd,
+                    path_ptr,
+                    path_len,
+                    rights_base,
+                    opened_fd_ptr,
+                }))
+            }
+            Wasip1ImportName::ArgsSizesGet => {
+                Self::expect_import_signature(
+                    ty,
+                    &[ValueKind::I32, ValueKind::I32],
+                    1,
+                    "args_sizes_get import signature mismatch",
+                )?;
+                let argv_buf_size_ptr = self.pop_core_i32()?;
+                let argc_ptr = self.pop_core_i32()?;
+                Ok(PendingWasip1Call::ArgsSizesGet(ArgsSizesGetCall {
+                    argc_ptr,
+                    argv_buf_size_ptr,
+                }))
+            }
+            Wasip1ImportName::ArgsGet => {
+                Self::expect_import_signature(
+                    ty,
+                    &[ValueKind::I32, ValueKind::I32],
+                    1,
+                    "args_get import signature mismatch",
+                )?;
+                let argv_buf = self.pop_core_i32()?;
+                let argv = self.pop_core_i32()?;
+                Ok(PendingWasip1Call::ArgsGet(ArgsGetCall { argv, argv_buf }))
+            }
+            Wasip1ImportName::EnvironSizesGet => {
+                Self::expect_import_signature(
+                    ty,
+                    &[ValueKind::I32, ValueKind::I32],
+                    1,
+                    "environ_sizes_get import signature mismatch",
+                )?;
+                let environ_buf_size_ptr = self.pop_core_i32()?;
+                let environ_count_ptr = self.pop_core_i32()?;
+                Ok(PendingWasip1Call::EnvironSizesGet(EnvironSizesGetCall {
+                    environ_count_ptr,
+                    environ_buf_size_ptr,
+                }))
+            }
+            Wasip1ImportName::EnvironGet => {
+                Self::expect_import_signature(
+                    ty,
+                    &[ValueKind::I32, ValueKind::I32],
+                    1,
+                    "environ_get import signature mismatch",
+                )?;
+                let environ_buf = self.pop_core_i32()?;
+                let environ = self.pop_core_i32()?;
+                Ok(PendingWasip1Call::EnvironGet(EnvironGetCall {
+                    environ,
+                    environ_buf,
+                }))
+            }
+            Wasip1ImportName::ProcExit => {
+                Self::expect_import_signature(
+                    ty,
+                    &[ValueKind::I32],
+                    0,
+                    "proc_exit import signature mismatch",
+                )?;
+                let code = self.pop_core_i32()?;
+                Ok(PendingWasip1Call::ProcExit(code))
+            }
+            _ => Err(WasmError::Unsupported(disabled_wasip1_import_message(name))),
+        }
+    }
+
+    fn call_core_import(&mut self, function_index: u32) -> Result<ExecutionEvent, WasmError> {
         let import = self
             .module
             .imports
@@ -3002,22 +3346,10 @@ impl<'a> Interpreter<'a> {
         let ty = self
             .module
             .core_func_type(self.module.import_type_indices[function_index as usize])?;
-        let mut args = [Value::I32(0); CORE_WASM_MAX_PARAMS];
-        for index in (0..ty.param_count).rev() {
-            let value = self.pop_core_value()?;
-            if value.kind() != ty.params[index] {
-                return Err(WasmError::Invalid("core import argument type mismatch"));
-            }
-            args[index] = value;
-        }
-        let call = HostCall {
-            import,
-            args,
-            arg_count: ty.param_count,
-            result_count: ty.result_count,
-        };
-        self.pending = Some(PendingExecution::HostImport(call));
-        Ok(ExecutionEvent::HostImport(call))
+        let HostImport::Wasip1(name) = import.host;
+        let call = self.begin_wasip1_import(name, ty)?;
+        self.pending = Some(PendingExecution::Wasip1(call));
+        Ok(ExecutionEvent::Wasip1Call)
     }
 
     fn current_frame(&self) -> Result<&Frame<'a>, WasmError> {
@@ -3844,7 +4176,7 @@ impl<'a> Vm<'a> {
                 Ok(VmEvent::Done)
             }
             Ok(ExecutionEvent::MemoryGrow(event)) => Ok(VmEvent::MemoryGrow(event)),
-            Ok(ExecutionEvent::HostImport(import)) => self.translate_wasip1_import(import),
+            Ok(ExecutionEvent::Wasip1Call) => self.translate_wasip1_import(),
             Err(WasmError::FuelExhausted) => Ok(VmEvent::BudgetExpired(BudgetExpired::new(
                 budget.run_id(),
                 budget.generation(),
@@ -3859,6 +4191,15 @@ impl<'a> Vm<'a> {
 
     pub(super) fn finish_memory_grow_event(&mut self) -> Result<MemoryGrowEvent, WasmError> {
         self.core.finish_memory_grow_event()
+    }
+
+    pub(super) fn finish_fd_close(
+        &mut self,
+        call: FdRequestCall,
+        errno: u32,
+    ) -> Result<(), WasmError> {
+        self.core
+            .finish_matching_host_import(PendingWasip1Call::FdClose(call), &[Value::I32(errno)])
     }
 
     pub(super) fn finish_fd_write(
@@ -3985,12 +4326,9 @@ impl<'a> Vm<'a> {
         self.finish_host_call(errno)
     }
 
-    pub(super) fn path_bytes(&self, call: PathCall) -> Result<PathBytes, WasmError> {
-        if call.kind != PathOp::PathOpen {
-            return Err(WasmError::Invalid("only path_open carries path bytes"));
-        }
-        let ptr = call.arg_i32(2)?;
-        let len = call.arg_i32(3)?;
+    pub(super) fn path_bytes(&self, call: PathOpenCall) -> Result<PathBytes, WasmError> {
+        let ptr = call.path_ptr;
+        let len = call.path_len;
         if len as usize > CORE_WASIP1_PATH_CAPACITY {
             return Err(WasmError::Unsupported("path import path too long"));
         }
@@ -4004,39 +4342,31 @@ impl<'a> Vm<'a> {
 
     pub(super) fn finish_path_open(
         &mut self,
-        call: PathCall,
+        call: PathOpenCall,
         opened_fd: u32,
         errno: u32,
     ) -> Result<(), WasmError> {
-        if call.kind != PathOp::PathOpen {
-            return Err(WasmError::Invalid("path_open completion kind mismatch"));
-        }
         if errno == 0 {
-            self.core.write_memory_u32(call.arg_i32(8)?, opened_fd)?;
+            self.core.write_memory_u32(call.opened_fd_ptr, opened_fd)?;
         }
         self.finish_host_call(errno)
     }
 
     pub(super) fn finish_fd_readdir(
         &mut self,
-        call: PathCall,
+        call: FdReaddirCall,
         bytes: &[u8],
         errno: u32,
     ) -> Result<(), WasmError> {
-        if call.kind != PathOp::FdReaddir {
-            return Err(WasmError::Invalid("fd_readdir completion kind mismatch"));
-        }
-        let buf = call.arg_i32(1)?;
-        let buf_len = call.arg_i32(2)?;
-        let bufused = call.arg_i32(4)?;
         if errno == 0 {
-            if bytes.len() > buf_len as usize {
+            if bytes.len() > call.buf_len as usize {
                 return Err(WasmError::Unsupported("fd_readdir reply exceeds buffer"));
             }
-            self.core.write_memory(buf, bytes)?;
-            self.core.write_memory_u32(bufused, bytes.len() as u32)?;
+            self.core.write_memory(call.buf, bytes)?;
+            self.core
+                .write_memory_u32(call.bufused, bytes.len() as u32)?;
         } else {
-            self.core.write_memory_u32(bufused, 0)?;
+            self.core.write_memory_u32(call.bufused, 0)?;
         }
         self.finish_host_call(errno)
     }
@@ -4198,305 +4528,91 @@ impl<'a> Vm<'a> {
         Ok(byte[0])
     }
 
-    fn translate_wasip1_import(&mut self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        let HostImport::Wasip1(name) = call.import.host;
-        match name {
-            Wasip1ImportName::FdWrite => self.translate_fd_write(call),
-            Wasip1ImportName::FdRead => self.translate_fd_read(call),
-            Wasip1ImportName::FdFdstatGet => self.translate_fd_fdstat_get(call),
-            Wasip1ImportName::FdClose => self.translate_fd_close(call),
-            Wasip1ImportName::FdReaddir => self.translate_fd_readdir(call),
-            Wasip1ImportName::ClockResGet => self.translate_clock_res_get(call),
-            Wasip1ImportName::ClockTimeGet => self.translate_clock_time_get(call),
-            Wasip1ImportName::PollOneoff => self.translate_poll_oneoff(call),
-            Wasip1ImportName::PathOpen => self.translate_path_open(call),
-            Wasip1ImportName::RandomGet => self.translate_random_get(call),
-            Wasip1ImportName::ArgsSizesGet => self.translate_args_sizes_get(call),
-            Wasip1ImportName::ArgsGet => self.translate_args_get(call),
-            Wasip1ImportName::EnvironSizesGet => self.translate_environ_sizes_get(call),
-            Wasip1ImportName::EnvironGet => self.translate_environ_get(call),
-            Wasip1ImportName::ProcExit => self.translate_proc_exit(call),
-            _ => Err(WasmError::Unsupported(disabled_wasip1_import_message(name))),
+    fn translate_wasip1_import(&mut self) -> Result<VmEvent, WasmError> {
+        let call = self.core.pending_wasip1_call()?;
+        match call {
+            PendingWasip1Call::FdWrite(_) if !self.handlers.supports(Wasip1Syscall::FdWrite) => {
+                Err(WasmError::Unsupported(
+                    "wasip1 fd_write disabled by feature profile",
+                ))
+            }
+            PendingWasip1Call::FdRead(_) if !self.handlers.supports(Wasip1Syscall::FdRead) => Err(
+                WasmError::Unsupported("wasip1 fd_read disabled by feature profile"),
+            ),
+            PendingWasip1Call::FdFdstatGet(_)
+                if !self.handlers.supports(Wasip1Syscall::FdFdstatGet) =>
+            {
+                Err(WasmError::Unsupported(
+                    "wasip1 fd_fdstat_get disabled by feature profile",
+                ))
+            }
+            PendingWasip1Call::FdClose(_) if !self.handlers.supports(Wasip1Syscall::FdClose) => {
+                Err(WasmError::Unsupported(
+                    "wasip1 fd_close disabled by feature profile",
+                ))
+            }
+            PendingWasip1Call::FdReaddir(_)
+                if !self.handlers.supports(Wasip1Syscall::FdReaddir) =>
+            {
+                Err(WasmError::Unsupported(
+                    "wasip1 fd_readdir disabled by feature profile",
+                ))
+            }
+            PendingWasip1Call::ClockResGet(_)
+                if !self.handlers.supports(Wasip1Syscall::ClockResGet) =>
+            {
+                Err(WasmError::Unsupported(
+                    "wasip1 clock_res_get disabled by feature profile",
+                ))
+            }
+            PendingWasip1Call::ClockTimeGet(_)
+                if !self.handlers.supports(Wasip1Syscall::ClockTimeGet) =>
+            {
+                Err(WasmError::Unsupported(
+                    "wasip1 clock_time_get disabled by feature profile",
+                ))
+            }
+            PendingWasip1Call::PollOneoff(_)
+                if !self.handlers.supports(Wasip1Syscall::PollOneoff) =>
+            {
+                Err(WasmError::Unsupported(
+                    "wasip1 poll_oneoff disabled by feature profile",
+                ))
+            }
+            PendingWasip1Call::RandomGet(_)
+                if !self.handlers.supports(Wasip1Syscall::RandomGet) =>
+            {
+                Err(WasmError::Unsupported(
+                    "wasip1 random_get disabled by feature profile",
+                ))
+            }
+            PendingWasip1Call::PathOpen(_) if !self.handlers.supports(Wasip1Syscall::PathOpen) => {
+                Err(WasmError::Unsupported(
+                    "wasip1 path_open disabled by feature profile",
+                ))
+            }
+            PendingWasip1Call::ArgsSizesGet(_)
+            | PendingWasip1Call::ArgsGet(_)
+            | PendingWasip1Call::EnvironSizesGet(_)
+            | PendingWasip1Call::EnvironGet(_)
+                if !self.handlers.supports(Wasip1Syscall::ArgsEnv) =>
+            {
+                Err(WasmError::Unsupported(
+                    "wasip1 args/env disabled by feature profile",
+                ))
+            }
+            PendingWasip1Call::ProcExit(_) if !self.handlers.supports(Wasip1Syscall::ProcExit) => {
+                Err(WasmError::Unsupported(
+                    "wasip1 proc_exit disabled by feature profile",
+                ))
+            }
+            PendingWasip1Call::ProcExit(code) => {
+                self.core.finish_host_import(&[])?;
+                self.done = true;
+                Ok(VmEvent::ProcExit(code))
+            }
+            _ => Ok(call.into_event()),
         }
-    }
-
-    fn translate_fd_write(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::FdWrite) {
-            return Err(WasmError::Unsupported(
-                "wasip1 fd_write disabled by feature profile",
-            ));
-        }
-        if call.arg_count != 4 || call.result_count != 1 {
-            return Err(WasmError::Invalid("fd_write import signature mismatch"));
-        }
-        let args = call.args();
-        let fd = args[0].as_i32()?;
-        if fd > u8::MAX as u32 {
-            return Err(WasmError::Invalid("fd does not fit u8"));
-        }
-        Ok(VmEvent::FdWrite(FdWriteCall {
-            fd: fd as u8,
-            iovs: args[1].as_i32()?,
-            iovs_len: args[2].as_i32()?,
-            nwritten: args[3].as_i32()?,
-        }))
-    }
-
-    fn translate_fd_read(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::FdRead) {
-            return Err(WasmError::Unsupported(
-                "wasip1 fd_read disabled by feature profile",
-            ));
-        }
-        if call.arg_count != 4 || call.result_count != 1 {
-            return Err(WasmError::Invalid("fd_read import signature mismatch"));
-        }
-        let args = call.args();
-        let fd = args[0].as_i32()?;
-        if fd > u8::MAX as u32 {
-            return Err(WasmError::Invalid("fd does not fit u8"));
-        }
-        Ok(VmEvent::FdRead(FdReadCall {
-            fd: fd as u8,
-            iovs: args[1].as_i32()?,
-            iovs_len: args[2].as_i32()?,
-            nread: args[3].as_i32()?,
-        }))
-    }
-
-    fn translate_fd_fdstat_get(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::FdFdstatGet) {
-            return Err(WasmError::Unsupported(
-                "wasip1 fd_fdstat_get disabled by feature profile",
-            ));
-        }
-        if call.arg_count != 2 || call.result_count != 1 {
-            return Err(WasmError::Invalid(
-                "fd_fdstat_get import signature mismatch",
-            ));
-        }
-        let args = call.args();
-        let fd = args[0].as_i32()?;
-        if fd > u8::MAX as u32 {
-            return Err(WasmError::Invalid("fd does not fit u8"));
-        }
-        Ok(VmEvent::FdFdstatGet(FdRequestCall {
-            fd: fd as u8,
-            out_ptr: args[1].as_i32()?,
-        }))
-    }
-
-    fn translate_fd_close(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::FdClose) {
-            return Err(WasmError::Unsupported(
-                "wasip1 fd_close disabled by feature profile",
-            ));
-        }
-        if call.arg_count != 1 || call.result_count != 1 {
-            return Err(WasmError::Invalid("fd_close import signature mismatch"));
-        }
-        let fd = call.args()[0].as_i32()?;
-        if fd > u8::MAX as u32 {
-            return Err(WasmError::Invalid("fd does not fit u8"));
-        }
-        Ok(VmEvent::FdClose(FdRequestCall {
-            fd: fd as u8,
-            out_ptr: 0,
-        }))
-    }
-
-    fn translate_clock_time_get(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::ClockTimeGet) {
-            return Err(WasmError::Unsupported(
-                "wasip1 clock_time_get disabled by feature profile",
-            ));
-        }
-        if call.arg_count != 3 || call.result_count != 1 {
-            return Err(WasmError::Invalid(
-                "clock_time_get import signature mismatch",
-            ));
-        }
-        let args = call.args();
-        Ok(VmEvent::ClockTimeGet(ClockTimeGetCall {
-            clock_id: args[0].as_i32()?,
-            precision: args[1].as_i64()?,
-            time_ptr: args[2].as_i32()?,
-        }))
-    }
-
-    fn translate_clock_res_get(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::ClockResGet) {
-            return Err(WasmError::Unsupported(
-                "wasip1 clock_res_get disabled by feature profile",
-            ));
-        }
-        if call.arg_count != 2 || call.result_count != 1 {
-            return Err(WasmError::Invalid(
-                "clock_res_get import signature mismatch",
-            ));
-        }
-        let args = call.args();
-        Ok(VmEvent::ClockResGet(ClockResGetCall {
-            clock_id: args[0].as_i32()?,
-            resolution_ptr: args[1].as_i32()?,
-        }))
-    }
-
-    fn translate_poll_oneoff(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::PollOneoff) {
-            return Err(WasmError::Unsupported(
-                "wasip1 poll_oneoff disabled by feature profile",
-            ));
-        }
-        if call.arg_count != 4 || call.result_count != 1 {
-            return Err(WasmError::Invalid("poll_oneoff import signature mismatch"));
-        }
-        let args = call.args();
-        Ok(VmEvent::PollOneoff(PollOneoffCall {
-            in_ptr: args[0].as_i32()?,
-            out_ptr: args[1].as_i32()?,
-            nsubscriptions: args[2].as_i32()?,
-            nevents: args[3].as_i32()?,
-        }))
-    }
-
-    fn translate_random_get(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::RandomGet) {
-            return Err(WasmError::Unsupported(
-                "wasip1 random_get disabled by feature profile",
-            ));
-        }
-        if call.arg_count != 2 || call.result_count != 1 {
-            return Err(WasmError::Invalid("random_get import signature mismatch"));
-        }
-        let args = call.args();
-        Ok(VmEvent::RandomGet(RandomGetCall {
-            buf: args[0].as_i32()?,
-            buf_len: args[1].as_i32()?,
-        }))
-    }
-
-    fn translate_fd_readdir(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::FdReaddir) {
-            return Err(WasmError::Unsupported(
-                "wasip1 fd_readdir disabled by feature profile",
-            ));
-        }
-        if call.arg_count != 5 || call.result_count != 1 {
-            return Err(WasmError::Invalid("fd_readdir import signature mismatch"));
-        }
-        let fd = call.args()[0].as_i32()?;
-        if fd > u8::MAX as u32 {
-            return Err(WasmError::Invalid("fd does not fit u8"));
-        }
-        Ok(VmEvent::FdReaddir(PathCall {
-            kind: PathOp::FdReaddir,
-            args: call.args,
-            arg_count: call.arg_count,
-        }))
-    }
-
-    fn translate_path_open(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::PathOpen) {
-            return Err(WasmError::Unsupported(
-                "wasip1 path_open disabled by feature profile",
-            ));
-        }
-        if call.arg_count != 9 || call.result_count != 1 {
-            return Err(WasmError::Invalid("path_open import signature mismatch"));
-        }
-        let fd = call.args()[0].as_i32()?;
-        if fd > u8::MAX as u32 {
-            return Err(WasmError::Invalid("fd does not fit u8"));
-        }
-        Ok(VmEvent::PathOpen(PathCall {
-            kind: PathOp::PathOpen,
-            args: call.args,
-            arg_count: call.arg_count,
-        }))
-    }
-
-    fn translate_args_sizes_get(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::ArgsEnv) {
-            return Err(WasmError::Unsupported(
-                "wasip1 args/env disabled by feature profile",
-            ));
-        }
-        if call.arg_count != 2 || call.result_count != 1 {
-            return Err(WasmError::Invalid(
-                "args_sizes_get import signature mismatch",
-            ));
-        }
-        let args = call.args();
-        Ok(VmEvent::ArgsSizesGet(ArgsSizesGetCall {
-            argc_ptr: args[0].as_i32()?,
-            argv_buf_size_ptr: args[1].as_i32()?,
-        }))
-    }
-
-    fn translate_args_get(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::ArgsEnv) {
-            return Err(WasmError::Unsupported(
-                "wasip1 args/env disabled by feature profile",
-            ));
-        }
-        if call.arg_count != 2 || call.result_count != 1 {
-            return Err(WasmError::Invalid("args_get import signature mismatch"));
-        }
-        let args = call.args();
-        Ok(VmEvent::ArgsGet(ArgsGetCall {
-            argv: args[0].as_i32()?,
-            argv_buf: args[1].as_i32()?,
-        }))
-    }
-
-    fn translate_environ_sizes_get(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::ArgsEnv) {
-            return Err(WasmError::Unsupported(
-                "wasip1 args/env disabled by feature profile",
-            ));
-        }
-        if call.arg_count != 2 || call.result_count != 1 {
-            return Err(WasmError::Invalid(
-                "environ_sizes_get import signature mismatch",
-            ));
-        }
-        let args = call.args();
-        Ok(VmEvent::EnvironSizesGet(EnvironSizesGetCall {
-            environ_count_ptr: args[0].as_i32()?,
-            environ_buf_size_ptr: args[1].as_i32()?,
-        }))
-    }
-
-    fn translate_environ_get(&self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::ArgsEnv) {
-            return Err(WasmError::Unsupported(
-                "wasip1 args/env disabled by feature profile",
-            ));
-        }
-        if call.arg_count != 2 || call.result_count != 1 {
-            return Err(WasmError::Invalid("environ_get import signature mismatch"));
-        }
-        let args = call.args();
-        Ok(VmEvent::EnvironGet(EnvironGetCall {
-            environ: args[0].as_i32()?,
-            environ_buf: args[1].as_i32()?,
-        }))
-    }
-
-    fn translate_proc_exit(&mut self, call: HostCall<'a>) -> Result<VmEvent, WasmError> {
-        if !self.handlers.supports(Wasip1Syscall::ProcExit) {
-            return Err(WasmError::Unsupported(
-                "wasip1 proc_exit disabled by feature profile",
-            ));
-        }
-        if call.arg_count != 1 || call.result_count != 0 {
-            return Err(WasmError::Invalid("proc_exit import signature mismatch"));
-        }
-        let code = call.args()[0].as_i32()?;
-        self.core.finish_host_import(&[])?;
-        self.done = true;
-        Ok(VmEvent::ProcExit(code))
     }
 
     fn read_core_u64(&self, addr: u32) -> Result<u64, WasmError> {
@@ -4564,13 +4680,11 @@ impl<'a> Vm<'a> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(feature = "wasip1-sys-path-open", feature = "wasm-engine-core"))]
-    use super::PathOp;
     use super::{
         EXTERNAL_KIND_FUNC, ExecutionEvent, Interpreter, OPCODE_CALL, OPCODE_DROP, OPCODE_END,
         OPCODE_I32_CONST, OPCODE_I64_CONST, SECTION_CODE, SECTION_EXPORT, SECTION_FUNCTION,
         SECTION_IMPORT, SECTION_MEMORY, SECTION_TYPE, TEST_RESUME_FUEL, VALTYPE_I32, VALTYPE_I64,
-        Value, Vm, VmEvent, WASIP1_FILETYPE_REGULAR_FILE, WasmError,
+        Vm, VmEvent, WASIP1_FILETYPE_REGULAR_FILE, WasmError,
     };
     #[cfg(feature = "wasm-engine-core")]
     use super::{FdStat, WASIP1_FDSTAT_RIGHTS_BASE_OFFSET};
@@ -5256,9 +5370,8 @@ mod tests {
                     else {
                         panic!("expected path_open trap");
                     };
-                    assert_eq!(path.kind(), PathOp::PathOpen);
-                    assert_eq!(path.args().len(), 9);
-                    assert_eq!(path.args()[5], Value::I64(1));
+                    assert_eq!(path.fd(), 3);
+                    assert_eq!(path.rights_base(), 1);
                     guest
                         .finish_path_open(path, 0, 52)
                         .expect("complete path_open as ENOSYS");
@@ -5432,7 +5545,7 @@ mod tests {
         let VmEvent::PathOpen(path) = guest.resume(test_budget()).expect("path_open trap") else {
             panic!("expected path_open trap");
         };
-        assert_eq!(path.kind(), PathOp::PathOpen);
+        assert_eq!(path.fd(), 3);
         assert_eq!(
             guest.path_bytes(path).expect("read path bytes").as_bytes(),
             b"app/config"
@@ -5469,7 +5582,9 @@ mod tests {
         let VmEvent::FdReaddir(path) = guest.resume(test_budget()).expect("fd_readdir trap") else {
             panic!("expected fd_readdir trap");
         };
-        assert_eq!(path.kind(), PathOp::FdReaddir);
+        assert_eq!(path.fd(), 44);
+        assert_eq!(path.cookie(), 0);
+        assert_eq!(path.max_len(), 32);
         guest
             .finish_fd_readdir(path, b"config\nstate\n", 0)
             .expect("complete fd_readdir with manifest bytes");

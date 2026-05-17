@@ -69,6 +69,9 @@ A logical image is a requested projection slice:
 pub trait LogicalImage<C: appkit::Capsule> {
     type Artifact;
     type Exit<R>;
+    type Carrier<'a>: hibana::integration::Transport + 'a
+    where
+        Self: 'a;
 
     const IMAGE_ID: appkit::ImageId;
     const SITE_ID: appkit::SiteId;
@@ -77,6 +80,7 @@ pub trait LogicalImage<C: appkit::Capsule> {
 
     fn init() -> Self;
     fn safe_state(&mut self);
+    fn carrier<'a>() -> Self::Carrier<'a>;
 }
 ```
 
@@ -93,9 +97,36 @@ not reject a `WasiImage` because static imports exceed the requested role
 slice. An import becomes meaningful only when the guest actually calls it; that
 runtime request must cross the projected Endpoint/carrier frontier, or the
 session faults closed.
+WASI guests are expected to be ordinary Rust `std` programs when that is the
+ergonomic choice. Guest authors do not call Hibana-specific exit helpers. If the
+WASI command returns normally, the VM may surface it as `Event::Done`; appkit
+maps that to `EngineReq::ProcExit(0)` only when the projected choreography has an
+explicit `proc_exit` terminal phase. If the guest actually calls `proc_exit`, the
+VM surfaces `Event::Exit(code)` and appkit uses the same projected terminal
+phase. A static `proc_exit` import is load evidence only, never proof that the
+guest dynamically called it.
+WASI guests do not emit Hibana loop-control messages. If a repeated WASI import
+stream is legal, appkit may bridge it with projected `LoopContinue` /
+`LoopBreak` control only when the endpoint frontier admits those controls. If
+the choreography is straight-line, appkit does not synthesize loop control; the
+next real import either progresses through the frontier or faults closed.
 If projection metadata exceeds the linked bounded appkit metadata capacity,
 `appkit::run` rejects the image. It must never silently truncate labels, loop
 controls, policies, or completion metadata and then guess the missing capacity.
+When appkit attaches a logical image to Hibana, it passes only storage and clock
+into `hibana::integration::runtime::Config`. Lane domain and endpoint-slot
+capacity are derived by Hibana from its typed domain and projected resident
+descriptors. Operational deadline fuses belong to the logical image's concrete
+carrier/site runtime, not to appkit config or endpoint methods. `hibana-pico`
+must not reintroduce caller-chosen lane windows, endpoint-slot knobs, or
+deadline knobs. Hibana attach must read pre-existing ROM/static resident
+descriptors; appkit must not run a hidden pre-attach lowering phase or provide
+lowering scratch. Runtime lane storage starts empty and grows from attached
+descriptors while preserving existing session state, so logical image attach
+order is not a capacity contract. Resident descriptors are Hibana-owned views
+backed by monomorphized descriptor query code and immutable projection metadata,
+not generated blobs, lazy caches, atomics, locks, heap allocation, or
+maximum-size static arrays.
 
 A physical Cargo artifact may contain one or more logical images. This is needed
 for targets such as RP2040 dual-core firmware, where one ELF/flash image can
@@ -176,6 +207,9 @@ Dynamic branch selection belongs to Hibana resolver policy at an explicit
 before the controller's route decision or materializing payload has been
 observed. That is not progress, and it must not repair missing route state.
 `offer()` waits for projected route evidence before producing a continuation.
+Offer progress has only evidence-driven outcomes: evidence arrived, still
+pending, or terminal fault. There are no defer budgets, no force-poll rescue,
+and no liveness heuristic that can mint progress without projected evidence.
 
 Committed Hibana wait semantics are `Progress | Fault`. Rust public APIs expose
 committed progress as `Ok(progress) | Err(domain evidence)` through
@@ -256,6 +290,10 @@ cargo test -p hibana-pico --features wasm-engine-core,wasip1-sys-fd-write --lib 
 bash ./scripts/check_wasip1_guest_builds.sh
 bash ./scripts/check_plan_pico_gates.sh
 ```
+
+This workspace depends on the crates.io `hibana` release directly. During
+Hibana core development, use a temporary local patch only for pre-release
+validation and remove it before committing hibana-pico.
 
 For Baker Link hardware, the runner flashes each physical firmware artifact and
 checks RAM markers:

@@ -4,6 +4,8 @@
 //! site images. It does not define a choreography DSL, expose kernel internals,
 //! or complete WASI P1 imports outside projected endpoint/carrier progress.
 
+#[cfg(any(test, not(target_os = "none")))]
+use core::task::{RawWaker, RawWakerVTable};
 use core::{
     convert::Infallible,
     fmt::Debug,
@@ -11,8 +13,11 @@ use core::{
     mem::{MaybeUninit, align_of, size_of},
     pin::Pin,
     slice,
-    task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
+    task::{Context, Poll, Waker},
 };
+
+#[cfg(feature = "wasm-engine-core")]
+use core::mem::ManuallyDrop;
 
 #[cfg(any(test, not(target_os = "none")))]
 use core::future::Future;
@@ -68,6 +73,7 @@ const APPKIT_WASI_GUEST_ARENA_ALIGN: usize = 16;
 const APPKIT_WASI_GUEST_BYTES: usize = size_of::<crate::kernel::engine::wasm::Guest<'static>>();
 #[cfg(feature = "wasm-engine-core")]
 const APPKIT_DEFAULT_WASI_FUEL_PER_ACTIVATION: u32 = 1_000_000;
+
 // A logical image owns one carrier rendezvous. Larger rendezvous sets are a
 // different site/artifact composition, not implicit appkit capacity.
 const APPKIT_SESSION_RV_SLOTS: usize = 1;
@@ -117,7 +123,7 @@ impl<T, E> core::future::Future for PendingRole<T, E> {
 #[derive(Clone, Copy)]
 enum RoleTaskError<E> {
     Local(E),
-    #[cfg(feature = "wasm-engine-core")]
+    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
     Wasi(WasiGuestError),
 }
 
@@ -128,7 +134,7 @@ where
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Local(error) => formatter.debug_tuple("Local").field(error).finish(),
-            #[cfg(feature = "wasm-engine-core")]
+            #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
             Self::Wasi(error) => formatter.debug_tuple("Wasi").field(error).finish(),
         }
     }
@@ -165,13 +171,13 @@ where
     }
 }
 
-#[cfg(feature = "wasm-engine-core")]
+#[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
 struct WasiRoleTask<F, E> {
     future: F,
     marker: PhantomData<fn() -> E>,
 }
 
-#[cfg(feature = "wasm-engine-core")]
+#[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
 impl<F, E> WasiRoleTask<F, E> {
     const fn new(future: F) -> Self {
         Self {
@@ -181,7 +187,7 @@ impl<F, E> WasiRoleTask<F, E> {
     }
 }
 
-#[cfg(feature = "wasm-engine-core")]
+#[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
 impl<F, E> Future for WasiRoleTask<F, E>
 where
     F: core::future::Future<Output = RoleResult<WasiGuestError>>,
@@ -206,7 +212,7 @@ where
     LocalRoleTask::new(future)
 }
 
-#[cfg(feature = "wasm-engine-core")]
+#[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
 fn wasi_role_task<F, E>(future: F) -> WasiRoleTask<F, E>
 where
     F: core::future::Future<Output = RoleResult<WasiGuestError>>,
@@ -232,65 +238,11 @@ impl<const N: usize> EmbeddedFutureArena<N> {
 }
 
 #[cfg(all(not(test), target_os = "none"))]
-struct EmbeddedWakerSlot {
-    initialized: UnsafeCell<bool>,
-    waker: UnsafeCell<MaybeUninit<Waker>>,
-}
-
-#[cfg(all(not(test), target_os = "none"))]
-unsafe impl Sync for EmbeddedWakerSlot {}
-
-#[cfg(all(not(test), target_os = "none"))]
-impl EmbeddedWakerSlot {
-    const EMPTY: Self = Self {
-        initialized: UnsafeCell::new(false),
-        waker: UnsafeCell::new(MaybeUninit::uninit()),
-    };
-
-    fn get(&'static self) -> &'static Waker {
-        unsafe {
-            if !*self.initialized.get() {
-                (*self.waker.get()).write(Waker::from_raw(RawWaker::new(
-                    core::ptr::null(),
-                    &NOOP_WAKER_VTABLE,
-                )));
-                *self.initialized.get() = true;
-            }
-            &*(*self.waker.get()).as_ptr()
-        }
-    }
-}
-
-#[cfg(all(not(test), target_os = "none"))]
-struct EmbeddedTaskContextSlot {
-    context: UnsafeCell<MaybeUninit<Context<'static>>>,
-}
-
-#[cfg(all(not(test), target_os = "none"))]
-unsafe impl Sync for EmbeddedTaskContextSlot {}
-
-#[cfg(all(not(test), target_os = "none"))]
-impl EmbeddedTaskContextSlot {
-    const EMPTY: Self = Self {
-        context: UnsafeCell::new(MaybeUninit::uninit()),
-    };
-
-    fn get(&'static self, waker: &'static Waker) -> &'static mut Context<'static> {
-        unsafe {
-            (*self.context.get()).write(Context::from_waker(waker));
-            &mut *(*self.context.get()).as_mut_ptr()
-        }
-    }
-}
-
-#[cfg(all(not(test), target_os = "none"))]
 #[repr(C, align(16))]
 pub struct EmbeddedAttachStorage<const SLAB_BYTES: usize> {
     tap: UnsafeCell<[hibana::integration::tap::TapEvent; APPKIT_ATTACH_TAP_EVENTS]>,
     slab: UnsafeCell<[u8; SLAB_BYTES]>,
     future: EmbeddedFutureArena<APPKIT_EMBEDDED_ROLE_FUTURE_BYTES>,
-    waker: EmbeddedWakerSlot,
-    context: EmbeddedTaskContextSlot,
 }
 
 #[cfg(all(not(test), target_os = "none"))]
@@ -300,8 +252,7 @@ pub struct EmbeddedAttachStorageRef<'a> {
     slab: *mut [u8],
     future: *mut u8,
     future_bytes: usize,
-    waker: &'a EmbeddedWakerSlot,
-    context: &'a EmbeddedTaskContextSlot,
+    marker: PhantomData<&'a mut ()>,
 }
 
 #[cfg(all(not(test), target_os = "none"))]
@@ -313,8 +264,6 @@ impl<const SLAB_BYTES: usize> EmbeddedAttachStorage<SLAB_BYTES> {
             ),
             slab: UnsafeCell::new([0; SLAB_BYTES]),
             future: EmbeddedFutureArena::EMPTY,
-            waker: EmbeddedWakerSlot::EMPTY,
-            context: EmbeddedTaskContextSlot::EMPTY,
         }
     }
 
@@ -328,8 +277,7 @@ impl<const SLAB_BYTES: usize> EmbeddedAttachStorage<SLAB_BYTES> {
             slab,
             future: self.future.as_mut_ptr(),
             future_bytes: APPKIT_EMBEDDED_ROLE_FUTURE_BYTES,
-            waker: &self.waker,
-            context: &self.context,
+            marker: PhantomData,
         }
     }
 }
@@ -459,17 +407,6 @@ impl Drop for WasiGuestLease<'_> {
 
 #[cfg(all(not(test), target_os = "none"))]
 #[inline(always)]
-fn embedded_wake() {
-    #[cfg(target_arch = "arm")]
-    unsafe {
-        core::arch::asm!("sev", options(nomem, nostack, preserves_flags));
-    }
-    #[cfg(not(target_arch = "arm"))]
-    core::hint::spin_loop();
-}
-
-#[cfg(all(not(test), target_os = "none"))]
-#[inline(always)]
 fn embedded_wait_for_event() {
     #[cfg(target_arch = "arm")]
     unsafe {
@@ -480,65 +417,65 @@ fn embedded_wait_for_event() {
 }
 
 #[cfg(all(not(test), target_os = "none"))]
-unsafe fn noop_waker_clone(data: *const ()) -> RawWaker {
-    assert!(
-        data.is_null(),
-        "appkit noop waker clone data must be null: {:#010x}",
-        data as usize
-    );
-    RawWaker::new(core::ptr::null(), &NOOP_WAKER_VTABLE)
-}
-
-#[cfg(all(not(test), target_os = "none"))]
-unsafe fn noop_waker_wake(data: *const ()) {
-    assert!(
-        data.is_null(),
-        "appkit noop waker wake data must be null: {:#010x}",
-        data as usize
-    );
-    embedded_wake();
-}
-
-#[cfg(all(not(test), target_os = "none"))]
-unsafe fn noop_waker_wake_by_ref(data: *const ()) {
-    assert!(
-        data.is_null(),
-        "appkit noop waker wake_by_ref data must be null: {:#010x}",
-        data as usize
-    );
-    embedded_wake();
-}
-
-#[cfg(all(not(test), target_os = "none"))]
-unsafe fn noop_waker_drop(data: *const ()) {
-    assert!(
-        data.is_null(),
-        "appkit noop waker drop data must be null: {:#010x}",
-        data as usize
-    );
-}
-
-#[cfg(all(not(test), target_os = "none"))]
-static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
-    noop_waker_clone,
-    noop_waker_wake,
-    noop_waker_wake_by_ref,
-    noop_waker_drop,
-);
-
-#[cfg(all(not(test), target_os = "none"))]
 #[inline(always)]
-fn embedded_task_waker(storage: EmbeddedAttachStorageRef<'static>) -> &'static Waker {
-    storage.waker.get()
+fn embedded_task_waker() -> &'static Waker {
+    Waker::noop()
 }
 
-#[cfg(all(not(test), target_os = "none"))]
-#[inline(always)]
-fn embedded_task_context(
-    storage: EmbeddedAttachStorageRef<'static>,
-) -> &'static mut Context<'static> {
-    let waker = embedded_task_waker(storage);
-    storage.context.get(waker)
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+fn poll_embedded_endpoint_unit<F>(mut future: F) -> Result<(), hibana::EndpointError>
+where
+    F: core::future::Future<Output = Result<(), hibana::EndpointError>>,
+{
+    let task_waker = embedded_task_waker();
+    let mut pinned = unsafe {
+        // SAFETY: The future is stored in this stack frame and is never moved
+        // while the pinned handle is used.
+        Pin::new_unchecked(&mut future)
+    };
+    loop {
+        let mut task_context = Context::from_waker(task_waker);
+        match pinned.as_mut().poll(&mut task_context) {
+            Poll::Ready(result) => return result,
+            Poll::Pending => embedded_wait_for_event(),
+        }
+    }
+}
+
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+fn poll_embedded_endpoint_value<T, F>(
+    mut future: F,
+    output: &mut MaybeUninit<T>,
+) -> Result<(), hibana::EndpointError>
+where
+    F: core::future::Future<Output = Result<T, hibana::EndpointError>>,
+{
+    let task_waker = embedded_task_waker();
+    let mut pinned = unsafe {
+        // SAFETY: The future is stored in this stack frame and is never moved
+        // while the pinned handle is used.
+        Pin::new_unchecked(&mut future)
+    };
+    loop {
+        let mut task_context = Context::from_waker(task_waker);
+        match pinned.as_mut().poll(&mut task_context) {
+            Poll::Ready(Ok(value)) => {
+                output.write(value);
+                return Ok(());
+            }
+            Poll::Ready(Err(error)) => return Err(error),
+            Poll::Pending => embedded_wait_for_event(),
+        }
+    }
+}
+
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+fn embedded_pending_forever<T>(context: T) -> ! {
+    let context = context;
+    loop {
+        core::hint::black_box(&context);
+        embedded_wait_for_event();
+    }
 }
 
 #[cfg(all(not(test), target_os = "none"))]
@@ -585,11 +522,11 @@ where
     unsafe {
         let future_ptr = future_arena.cast::<F>();
         future_ptr.write(future);
-        let poll = poll_embedded_stored_task::<F, E>;
         loop {
             let task_poll = {
-                let task_context = embedded_task_context(storage);
-                poll(future_arena, task_context)
+                let task_waker = embedded_task_waker();
+                let mut task_context = Context::from_waker(task_waker);
+                poll_embedded_stored_task::<F, E>(future_arena, &mut task_context)
             };
             match task_poll {
                 Poll::Pending => embedded_wait_for_event(),
@@ -882,18 +819,6 @@ impl LaneSet {
             ],
         }
     }
-
-    fn configured_range_end(self) -> u16 {
-        let mut lane = 0u16;
-        let mut end = 1u16;
-        while lane < 256 {
-            if self.contains(lane as u8) {
-                end = lane + 1;
-            }
-            lane += 1;
-        }
-        end
-    }
 }
 
 /// Borrowed WASI artifact supplied to a capsule run.
@@ -1030,23 +955,20 @@ pub trait LogicalImage<C: Capsule>: Sized {
     type Exit<R>: FromRunReport<R, Self>;
     type Carrier<'a>: hibana::integration::Transport + 'a
     where
-        Self: 'a;
+        Self: 'a,
+        C: 'a;
 
     const IMAGE_ID: ImageId;
     const SITE_ID: SiteId;
     const REQUESTED_ROLES: RoleSet;
     const CARRIER: CarrierKind;
     const PEER_IMAGES: PeerImageSet = PeerImageSet::EMPTY;
-    /// Runtime-owned wait fuse for this logical image.
-    ///
-    /// `0` keeps the fuse disabled. This is an image/attach fact, not
-    /// a public timeout or protocol-branch API: endpoint methods still expose only
-    /// `flow`/`send`/`recv`/`offer`/`decode`.
-    const OPERATIONAL_DEADLINE_TICKS: u32 = 0;
 
     fn init() -> Self;
     fn safe_state(&mut self);
-    fn carrier<'a>() -> Self::Carrier<'a>;
+    fn carrier<'a>() -> Self::Carrier<'a>
+    where
+        C: 'a;
     #[cfg(all(not(test), target_os = "none"))]
     fn attach_storage() -> EmbeddedAttachStorageRef<'static>;
     fn driver_facts() -> DriverFacts<'static> {
@@ -1383,6 +1305,11 @@ impl EndpointCarrierFacts {
             self.wasi_loop_break_head_count,
             label,
         )
+    }
+
+    #[cfg(feature = "wasm-engine-core")]
+    const fn expects_wasi_proc_exit_terminal_event(self) -> bool {
+        self.wasi_imports.contains(WasiImports::PROC_EXIT)
     }
 }
 
@@ -2272,16 +2199,16 @@ where
                                 drive_canonical_wasi_engine::<C, ImageTy, ROLE>(ctx),
                             ));
                         #[cfg(all(not(test), target_os = "none"))]
-                        poll_embedded_role_future::<
-                            _,
-                            RoleTaskError<<C::Local as Localside<C>>::Error>,
-                        >(
-                            ImageTy::REQUESTED_ROLES,
-                            self.embedded_storage,
-                            wasi_role_task::<_, <C::Local as Localside<C>>::Error>(
-                                drive_canonical_wasi_engine::<C, ImageTy, ROLE>(ctx),
-                            ),
-                        );
+                        {
+                            assert!(
+                                ImageTy::REQUESTED_ROLES.count() == 1,
+                                "bare-metal WASI logical images attach exactly one role; split peer roles into separate logical images"
+                            );
+                            run_canonical_wasi_engine_forever::<C, ImageTy, ROLE>(
+                                self.embedded_storage,
+                                ctx,
+                            );
+                        }
                     } else {
                         #[cfg(any(test, not(target_os = "none")))]
                         self.tasks.push(local_role_task(
@@ -2424,19 +2351,10 @@ where
         hibana::integration::runtime::CounterClock,
         APPKIT_SESSION_RV_SLOTS,
     >::init_in_place(kit_storage, &clock);
-    let lane_range_end = endpoint_carrier.lanes().configured_range_end();
-    let endpoint_slots: usize = I::REQUESTED_ROLES.count().into();
-    let config = hibana::integration::runtime::Config::new(
+    let config = hibana::integration::runtime::Config::from_resources(
         attach_tap,
         rendezvous_slab,
-        0..lane_range_end,
-        endpoint_slots,
         hibana::integration::runtime::CounterClock::new(),
-        if I::OPERATIONAL_DEADLINE_TICKS == 0 {
-            None
-        } else {
-            Some(I::OPERATIONAL_DEADLINE_TICKS)
-        },
     );
     let rendezvous = kit
         .add_rendezvous_from_config(config, carrier)
@@ -3140,7 +3058,7 @@ impl<'a> DriverFacts<'a> {
 
 #[cfg(feature = "wasm-engine-core")]
 struct WasiGuestSlot<'guest> {
-    storage: Option<WasiGuestLease<'guest>>,
+    storage: ManuallyDrop<WasiGuestLease<'guest>>,
     initialized: bool,
 }
 
@@ -3155,36 +3073,26 @@ impl<'guest> WasiGuestSlot<'guest> {
             crate::kernel::engine::wasm::Guest::init_in_place(ptr, module)?;
         }
         Ok(Self {
-            storage: Some(storage),
+            storage: ManuallyDrop::new(storage),
             initialized: true,
         })
     }
 
     fn guest(&mut self) -> &mut crate::kernel::engine::wasm::Guest<'guest> {
         debug_assert!(self.initialized);
-        let ptr = self
-            .storage
-            .as_mut()
-            .expect("initialized WASI guest slot must retain storage")
-            .guest_ptr();
+        let ptr = self.storage.guest_ptr();
         unsafe { &mut *ptr }
     }
 
     fn finish(mut self) -> WasiGuestLease<'guest> {
         if self.initialized {
             unsafe {
-                let ptr = self
-                    .storage
-                    .as_mut()
-                    .expect("initialized WASI guest slot must retain storage")
-                    .guest_ptr();
+                let ptr = self.storage.guest_ptr();
                 core::ptr::drop_in_place(ptr);
             }
             self.initialized = false;
         }
-        self.storage
-            .take()
-            .expect("finished WASI guest slot must return storage")
+        unsafe { ManuallyDrop::take(&mut self.storage) }
     }
 }
 
@@ -3193,12 +3101,9 @@ impl Drop for WasiGuestSlot<'_> {
     fn drop(&mut self) {
         if self.initialized {
             unsafe {
-                let ptr = self
-                    .storage
-                    .as_mut()
-                    .expect("initialized WASI guest slot must retain storage")
-                    .guest_ptr();
+                let ptr = self.storage.guest_ptr();
                 core::ptr::drop_in_place(ptr);
+                ManuallyDrop::drop(&mut self.storage);
             }
         }
     }
@@ -3253,7 +3158,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         self.endpoint.endpoint()
     }
 
-    #[cfg(feature = "wasm-engine-core")]
+    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
     async fn endpoint_send<const LABEL: u8>(
         &mut self,
         request: EngineReq,
@@ -3270,13 +3175,29 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         }
     }
 
-    #[cfg(feature = "wasm-engine-core")]
+    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+    #[inline(never)]
+    fn endpoint_send_blocking<const LABEL: u8>(
+        &mut self,
+        request: EngineReq,
+    ) -> Result<(), WasiGuestError> {
+        let flow = match self.endpoint().flow::<hibana::g::Msg<LABEL, EngineReq>>() {
+            Ok(flow) => flow,
+            Err(error) => {
+                return Err(WasiGuestError::endpoint(0x5745_1000 | LABEL as u32, error));
+            }
+        };
+        match poll_embedded_endpoint_unit(flow.send(&request)) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(WasiGuestError::endpoint(0x5745_2000 | LABEL as u32, error)),
+        }
+    }
+
+    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
     async fn endpoint_call<const REQUEST_LABEL: u8, const REPLY_LABEL: u8>(
         &mut self,
         request: EngineReq,
     ) -> Result<EngineRet, WasiGuestError> {
-        self.admit_wasi_import_loop_continue_for_label(REQUEST_LABEL)
-            .await?;
         self.endpoint_send::<REQUEST_LABEL>(request).await?;
         match self
             .endpoint()
@@ -3291,7 +3212,28 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         }
     }
 
-    #[cfg(feature = "wasm-engine-core")]
+    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+    #[inline(never)]
+    fn endpoint_call_blocking<const REQUEST_LABEL: u8, const REPLY_LABEL: u8>(
+        &mut self,
+        request: EngineReq,
+    ) -> Result<EngineRet, WasiGuestError> {
+        self.endpoint_send_blocking::<REQUEST_LABEL>(request)?;
+        let mut reply = MaybeUninit::<EngineRet>::uninit();
+        match poll_embedded_endpoint_value(
+            self.endpoint()
+                .recv::<hibana::g::Msg<REPLY_LABEL, EngineRet>>(),
+            &mut reply,
+        ) {
+            Ok(()) => unsafe { Ok(reply.assume_init()) },
+            Err(error) => Err(WasiGuestError::endpoint(
+                0x5745_3000 | REPLY_LABEL as u32,
+                error,
+            )),
+        }
+    }
+
+    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
     async fn admit_wasi_import_loop_continue_for_label(
         &mut self,
         label: u8,
@@ -3312,7 +3254,29 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         }
     }
 
-    #[cfg(feature = "wasm-engine-core")]
+    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+    #[inline(never)]
+    fn admit_wasi_import_loop_continue_for_label_blocking(
+        &mut self,
+        label: u8,
+    ) -> Result<(), WasiGuestError> {
+        if !self
+            .endpoint_carrier
+            .requires_wasi_loop_continue_for_label(label)
+        {
+            return Ok(());
+        }
+        let flow = match self.endpoint().flow::<WasiImportLoopContinue>() {
+            Ok(flow) => flow,
+            Err(error) => return Err(WasiGuestError::endpoint(0x5745_6000, error)),
+        };
+        match poll_embedded_endpoint_unit(flow.send(())) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(WasiGuestError::endpoint(0x5745_6100, error)),
+        }
+    }
+
+    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
     async fn admit_wasi_import_loop_break_for_label(
         &mut self,
         label: u8,
@@ -3333,6 +3297,46 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         }
     }
 
+    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+    #[inline(never)]
+    fn admit_wasi_import_loop_break_for_label_blocking(
+        &mut self,
+        label: u8,
+    ) -> Result<(), WasiGuestError> {
+        if !self
+            .endpoint_carrier
+            .requires_wasi_loop_break_for_label(label)
+        {
+            return Ok(());
+        }
+        let flow = match self.endpoint().flow::<WasiImportLoopBreak>() {
+            Ok(flow) => flow,
+            Err(error) => return Err(WasiGuestError::endpoint(0x5745_6200, error)),
+        };
+        match poll_embedded_endpoint_unit(flow.send(())) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(WasiGuestError::endpoint(0x5745_6300, error)),
+        }
+    }
+
+    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
+    async fn endpoint_proc_exit(&mut self, status: ProcExitStatus) -> Result<(), WasiGuestError> {
+        self.admit_wasi_import_loop_break_for_label(LABEL_WASI_PROC_EXIT)
+            .await?;
+        self.endpoint_send::<LABEL_WASI_PROC_EXIT>(EngineReq::ProcExit(status))
+            .await
+    }
+
+    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+    #[inline(never)]
+    fn endpoint_proc_exit_blocking(
+        &mut self,
+        status: ProcExitStatus,
+    ) -> Result<(), WasiGuestError> {
+        self.admit_wasi_import_loop_break_for_label_blocking(LABEL_WASI_PROC_EXIT)?;
+        self.endpoint_send_blocking::<LABEL_WASI_PROC_EXIT>(EngineReq::ProcExit(status))
+    }
+
     #[cfg(feature = "wasm-engine-core")]
     fn protocol_fdstat_to_vm(
         stat: crate::choreography::protocol::FdStat,
@@ -3349,7 +3353,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
     /// Each emitted WASI P1 import is normalized into an `EngineReq`, sent through
     /// this role's typed endpoint, and completed only after the corresponding
     /// `EngineRet` is received through the endpoint/carrier path.
-    #[cfg(feature = "wasm-engine-core")]
+    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
     async fn drive_wasi_guest(
         &mut self,
         budget: BudgetRun,
@@ -3367,9 +3371,18 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
             }
         };
         let result = loop {
-            let guest = guest_slot.guest();
-            match guest.resume(budget) {
+            match guest_slot.guest().resume(budget) {
                 Ok(crate::kernel::engine::wasm::Event::Done) => {
+                    if self
+                        .endpoint_carrier
+                        .expects_wasi_proc_exit_terminal_event()
+                    {
+                        let status = ProcExitStatus::new(0);
+                        if let Err(error) = self.endpoint_proc_exit(status).await {
+                            break Err(error);
+                        }
+                        break Ok(WasiGuestStatus::Exit(status));
+                    }
                     break Ok(WasiGuestStatus::Done);
                 }
                 Ok(crate::kernel::engine::wasm::Event::BudgetExpired(expired)) => {
@@ -3379,27 +3392,18 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                     let Some(status) = exit.as_protocol_status() else {
                         break Err(WasiGuestError::UnexpectedReply);
                     };
-                    if let Err(error) = self
-                        .admit_wasi_import_loop_break_for_label(LABEL_WASI_PROC_EXIT)
-                        .await
-                    {
-                        break Err(error);
-                    }
-                    if let Err(error) = self
-                        .endpoint_send::<LABEL_WASI_PROC_EXIT>(EngineReq::ProcExit(status))
-                        .await
-                    {
+                    if let Err(error) = self.endpoint_proc_exit(status).await {
                         break Err(error);
                     }
                     break Ok(WasiGuestStatus::Exit(status));
                 }
                 Ok(crate::kernel::engine::wasm::Event::Call(call)) => {
-                    if let Err(error) = self.drive_wasi_call(call).await {
+                    if let Err(error) = self.drive_wasi_call(&mut guest_slot, call).await {
                         break Err(error);
                     }
                 }
                 Ok(crate::kernel::engine::wasm::Event::MemoryFence(pending)) => {
-                    if let Err(error) = self.drive_memory_fence(pending).await {
+                    if let Err(error) = self.drive_memory_fence(&mut guest_slot, pending).await {
                         break Err(error);
                     }
                 }
@@ -3418,31 +3422,113 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         result
     }
 
+    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+    #[inline(never)]
+    fn drive_wasi_guest_blocking(
+        &mut self,
+        budget: BudgetRun,
+    ) -> Result<WasiGuestStatus, WasiGuestError> {
+        let Some(bytes) = self.wasi_guest_bytes else {
+            return Err(WasiGuestError::NoWasiArtifact);
+        };
+        let mut guest_slot = match self.guest_slot.take() {
+            Some(slot) => slot,
+            None => {
+                let guest_storage = self.guest_storage.take().expect(
+                    "WASI engine context must receive in-place guest storage from its logical image",
+                );
+                WasiGuestSlot::init(guest_storage, bytes)?
+            }
+        };
+        let result = loop {
+            match guest_slot.guest().resume(budget) {
+                Ok(crate::kernel::engine::wasm::Event::Call(call)) => {
+                    if let Err(error) = self.drive_wasi_call_blocking(&mut guest_slot, call) {
+                        break Err(error);
+                    }
+                }
+                Ok(crate::kernel::engine::wasm::Event::Done) => {
+                    if self
+                        .endpoint_carrier
+                        .expects_wasi_proc_exit_terminal_event()
+                    {
+                        let status = ProcExitStatus::new(0);
+                        if let Err(error) = self.endpoint_proc_exit_blocking(status) {
+                            break Err(error);
+                        }
+                        break Ok(WasiGuestStatus::Exit(status));
+                    }
+                    break Ok(WasiGuestStatus::Done);
+                }
+                Ok(crate::kernel::engine::wasm::Event::BudgetExpired(expired)) => {
+                    break Ok(WasiGuestStatus::BudgetExpired(expired));
+                }
+                Ok(crate::kernel::engine::wasm::Event::Exit(exit)) => {
+                    let Some(status) = exit.as_protocol_status() else {
+                        break Err(WasiGuestError::UnexpectedReply);
+                    };
+                    if let Err(error) = self.endpoint_proc_exit_blocking(status) {
+                        break Err(error);
+                    }
+                    break Ok(WasiGuestStatus::Exit(status));
+                }
+                Ok(crate::kernel::engine::wasm::Event::MemoryFence(pending)) => {
+                    if let Err(error) = self.drive_memory_fence_blocking(&mut guest_slot, pending) {
+                        break Err(error);
+                    }
+                }
+                Err(error) => {
+                    break Err(error.into());
+                }
+            }
+        };
+        match result {
+            Ok(WasiGuestStatus::BudgetExpired(_)) => {
+                self.guest_slot = Some(guest_slot);
+            }
+            Ok(WasiGuestStatus::Done) | Ok(WasiGuestStatus::Exit(_)) | Err(_) => {
+                let guest_storage = guest_slot.finish();
+                self.guest_storage = Some(guest_storage);
+            }
+        }
+        result
+    }
+
     #[cfg(feature = "wasm-engine-core")]
+    const fn wasi_call_request_label(call: &crate::kernel::engine::wasm::Call) -> u8 {
+        match call {
+            crate::kernel::engine::wasm::Call::FdWrite(_) => LABEL_WASI_FD_WRITE,
+            crate::kernel::engine::wasm::Call::FdRead(_) => LABEL_WASI_FD_READ,
+            crate::kernel::engine::wasm::Call::FdFdstatGet(_) => LABEL_WASI_FD_FDSTAT_GET,
+            crate::kernel::engine::wasm::Call::FdClose(_) => LABEL_WASI_FD_CLOSE,
+            crate::kernel::engine::wasm::Call::ClockResGet(_) => LABEL_WASI_CLOCK_RES_GET,
+            crate::kernel::engine::wasm::Call::ClockTimeGet(_) => LABEL_WASI_CLOCK_TIME_GET,
+            crate::kernel::engine::wasm::Call::PollOneoff(_) => LABEL_WASI_POLL_ONEOFF,
+            crate::kernel::engine::wasm::Call::RandomGet(_) => LABEL_WASI_RANDOM_GET,
+            crate::kernel::engine::wasm::Call::FdReaddir(_) => LABEL_WASI_FD_READDIR,
+            crate::kernel::engine::wasm::Call::PathOpen(_) => LABEL_WASI_PATH_OPEN,
+            crate::kernel::engine::wasm::Call::ArgsSizesGet(_) => LABEL_WASI_ARGS_SIZES_GET,
+            crate::kernel::engine::wasm::Call::ArgsGet(_) => LABEL_WASI_ARGS_GET,
+            crate::kernel::engine::wasm::Call::EnvironSizesGet(_) => LABEL_WASI_ENVIRON_SIZES_GET,
+            crate::kernel::engine::wasm::Call::EnvironGet(_) => LABEL_WASI_ENVIRON_GET,
+        }
+    }
+
+    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
     async fn drive_wasi_call(
         &mut self,
-        call: crate::kernel::engine::wasm::Call<'_, 'guest>,
+        guest_slot: &mut WasiGuestSlot<'guest>,
+        call: crate::kernel::engine::wasm::Call,
     ) -> Result<(), WasiGuestError> {
+        self.admit_wasi_import_loop_continue_for_label(Self::wasi_call_request_label(&call))
+            .await?;
         match call {
             crate::kernel::engine::wasm::Call::FdWrite(pending) => {
-                let fd = pending.fd();
-                let payload = pending.payload()?;
-                let request = EngineReq::FdWrite(FdWrite::new(fd, payload.as_bytes())?);
-                let reply = self
-                    .endpoint_call::<LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET>(request)
-                    .await?;
-                let EngineRet::FdWriteDone(done) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                if done.fd() != fd {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                pending.complete(done.errno() as u32)?;
-                Ok(())
+                self.drive_fd_write_call(guest_slot, pending).await
             }
             crate::kernel::engine::wasm::Call::FdRead(pending) => {
                 let fd = pending.fd();
-                let max_len = pending.max_len()?;
+                let max_len = pending.max_len(guest_slot.guest())?;
                 if max_len > u8::MAX as usize {
                     return Err(WasiGuestError::UnexpectedReply);
                 }
@@ -3456,7 +3542,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 if done.fd() != fd {
                     return Err(WasiGuestError::UnexpectedReply);
                 }
-                pending.complete(done.as_bytes(), 0)?;
+                pending.complete(guest_slot.guest(), done.as_bytes(), 0)?;
                 Ok(())
             }
             crate::kernel::engine::wasm::Call::FdFdstatGet(pending) => {
@@ -3472,7 +3558,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 if stat.fd() != fd {
                     return Err(WasiGuestError::UnexpectedReply);
                 }
-                pending.complete(Self::protocol_fdstat_to_vm(stat), 0)?;
+                pending.complete(guest_slot.guest(), Self::protocol_fdstat_to_vm(stat), 0)?;
                 Ok(())
             }
             crate::kernel::engine::wasm::Call::FdClose(pending) => {
@@ -3488,7 +3574,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 if closed.fd() != fd {
                     return Err(WasiGuestError::UnexpectedReply);
                 }
-                pending.complete(0)?;
+                pending.complete(guest_slot.guest(), 0)?;
                 Ok(())
             }
             crate::kernel::engine::wasm::Call::ClockResGet(pending) => {
@@ -3504,7 +3590,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 let EngineRet::ClockResolution(resolution) = reply else {
                     return Err(WasiGuestError::UnexpectedReply);
                 };
-                pending.complete(resolution.nanos(), 0)?;
+                pending.complete(guest_slot.guest(), resolution.nanos(), 0)?;
                 Ok(())
             }
             crate::kernel::engine::wasm::Call::ClockTimeGet(pending) => {
@@ -3522,21 +3608,11 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 let EngineRet::ClockTime(now) = reply else {
                     return Err(WasiGuestError::UnexpectedReply);
                 };
-                pending.complete(now.nanos(), 0)?;
+                pending.complete(guest_slot.guest(), now.nanos(), 0)?;
                 Ok(())
             }
             crate::kernel::engine::wasm::Call::PollOneoff(pending) => {
-                let delay = pending.delay_ticks()?;
-                let reply = self
-                    .endpoint_call::<LABEL_WASI_POLL_ONEOFF, LABEL_WASI_POLL_ONEOFF_RET>(
-                        EngineReq::PollOneoff(PollOneoff::new(delay)),
-                    )
-                    .await?;
-                let EngineRet::PollReady(ready) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                pending.complete(ready.ready() as u32, 0)?;
-                Ok(())
+                self.drive_poll_oneoff_call(guest_slot, pending).await
             }
             crate::kernel::engine::wasm::Call::RandomGet(pending) => {
                 let len = pending.buf_len();
@@ -3550,13 +3626,13 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 let EngineRet::RandomDone(done) = reply else {
                     return Err(WasiGuestError::UnexpectedReply);
                 };
-                pending.complete(done.as_bytes(), 0)?;
+                pending.complete(guest_slot.guest(), done.as_bytes(), 0)?;
                 Ok(())
             }
             crate::kernel::engine::wasm::Call::FdReaddir(pending) => {
-                let fd = pending.fd()?;
-                let cookie = pending.cookie()?;
-                let max_len = pending.max_len()?;
+                let fd = pending.fd();
+                let cookie = pending.cookie();
+                let max_len = pending.max_len();
                 if max_len > u8::MAX as usize {
                     return Err(WasiGuestError::UnexpectedReply);
                 }
@@ -3570,13 +3646,13 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 if done.fd() != fd {
                     return Err(WasiGuestError::UnexpectedReply);
                 }
-                pending.complete(done.as_bytes(), done.errno() as u32)?;
+                pending.complete(guest_slot.guest(), done.as_bytes(), done.errno() as u32)?;
                 Ok(())
             }
             crate::kernel::engine::wasm::Call::PathOpen(pending) => {
-                let fd = pending.fd()?;
-                let rights = pending.rights_base()?;
-                let path = pending.path_bytes()?;
+                let fd = pending.fd();
+                let rights = pending.rights_base();
+                let path = pending.path_bytes(guest_slot.guest())?;
                 let request = EngineReq::PathOpen(PathOpen::new(fd, 0, rights, path.as_bytes())?);
                 let reply = self
                     .endpoint_call::<LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET>(request)
@@ -3584,7 +3660,11 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 let EngineRet::PathOpened(opened) = reply else {
                     return Err(WasiGuestError::UnexpectedReply);
                 };
-                pending.complete(opened.fd() as u32, opened.errno() as u32)?;
+                pending.complete(
+                    guest_slot.guest(),
+                    opened.fd() as u32,
+                    opened.errno() as u32,
+                )?;
                 Ok(())
             }
             crate::kernel::engine::wasm::Call::ArgsSizesGet(pending) => {
@@ -3596,7 +3676,12 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 let EngineRet::ArgsSizes(sizes) = reply else {
                     return Err(WasiGuestError::UnexpectedReply);
                 };
-                pending.complete(sizes.count() as u32, sizes.buf_size() as u32, 0)?;
+                pending.complete(
+                    guest_slot.guest(),
+                    sizes.count() as u32,
+                    sizes.buf_size() as u32,
+                    0,
+                )?;
                 Ok(())
             }
             crate::kernel::engine::wasm::Call::ArgsGet(pending) => {
@@ -3608,7 +3693,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 let EngineRet::ArgsDone(done) = reply else {
                     return Err(WasiGuestError::UnexpectedReply);
                 };
-                pending.complete(&[done.as_bytes()], 0)?;
+                pending.complete(guest_slot.guest(), &[done.as_bytes()], 0)?;
                 Ok(())
             }
             crate::kernel::engine::wasm::Call::EnvironSizesGet(pending) => {
@@ -3620,7 +3705,12 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 let EngineRet::EnvironSizes(sizes) = reply else {
                     return Err(WasiGuestError::UnexpectedReply);
                 };
-                pending.complete(sizes.count() as u32, sizes.buf_size() as u32, 0)?;
+                pending.complete(
+                    guest_slot.guest(),
+                    sizes.count() as u32,
+                    sizes.buf_size() as u32,
+                    0,
+                )?;
                 Ok(())
             }
             crate::kernel::engine::wasm::Call::EnvironGet(pending) => {
@@ -3632,20 +3722,315 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 let EngineRet::EnvironDone(done) = reply else {
                     return Err(WasiGuestError::UnexpectedReply);
                 };
-                pending.complete(&[(done.as_bytes(), &[][..])], 0)?;
+                pending.complete(guest_slot.guest(), &[(done.as_bytes(), &[][..])], 0)?;
                 Ok(())
             }
         }
     }
 
-    #[cfg(feature = "wasm-engine-core")]
+    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+    #[inline(never)]
+    fn drive_wasi_call_blocking(
+        &mut self,
+        guest_slot: &mut WasiGuestSlot<'guest>,
+        call: crate::kernel::engine::wasm::Call,
+    ) -> Result<(), WasiGuestError> {
+        self.admit_wasi_import_loop_continue_for_label_blocking(Self::wasi_call_request_label(
+            &call,
+        ))?;
+        match call {
+            crate::kernel::engine::wasm::Call::FdWrite(pending) => {
+                self.drive_fd_write_call_blocking(guest_slot, pending)
+            }
+            crate::kernel::engine::wasm::Call::FdRead(pending) => {
+                let fd = pending.fd();
+                let max_len = pending.max_len(guest_slot.guest())?;
+                if max_len > u8::MAX as usize {
+                    return Err(WasiGuestError::UnexpectedReply);
+                }
+                let request = EngineReq::FdRead(FdRead::new(fd, max_len as u8)?);
+                let reply = self
+                    .endpoint_call_blocking::<LABEL_WASI_FD_READ, LABEL_WASI_FD_READ_RET>(
+                        request,
+                    )?;
+                let EngineRet::FdReadDone(done) = reply else {
+                    return Err(WasiGuestError::UnexpectedReply);
+                };
+                if done.fd() != fd {
+                    return Err(WasiGuestError::UnexpectedReply);
+                }
+                pending.complete(guest_slot.guest(), done.as_bytes(), 0)?;
+                Ok(())
+            }
+            crate::kernel::engine::wasm::Call::FdFdstatGet(pending) => {
+                let fd = pending.fd();
+                let reply = self.endpoint_call_blocking::<
+                    LABEL_WASI_FD_FDSTAT_GET,
+                    LABEL_WASI_FD_FDSTAT_GET_RET,
+                >(EngineReq::FdFdstatGet(FdRequest::new(fd)))?;
+                let EngineRet::FdStat(stat) = reply else {
+                    return Err(WasiGuestError::UnexpectedReply);
+                };
+                if stat.fd() != fd {
+                    return Err(WasiGuestError::UnexpectedReply);
+                }
+                pending.complete(guest_slot.guest(), Self::protocol_fdstat_to_vm(stat), 0)?;
+                Ok(())
+            }
+            crate::kernel::engine::wasm::Call::FdClose(pending) => {
+                let fd = pending.fd();
+                let reply = self
+                    .endpoint_call_blocking::<LABEL_WASI_FD_CLOSE, LABEL_WASI_FD_CLOSE_RET>(
+                        EngineReq::FdClose(FdRequest::new(fd)),
+                    )?;
+                let EngineRet::FdClosed(closed) = reply else {
+                    return Err(WasiGuestError::UnexpectedReply);
+                };
+                if closed.fd() != fd {
+                    return Err(WasiGuestError::UnexpectedReply);
+                }
+                pending.complete(guest_slot.guest(), 0)?;
+                Ok(())
+            }
+            crate::kernel::engine::wasm::Call::ClockResGet(pending) => {
+                let clock_id = pending.clock_id();
+                if clock_id > u8::MAX as u32 {
+                    return Err(WasiGuestError::UnexpectedReply);
+                }
+                let reply = self.endpoint_call_blocking::<
+                    LABEL_WASI_CLOCK_RES_GET,
+                    LABEL_WASI_CLOCK_RES_GET_RET,
+                >(EngineReq::ClockResGet(ClockResGet::new(clock_id as u8)))?;
+                let EngineRet::ClockResolution(resolution) = reply else {
+                    return Err(WasiGuestError::UnexpectedReply);
+                };
+                pending.complete(guest_slot.guest(), resolution.nanos(), 0)?;
+                Ok(())
+            }
+            crate::kernel::engine::wasm::Call::ClockTimeGet(pending) => {
+                let clock_id = pending.clock_id();
+                if clock_id > u8::MAX as u32 {
+                    return Err(WasiGuestError::UnexpectedReply);
+                }
+                let request =
+                    EngineReq::ClockTimeGet(ClockTimeGet::new(clock_id as u8, pending.precision()));
+                let reply = self.endpoint_call_blocking::<
+                    LABEL_WASI_CLOCK_TIME_GET,
+                    LABEL_WASI_CLOCK_TIME_GET_RET,
+                >(request)?;
+                let EngineRet::ClockTime(now) = reply else {
+                    return Err(WasiGuestError::UnexpectedReply);
+                };
+                pending.complete(guest_slot.guest(), now.nanos(), 0)?;
+                Ok(())
+            }
+            crate::kernel::engine::wasm::Call::PollOneoff(pending) => {
+                self.drive_poll_oneoff_call_blocking(guest_slot, pending)
+            }
+            crate::kernel::engine::wasm::Call::RandomGet(pending) => {
+                let len = pending.buf_len();
+                if len > u8::MAX as u32 {
+                    return Err(WasiGuestError::UnexpectedReply);
+                }
+                let request = EngineReq::RandomGet(RandomGet::new(len as u8)?);
+                let reply = self
+                    .endpoint_call_blocking::<LABEL_WASI_RANDOM_GET, LABEL_WASI_RANDOM_GET_RET>(
+                        request,
+                    )?;
+                let EngineRet::RandomDone(done) = reply else {
+                    return Err(WasiGuestError::UnexpectedReply);
+                };
+                pending.complete(guest_slot.guest(), done.as_bytes(), 0)?;
+                Ok(())
+            }
+            crate::kernel::engine::wasm::Call::FdReaddir(pending) => {
+                let fd = pending.fd();
+                let cookie = pending.cookie();
+                let max_len = pending.max_len();
+                if max_len > u8::MAX as usize {
+                    return Err(WasiGuestError::UnexpectedReply);
+                }
+                let request = EngineReq::FdReaddir(FdReaddir::new(fd, cookie, max_len as u8)?);
+                let reply = self
+                    .endpoint_call_blocking::<LABEL_WASI_FD_READDIR, LABEL_WASI_FD_READDIR_RET>(
+                        request,
+                    )?;
+                let EngineRet::FdReaddirDone(done) = reply else {
+                    return Err(WasiGuestError::UnexpectedReply);
+                };
+                if done.fd() != fd {
+                    return Err(WasiGuestError::UnexpectedReply);
+                }
+                pending.complete(guest_slot.guest(), done.as_bytes(), done.errno() as u32)?;
+                Ok(())
+            }
+            crate::kernel::engine::wasm::Call::PathOpen(pending) => {
+                let fd = pending.fd();
+                let rights = pending.rights_base();
+                let path = pending.path_bytes(guest_slot.guest())?;
+                let request = EngineReq::PathOpen(PathOpen::new(fd, 0, rights, path.as_bytes())?);
+                let reply = self
+                    .endpoint_call_blocking::<LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET>(
+                        request,
+                    )?;
+                let EngineRet::PathOpened(opened) = reply else {
+                    return Err(WasiGuestError::UnexpectedReply);
+                };
+                pending.complete(
+                    guest_slot.guest(),
+                    opened.fd() as u32,
+                    opened.errno() as u32,
+                )?;
+                Ok(())
+            }
+            crate::kernel::engine::wasm::Call::ArgsSizesGet(pending) => {
+                let reply = self.endpoint_call_blocking::<
+                    LABEL_WASI_ARGS_SIZES_GET,
+                    LABEL_WASI_ARGS_SIZES_GET_RET,
+                >(EngineReq::ArgsSizesGet(ArgsSizesGet::new()))?;
+                let EngineRet::ArgsSizes(sizes) = reply else {
+                    return Err(WasiGuestError::UnexpectedReply);
+                };
+                pending.complete(
+                    guest_slot.guest(),
+                    sizes.count() as u32,
+                    sizes.buf_size() as u32,
+                    0,
+                )?;
+                Ok(())
+            }
+            crate::kernel::engine::wasm::Call::ArgsGet(pending) => {
+                let max_len = pending.max_len();
+                let request = EngineReq::ArgsGet(ArgsGet::new(max_len)?);
+                let reply = self
+                    .endpoint_call_blocking::<LABEL_WASI_ARGS_GET, LABEL_WASI_ARGS_GET_RET>(
+                        request,
+                    )?;
+                let EngineRet::ArgsDone(done) = reply else {
+                    return Err(WasiGuestError::UnexpectedReply);
+                };
+                pending.complete(guest_slot.guest(), &[done.as_bytes()], 0)?;
+                Ok(())
+            }
+            crate::kernel::engine::wasm::Call::EnvironSizesGet(pending) => {
+                let reply = self.endpoint_call_blocking::<
+                    LABEL_WASI_ENVIRON_SIZES_GET,
+                    LABEL_WASI_ENVIRON_SIZES_GET_RET,
+                >(EngineReq::EnvironSizesGet(EnvironSizesGet::new()))?;
+                let EngineRet::EnvironSizes(sizes) = reply else {
+                    return Err(WasiGuestError::UnexpectedReply);
+                };
+                pending.complete(
+                    guest_slot.guest(),
+                    sizes.count() as u32,
+                    sizes.buf_size() as u32,
+                    0,
+                )?;
+                Ok(())
+            }
+            crate::kernel::engine::wasm::Call::EnvironGet(pending) => {
+                let max_len = pending.max_len();
+                let request = EngineReq::EnvironGet(EnvironGet::new(max_len)?);
+                let reply = self
+                    .endpoint_call_blocking::<LABEL_WASI_ENVIRON_GET, LABEL_WASI_ENVIRON_GET_RET>(
+                        request,
+                    )?;
+                let EngineRet::EnvironDone(done) = reply else {
+                    return Err(WasiGuestError::UnexpectedReply);
+                };
+                pending.complete(guest_slot.guest(), &[(done.as_bytes(), &[][..])], 0)?;
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
+    async fn drive_fd_write_call(
+        &mut self,
+        guest_slot: &mut WasiGuestSlot<'guest>,
+        pending: crate::kernel::engine::wasm::FdWrite,
+    ) -> Result<(), WasiGuestError> {
+        let fd = pending.fd();
+        let payload = pending.payload(guest_slot.guest())?;
+        let request = EngineReq::FdWrite(FdWrite::new(fd, payload.as_bytes())?);
+        let reply = self
+            .endpoint_call::<LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET>(request)
+            .await?;
+        let EngineRet::FdWriteDone(done) = reply else {
+            return Err(WasiGuestError::UnexpectedReply);
+        };
+        if done.fd() != fd {
+            return Err(WasiGuestError::UnexpectedReply);
+        }
+        pending.complete(guest_slot.guest(), done.errno() as u32)?;
+        Ok(())
+    }
+
+    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+    #[inline(never)]
+    fn drive_fd_write_call_blocking(
+        &mut self,
+        guest_slot: &mut WasiGuestSlot<'guest>,
+        pending: crate::kernel::engine::wasm::FdWrite,
+    ) -> Result<(), WasiGuestError> {
+        let fd = pending.fd();
+        let payload = pending.payload(guest_slot.guest())?;
+        let request = EngineReq::FdWrite(FdWrite::new(fd, payload.as_bytes())?);
+        let reply =
+            self.endpoint_call_blocking::<LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET>(request)?;
+        let EngineRet::FdWriteDone(done) = reply else {
+            return Err(WasiGuestError::UnexpectedReply);
+        };
+        if done.fd() != fd {
+            return Err(WasiGuestError::UnexpectedReply);
+        }
+        pending.complete(guest_slot.guest(), done.errno() as u32)?;
+        Ok(())
+    }
+
+    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
+    async fn drive_poll_oneoff_call(
+        &mut self,
+        guest_slot: &mut WasiGuestSlot<'guest>,
+        pending: crate::kernel::engine::wasm::PollOneoff,
+    ) -> Result<(), WasiGuestError> {
+        let delay = pending.delay_ticks(guest_slot.guest())?;
+        let reply = self
+            .endpoint_call::<LABEL_WASI_POLL_ONEOFF, LABEL_WASI_POLL_ONEOFF_RET>(
+                EngineReq::PollOneoff(PollOneoff::new(delay)),
+            )
+            .await?;
+        let EngineRet::PollReady(ready) = reply else {
+            return Err(WasiGuestError::UnexpectedReply);
+        };
+        pending.complete(guest_slot.guest(), ready.ready() as u32, 0)?;
+        Ok(())
+    }
+
+    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+    #[inline(never)]
+    fn drive_poll_oneoff_call_blocking(
+        &mut self,
+        guest_slot: &mut WasiGuestSlot<'guest>,
+        pending: crate::kernel::engine::wasm::PollOneoff,
+    ) -> Result<(), WasiGuestError> {
+        let delay = pending.delay_ticks(guest_slot.guest())?;
+        let reply = self
+            .endpoint_call_blocking::<LABEL_WASI_POLL_ONEOFF, LABEL_WASI_POLL_ONEOFF_RET>(
+                EngineReq::PollOneoff(PollOneoff::new(delay)),
+            )?;
+        let EngineRet::PollReady(ready) = reply else {
+            return Err(WasiGuestError::UnexpectedReply);
+        };
+        pending.complete(guest_slot.guest(), ready.ready() as u32, 0)?;
+        Ok(())
+    }
+
+    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
     async fn drive_memory_fence(
         &mut self,
-        pending: crate::kernel::engine::wasm::Pending<
-            '_,
-            'guest,
-            crate::kernel::engine::wasm::MemoryFence,
-        >,
+        guest_slot: &mut WasiGuestSlot<'guest>,
+        pending: crate::kernel::engine::wasm::MemoryFence,
     ) -> Result<(), WasiGuestError> {
         let fence = MemFence::new(MemFenceReason::MemoryGrow, pending.fence_epoch());
         let flow = match self
@@ -3666,7 +4051,37 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
                 error,
             ));
         }
-        pending.complete()?;
+        pending.complete(guest_slot.guest())?;
+        Ok(())
+    }
+
+    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+    #[inline(never)]
+    fn drive_memory_fence_blocking(
+        &mut self,
+        guest_slot: &mut WasiGuestSlot<'guest>,
+        pending: crate::kernel::engine::wasm::MemoryFence,
+    ) -> Result<(), WasiGuestError> {
+        let fence = MemFence::new(MemFenceReason::MemoryGrow, pending.fence_epoch());
+        let flow = match self
+            .endpoint()
+            .flow::<hibana::g::Msg<LABEL_MEM_FENCE, MemFence>>()
+        {
+            Ok(flow) => flow,
+            Err(error) => {
+                return Err(WasiGuestError::endpoint(
+                    0x5745_1000 | LABEL_MEM_FENCE as u32,
+                    error,
+                ));
+            }
+        };
+        if let Err(error) = poll_embedded_endpoint_unit(flow.send(&fence)) {
+            return Err(WasiGuestError::endpoint(
+                0x5745_2000 | LABEL_MEM_FENCE as u32,
+                error,
+            ));
+        }
+        pending.complete(guest_slot.guest())?;
         Ok(())
     }
 
@@ -3675,7 +4090,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
     }
 }
 
-#[cfg(feature = "wasm-engine-core")]
+#[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
 async fn drive_canonical_wasi_engine<'endpoint, 'guest, C, I, const ROLE: u8>(
     mut ctx: EngineCtx<'endpoint, 'guest, C, ROLE>,
 ) -> RoleResult<WasiGuestError>
@@ -3697,6 +4112,48 @@ where
             }
             Err(error) => {
                 return Err(error);
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+fn run_canonical_wasi_engine_forever<'endpoint, 'guest, C, I, const ROLE: u8>(
+    storage: EmbeddedAttachStorageRef<'static>,
+    ctx: EngineCtx<'endpoint, 'guest, C, ROLE>,
+) -> !
+where
+    C: Capsule,
+    I: LogicalImage<C>,
+    I::Artifact: ArtifactGuestStorage<C, I>,
+{
+    assert!(
+        size_of::<EngineCtx<'endpoint, 'guest, C, ROLE>>() <= storage.future_bytes,
+        "appkit embedded WASI engine context exceeds embedded role arena"
+    );
+    assert!(
+        align_of::<EngineCtx<'endpoint, 'guest, C, ROLE>>() <= APPKIT_EMBEDDED_FUTURE_ALIGN,
+        "appkit embedded WASI engine context alignment exceeds embedded role arena"
+    );
+
+    unsafe {
+        let ctx_ptr = storage
+            .future
+            .cast::<EngineCtx<'endpoint, 'guest, C, ROLE>>();
+        ctx_ptr.write(ctx);
+        let ctx = &mut *ctx_ptr;
+        loop {
+            match ctx.drive_wasi_guest_blocking(
+                <I::Artifact as ArtifactGuestStorage<C, I>>::wasi_budget::<ROLE>(),
+            ) {
+                Ok(WasiGuestStatus::BudgetExpired(_)) => {}
+                Ok(WasiGuestStatus::Done) | Ok(WasiGuestStatus::Exit(_)) => {
+                    embedded_pending_forever(ctx);
+                }
+                Err(error) => {
+                    core::hint::black_box(&error);
+                    panic!("appkit embedded WASI role task failed: {error:?}");
+                }
             }
         }
     }
@@ -4383,6 +4840,12 @@ mod tests {
     struct NoLoopCapsule;
     struct NoLoopPlacement;
     struct NoLoopLocal;
+    struct NoLoopProcExitCapsule;
+    struct NoLoopProcExitPlacement;
+    struct NoLoopProcExitLocal;
+    struct BuiltinLoopPollCapsule;
+    struct BuiltinLoopPollPlacement;
+    struct BuiltinLoopPollLocal;
     struct MemoryGrowCapsule;
     struct MemoryGrowLocal;
     struct MemoryGrowPlacement;
@@ -4518,6 +4981,92 @@ mod tests {
         }
     }
 
+    impl Capsule for BuiltinLoopPollCapsule {
+        type Universe = DefaultLabelUniverse;
+        type Placement = BuiltinLoopPollPlacement;
+        type Local = BuiltinLoopPollLocal;
+        type Report = ();
+
+        fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
+            g::route(
+                g::seq(
+                    g::send::<g::Role<1>, g::Role<1>, WasiImportLoopContinue, 1>(),
+                    g::seq(
+                        g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 1>(
+                        ),
+                        g::seq(
+                            g::send::<
+                                g::Role<0>,
+                                g::Role<1>,
+                                g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>,
+                                1,
+                            >(),
+                            g::seq(
+                                g::send::<
+                                    g::Role<1>,
+                                    g::Role<0>,
+                                    g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>,
+                                    1,
+                                >(),
+                                g::send::<
+                                    g::Role<0>,
+                                    g::Role<1>,
+                                    g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>,
+                                    1,
+                                >(),
+                            ),
+                        ),
+                    ),
+                ),
+                g::send::<g::Role<1>, g::Role<1>, WasiImportLoopBreak, 1>(),
+            )
+        }
+    }
+
+    impl Placement<BuiltinLoopPollCapsule> for BuiltinLoopPollPlacement {
+        fn role_kind(role: u8) -> RoleKind {
+            match role {
+                0 => RoleKind::Driver,
+                1 => RoleKind::Engine,
+                _ => RoleKind::Boundary,
+            }
+        }
+    }
+
+    impl Localside<BuiltinLoopPollCapsule> for BuiltinLoopPollLocal {
+        type Error = Infallible;
+
+        fn engine<'endpoint, 'guest, const ROLE: u8>(
+            ctx: EngineCtx<'endpoint, 'guest, BuiltinLoopPollCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+
+        fn driver<'a, const ROLE: u8>(
+            ctx: DriverCtx<'a, BuiltinLoopPollCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+
+        fn boundary<'a, const ROLE: u8>(
+            ctx: BoundaryCtx<'a, BuiltinLoopPollCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+
+        fn link<'a, const ROLE: u8>(
+            ctx: LinkCtx<'a, BuiltinLoopPollCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+
+        fn supervisor<'a, const ROLE: u8>(
+            ctx: SupervisorCtx<'a, BuiltinLoopPollCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+    }
+
     impl Capsule for NoLoopCapsule {
         type Universe = DefaultLabelUniverse;
         type Placement = NoLoopPlacement;
@@ -4571,6 +5120,68 @@ mod tests {
 
         fn supervisor<'a, const ROLE: u8>(
             ctx: SupervisorCtx<'a, NoLoopCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+    }
+
+    impl Capsule for NoLoopProcExitCapsule {
+        type Universe = DefaultLabelUniverse;
+        type Placement = NoLoopProcExitPlacement;
+        type Local = NoLoopProcExitLocal;
+        type Report = ();
+
+        fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
+            g::seq(
+                g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 0>(),
+                g::seq(
+                    g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 0>(
+                    ),
+                    g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 0>(),
+                ),
+            )
+        }
+    }
+
+    impl Placement<NoLoopProcExitCapsule> for NoLoopProcExitPlacement {
+        fn role_kind(role: u8) -> RoleKind {
+            match role {
+                0 => RoleKind::Engine,
+                1 => RoleKind::Driver,
+                _ => RoleKind::Boundary,
+            }
+        }
+    }
+
+    impl Localside<NoLoopProcExitCapsule> for NoLoopProcExitLocal {
+        type Error = Infallible;
+
+        fn engine<'endpoint, 'guest, const ROLE: u8>(
+            ctx: EngineCtx<'endpoint, 'guest, NoLoopProcExitCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+
+        fn driver<'a, const ROLE: u8>(
+            ctx: DriverCtx<'a, NoLoopProcExitCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+
+        fn boundary<'a, const ROLE: u8>(
+            ctx: BoundaryCtx<'a, NoLoopProcExitCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+
+        fn link<'a, const ROLE: u8>(
+            ctx: LinkCtx<'a, NoLoopProcExitCapsule, ROLE>,
+        ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
+            ctx.pending()
+        }
+
+        fn supervisor<'a, const ROLE: u8>(
+            ctx: SupervisorCtx<'a, NoLoopProcExitCapsule, ROLE>,
         ) -> impl core::future::Future<Output = RoleResult<Self::Error>> {
             ctx.pending()
         }
@@ -4738,6 +5349,34 @@ mod tests {
         }
     }
 
+    impl LogicalImage<BuiltinLoopPollCapsule> for crate::site::Local<BridgeImage> {
+        type Artifact = WasiImage<'static>;
+        type Exit<R> = RunReport<R, Self>;
+        type Carrier<'a> = AttachedQueueTestCarrier;
+
+        const IMAGE_ID: ImageId = ImageId(78);
+        const SITE_ID: SiteId = SiteId(1);
+        const REQUESTED_ROLES: RoleSet = RoleSet::from_bits(0b11);
+        const CARRIER: CarrierKind = TEST_ATTACHED_QUEUE_CARRIER;
+
+        fn init() -> Self {
+            Self::new()
+        }
+
+        fn safe_state(&mut self) {}
+
+        fn carrier<'a>() -> Self::Carrier<'a> {
+            AttachedQueueTestCarrier::new()
+        }
+    }
+
+    impl WasiGuestImage<BuiltinLoopPollCapsule> for crate::site::Local<BridgeImage> {
+        fn wasi_guest_lease<'guest, const ROLE: u8>() -> WasiGuestLease<'guest> {
+            assert!(ROLE < 2);
+            bridge_wasi_guest_lease()
+        }
+    }
+
     fn push_leb_u32(out: &mut Vec<u8>, mut value: u32) {
         loop {
             let mut byte = (value & 0x7f) as u8;
@@ -4752,9 +5391,27 @@ mod tests {
         }
     }
 
+    fn push_leb_i32(out: &mut Vec<u8>, value: u32) {
+        let mut value = value as i32;
+        loop {
+            let byte = (value as u8) & 0x7f;
+            value >>= 7;
+            let done = (value == 0 && (byte & 0x40) == 0) || (value == -1 && (byte & 0x40) != 0);
+            out.push(if done { byte } else { byte | 0x80 });
+            if done {
+                break;
+            }
+        }
+    }
+
     fn push_name(out: &mut Vec<u8>, name: &[u8]) {
         push_leb_u32(out, name.len() as u32);
         out.extend_from_slice(name);
+    }
+
+    fn push_i32_const(out: &mut Vec<u8>, value: u32) {
+        out.push(OPCODE_I32_CONST);
+        push_leb_i32(out, value);
     }
 
     fn push_section(module: &mut Vec<u8>, section: u8, bytes: &[u8]) {
@@ -4838,6 +5495,154 @@ mod tests {
         push_section(&mut module, SECTION_DATA, &data);
 
         module
+    }
+
+    fn fd_write_poll_guest_module() -> Vec<u8> {
+        let mut module = Vec::new();
+        module.extend_from_slice(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+
+        let mut types = Vec::new();
+        push_leb_u32(&mut types, 2);
+        types.push(0x60);
+        push_leb_u32(&mut types, 4);
+        types.extend_from_slice(&[VALTYPE_I32, VALTYPE_I32, VALTYPE_I32, VALTYPE_I32]);
+        push_leb_u32(&mut types, 1);
+        types.push(VALTYPE_I32);
+        types.push(0x60);
+        push_leb_u32(&mut types, 0);
+        push_leb_u32(&mut types, 0);
+        push_section(&mut module, SECTION_TYPE, &types);
+
+        let mut imports = Vec::new();
+        push_leb_u32(&mut imports, 2);
+        push_name(&mut imports, b"wasi_snapshot_preview1");
+        push_name(&mut imports, b"fd_write");
+        imports.push(EXTERNAL_KIND_FUNC);
+        push_leb_u32(&mut imports, 0);
+        push_name(&mut imports, b"wasi_snapshot_preview1");
+        push_name(&mut imports, b"poll_oneoff");
+        imports.push(EXTERNAL_KIND_FUNC);
+        push_leb_u32(&mut imports, 0);
+        push_section(&mut module, SECTION_IMPORT, &imports);
+
+        let mut functions = Vec::new();
+        push_leb_u32(&mut functions, 1);
+        push_leb_u32(&mut functions, 1);
+        push_section(&mut module, SECTION_FUNCTION, &functions);
+
+        push_section(&mut module, SECTION_MEMORY, &[0x01, 0x00, 0x01]);
+
+        let mut exports = Vec::new();
+        push_leb_u32(&mut exports, 1);
+        push_name(&mut exports, b"_start");
+        exports.push(EXTERNAL_KIND_FUNC);
+        push_leb_u32(&mut exports, 2);
+        push_section(&mut module, SECTION_EXPORT, &exports);
+
+        let mut body = Vec::new();
+        push_leb_u32(&mut body, 0);
+        push_i32_const(&mut body, 3);
+        push_i32_const(&mut body, 0);
+        push_i32_const(&mut body, 1);
+        push_i32_const(&mut body, 8);
+        body.push(OPCODE_CALL);
+        push_leb_u32(&mut body, 0);
+        body.push(OPCODE_DROP);
+        push_i32_const(&mut body, 32);
+        push_i32_const(&mut body, 80);
+        push_i32_const(&mut body, 1);
+        push_i32_const(&mut body, 112);
+        body.push(OPCODE_CALL);
+        push_leb_u32(&mut body, 1);
+        body.push(OPCODE_DROP);
+        body.push(OPCODE_END);
+        let mut code = Vec::new();
+        push_leb_u32(&mut code, 1);
+        push_leb_u32(&mut code, body.len() as u32);
+        code.extend_from_slice(&body);
+        push_section(&mut module, SECTION_CODE, &code);
+
+        let mut segment = [0u8; 120];
+        segment[0..4].copy_from_slice(&16u32.to_le_bytes());
+        segment[4..8].copy_from_slice(&1u32.to_le_bytes());
+        segment[16] = b'1';
+        segment[32 + 8] = 0;
+        segment[32 + 24..32 + 32].copy_from_slice(&80_000_000u64.to_le_bytes());
+        let mut data = Vec::new();
+        push_leb_u32(&mut data, 1);
+        push_leb_u32(&mut data, 0);
+        data.push(OPCODE_I32_CONST);
+        data.push(0);
+        data.push(OPCODE_END);
+        push_leb_u32(&mut data, segment.len() as u32);
+        data.extend_from_slice(&segment);
+        push_section(&mut module, SECTION_DATA, &data);
+
+        module
+    }
+
+    fn fd_write_poll_loop_guest_module() -> Vec<u8> {
+        let mut module = fd_write_poll_guest_module();
+        let mut body = Vec::new();
+        push_leb_u32(&mut body, 0);
+        body.push(0x02);
+        body.push(0x40);
+        body.push(0x03);
+        body.push(0x40);
+        push_i32_const(&mut body, 3);
+        push_i32_const(&mut body, 0);
+        push_i32_const(&mut body, 1);
+        push_i32_const(&mut body, 8);
+        body.push(OPCODE_CALL);
+        push_leb_u32(&mut body, 0);
+        body.push(OPCODE_DROP);
+        push_i32_const(&mut body, 32);
+        push_i32_const(&mut body, 80);
+        push_i32_const(&mut body, 1);
+        push_i32_const(&mut body, 112);
+        body.push(OPCODE_CALL);
+        push_leb_u32(&mut body, 1);
+        body.push(OPCODE_DROP);
+        body.push(0x0c);
+        body.push(0);
+        body.push(OPCODE_END);
+        body.push(OPCODE_END);
+        body.push(OPCODE_END);
+
+        let mut code = Vec::new();
+        push_leb_u32(&mut code, 1);
+        push_leb_u32(&mut code, body.len() as u32);
+        code.extend_from_slice(&body);
+
+        let mut pos = 8usize;
+        while pos < module.len() {
+            let section = module[pos];
+            pos += 1;
+            let section_len_start = pos;
+            let mut shift = 0usize;
+            let mut section_len = 0usize;
+            loop {
+                let byte = module[pos];
+                pos += 1;
+                section_len |= ((byte & 0x7f) as usize) << shift;
+                if byte < 0x80 {
+                    break;
+                }
+                shift += 7;
+            }
+            let section_start = pos;
+            let section_end = section_start + section_len;
+            if section == SECTION_CODE {
+                let mut replacement = Vec::new();
+                replacement.push(SECTION_CODE);
+                push_leb_u32(&mut replacement, code.len() as u32);
+                replacement.extend_from_slice(&code);
+                module.splice(section_len_start - 1..section_end, replacement);
+                return module;
+            }
+            pos = section_end;
+        }
+        panic!("fd_write_poll_guest_module must contain a code section")
     }
 
     fn memory_grow_guest_module() -> Vec<u8> {
@@ -5065,7 +5870,7 @@ mod tests {
         >::new(&clock);
         let rendezvous = kit
             .add_rendezvous_from_config(
-                Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new(), None),
+                Config::from_resources(&mut tap_buf, &mut slab, CounterClock::new()),
                 carrier,
             )
             .expect("register appkit carrier rendezvous");
@@ -5140,13 +5945,13 @@ mod tests {
         >::new(&clock1);
         let rendezvous0 = kit0
             .add_rendezvous_from_config(
-                Config::new(&mut tap0, &mut slab0, 0..8, 1, CounterClock::new(), None),
+                Config::from_resources(&mut tap0, &mut slab0, CounterClock::new()),
                 carrier.clone(),
             )
             .expect("register driver logical image carrier rendezvous");
         let rendezvous1 = kit1
             .add_rendezvous_from_config(
-                Config::new(&mut tap1, &mut slab1, 0..8, 1, CounterClock::new(), None),
+                Config::from_resources(&mut tap1, &mut slab1, CounterClock::new()),
                 carrier,
             )
             .expect("register engine logical image carrier rendezvous");
@@ -5246,13 +6051,13 @@ mod tests {
         >::new(&clock1);
         let rendezvous0 = kit0
             .add_rendezvous_from_config(
-                Config::new(&mut tap0, &mut slab0, 0..8, 1, CounterClock::new(), None),
+                Config::from_resources(&mut tap0, &mut slab0, CounterClock::new()),
                 carrier.clone(),
             )
             .expect("register driver logical image carrier rendezvous");
         let rendezvous1 = kit1
             .add_rendezvous_from_config(
-                Config::new(&mut tap1, &mut slab1, 0..8, 1, CounterClock::new(), None),
+                Config::from_resources(&mut tap1, &mut slab1, CounterClock::new()),
                 carrier,
             )
             .expect("register engine logical image carrier rendezvous");
@@ -5352,13 +6157,13 @@ mod tests {
         >::new(&clock1);
         let rendezvous0 = kit0
             .add_rendezvous_from_config(
-                Config::new(&mut tap0, &mut slab0, 0..8, 1, CounterClock::new(), None),
+                Config::from_resources(&mut tap0, &mut slab0, CounterClock::new()),
                 carrier.clone(),
             )
             .expect("register repeated driver logical image carrier rendezvous");
         let rendezvous1 = kit1
             .add_rendezvous_from_config(
-                Config::new(&mut tap1, &mut slab1, 0..8, 1, CounterClock::new(), None),
+                Config::from_resources(&mut tap1, &mut slab1, CounterClock::new()),
                 carrier,
             )
             .expect("register repeated engine logical image carrier rendezvous");
@@ -5537,7 +6342,7 @@ mod tests {
         >::new(&clock);
         let rendezvous = kit
             .add_rendezvous_from_config(
-                Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new(), None),
+                Config::from_resources(&mut tap_buf, &mut slab, CounterClock::new()),
                 carrier,
             )
             .expect("register appkit carrier rendezvous");
@@ -5598,7 +6403,10 @@ mod tests {
             driver_done,
             "driver did not receive fd_write request; engine_result={engine_result:?}"
         );
-        assert!(matches!(engine_result, Some(Ok(WasiGuestStatus::Done))));
+        assert!(
+            matches!(engine_result, Some(Ok(WasiGuestStatus::Done))),
+            "engine did not finish fd_write/poll guest; engine_result={engine_result:?}"
+        );
     }
 
     #[test]
@@ -5663,7 +6471,7 @@ mod tests {
         >::new(&clock);
         let rendezvous = kit
             .add_rendezvous_from_config(
-                Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new(), None),
+                Config::from_resources(&mut tap_buf, &mut slab, CounterClock::new()),
                 carrier,
             )
             .expect("register appkit carrier rendezvous");
@@ -5745,6 +6553,361 @@ mod tests {
     }
 
     #[test]
+    fn drive_wasi_guest_maps_command_return_to_projected_proc_exit() {
+        let module = fd_write_guest_module();
+        let program = <NoLoopProcExitCapsule as Capsule>::choreography();
+        let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
+        let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
+        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
+        let clock = CounterClock::new();
+        let carrier = AttachedQueueTestCarrier::new();
+        let kit = hibana::integration::SessionKit::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            2,
+        >::new(&clock);
+        let rendezvous = kit
+            .add_rendezvous_from_config(
+                Config::from_resources(&mut tap_buf, &mut slab, CounterClock::new()),
+                carrier,
+            )
+            .expect("register proc_exit carrier rendezvous");
+        let session = SessionId::new(0x59);
+        let engine_endpoint = kit
+            .enter::<0, _>(rendezvous, session, &role0, NoBinding)
+            .expect("enter proc_exit engine role");
+        let driver_endpoint = kit
+            .enter::<1, _>(rendezvous, session, &role1, NoBinding)
+            .expect("enter proc_exit driver role");
+        let projection = derive_projection_caps_from_program::<NoLoopProcExitCapsule>(&program);
+        assert!(projection.wasi_imports.contains(WasiImports::PROC_EXIT));
+        let endpoint_carrier = EndpointCarrierFacts::new(
+            ImageId(9),
+            SiteId(1),
+            RoleSet::from_bits(0b11),
+            TEST_ATTACHED_QUEUE_CARRIER,
+            projection,
+        );
+        let mut engine_ctx: EngineCtx<'_, '_, NoLoopProcExitCapsule, 0> = EngineCtx::new(
+            RoleEndpointCtx::new(engine_endpoint),
+            endpoint_carrier,
+            Some(module.as_slice()),
+            Some(no_loop_wasi_guest_lease()),
+        );
+        let mut driver_ctx: DriverCtx<'_, NoLoopProcExitCapsule, 1> = DriverCtx::new(
+            RoleEndpointCtx::new(driver_endpoint),
+            endpoint_carrier,
+            DriverFacts::EMPTY,
+        );
+        let engine = engine_ctx.drive_wasi_guest(BudgetRun::new(1, 0, 128, 0));
+        let driver = async move {
+            let request = driver_ctx
+                .endpoint()
+                .recv::<g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>()
+                .await
+                .expect("proc_exit driver receives fd_write request");
+            let EngineReq::FdWrite(write) = request else {
+                panic!("expected fd_write before command return");
+            };
+            let reply = EngineRet::FdWriteDone(FdWriteDone::new(write.fd(), write.len() as u8));
+            driver_ctx
+                .endpoint()
+                .flow::<g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>>()
+                .expect("proc_exit driver opens fd_write reply flow")
+                .send(&reply)
+                .await
+                .expect("proc_exit driver sends fd_write reply");
+            let exit = driver_ctx
+                .endpoint()
+                .recv::<g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>>()
+                .await
+                .expect("proc_exit driver receives terminal command event");
+            let EngineReq::ProcExit(status) = exit else {
+                panic!("expected command return to become proc_exit status");
+            };
+            assert_eq!(status.code(), 0);
+        };
+        let waker = noop_waker();
+        let mut task_context = Context::from_waker(&waker);
+        let mut engine = core::pin::pin!(engine);
+        let mut driver = core::pin::pin!(driver);
+        let mut engine_result = None;
+        let mut driver_done = false;
+        let mut poll_round = 0u8;
+        while poll_round < 32 {
+            if engine_result.is_none() {
+                if let Poll::Ready(result) = engine.as_mut().poll(&mut task_context) {
+                    engine_result = Some(result);
+                }
+            }
+            if !driver_done {
+                if let Poll::Ready(()) = driver.as_mut().poll(&mut task_context) {
+                    driver_done = true;
+                }
+            }
+            if engine_result.is_some() && driver_done {
+                break;
+            }
+            poll_round += 1;
+        }
+        assert!(
+            driver_done,
+            "driver did not receive projected proc_exit; engine_result={engine_result:?}"
+        );
+        assert!(matches!(
+            engine_result,
+            Some(Ok(WasiGuestStatus::Exit(status))) if status.code() == 0
+        ));
+    }
+
+    #[test]
+    fn drive_wasi_guest_continues_from_fd_write_to_poll_oneoff() {
+        let module = fd_write_poll_guest_module();
+        let program = <BuiltinLoopPollCapsule as Capsule>::choreography();
+        let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
+        let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
+        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
+        let clock = CounterClock::new();
+        let carrier = AttachedQueueTestCarrier::new();
+        let kit = hibana::integration::SessionKit::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            2,
+        >::new(&clock);
+        let rendezvous = kit
+            .add_rendezvous_from_config(
+                Config::from_resources(&mut tap_buf, &mut slab, CounterClock::new()),
+                carrier,
+            )
+            .expect("register fd_write/poll appkit rendezvous");
+        let session = SessionId::new(0x57);
+        let engine_endpoint = kit
+            .enter::<1, _>(rendezvous, session, &role1, NoBinding)
+            .expect("enter fd_write/poll engine role");
+        let driver_endpoint = kit
+            .enter::<0, _>(rendezvous, session, &role0, NoBinding)
+            .expect("enter fd_write/poll driver role");
+        let projection = derive_projection_caps_from_program::<BuiltinLoopPollCapsule>(&program);
+        let endpoint_carrier = EndpointCarrierFacts::new(
+            ImageId(4),
+            SiteId(1),
+            RoleSet::from_bits(0b11),
+            TEST_ATTACHED_QUEUE_CARRIER,
+            projection,
+        );
+        let mut engine_ctx: EngineCtx<'_, '_, BuiltinLoopPollCapsule, 1> = EngineCtx::new(
+            RoleEndpointCtx::new(engine_endpoint),
+            endpoint_carrier,
+            Some(module.as_slice()),
+            Some(<crate::site::Local<BridgeImage> as WasiGuestImage<
+                BuiltinLoopPollCapsule,
+            >>::wasi_guest_lease::<1>()),
+        );
+        let mut driver_ctx: DriverCtx<'_, BuiltinLoopPollCapsule, 0> = DriverCtx::new(
+            RoleEndpointCtx::new(driver_endpoint),
+            endpoint_carrier,
+            DriverFacts::EMPTY,
+        );
+        let engine = engine_ctx.drive_wasi_guest(BudgetRun::new(1, 0, 512, 0));
+        let driver = async move {
+            let branch = driver_ctx
+                .endpoint()
+                .offer()
+                .await
+                .expect("driver offers fd_write branch");
+            assert_eq!(branch.label(), LABEL_WASI_FD_WRITE);
+            let request = branch
+                .decode::<g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>()
+                .await
+                .expect("driver decodes fd_write request");
+            let EngineReq::FdWrite(write) = request else {
+                panic!("expected fd_write request");
+            };
+            assert_eq!(write.fd(), 3);
+            assert_eq!(write.as_bytes(), b"1");
+            driver_ctx
+                .endpoint()
+                .flow::<g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>>()
+                .expect("driver opens fd_write reply")
+                .send(&EngineRet::FdWriteDone(FdWriteDone::new(3, 1)))
+                .await
+                .expect("driver sends fd_write reply");
+            let request = driver_ctx
+                .endpoint()
+                .recv::<g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>>()
+                .await
+                .expect("driver receives poll_oneoff request");
+            let EngineReq::PollOneoff(poll) = request else {
+                panic!("expected poll_oneoff request");
+            };
+            assert_eq!(poll.timeout_tick(), 80);
+            driver_ctx
+                .endpoint()
+                .flow::<g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>>()
+                .expect("driver opens poll_oneoff reply")
+                .send(&EngineRet::PollReady(PollReady::new(1)))
+                .await
+                .expect("driver sends poll_oneoff reply");
+            core::future::pending::<()>().await;
+        };
+        let waker = noop_waker();
+        let mut task_context = Context::from_waker(&waker);
+        let mut engine = core::pin::pin!(engine);
+        let mut driver = core::pin::pin!(driver);
+        let mut engine_result = None;
+        let mut poll_round = 0u8;
+        while poll_round < 64 {
+            if engine_result.is_none()
+                && let Poll::Ready(result) = engine.as_mut().poll(&mut task_context)
+            {
+                engine_result = Some(result);
+            }
+            match driver.as_mut().poll(&mut task_context) {
+                Poll::Ready(()) => panic!("driver future completed before engine result"),
+                Poll::Pending => {}
+            }
+            if engine_result.is_some() {
+                break;
+            }
+            poll_round += 1;
+        }
+        assert!(
+            matches!(engine_result, Some(Ok(WasiGuestStatus::Done))),
+            "engine did not finish fd_write/poll guest; engine_result={engine_result:?}"
+        );
+    }
+
+    #[test]
+    fn drive_wasi_guest_reenters_wasm_loop_via_projected_route_loop() {
+        let module = fd_write_poll_loop_guest_module();
+        let program = <BuiltinLoopPollCapsule as Capsule>::choreography();
+        let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
+        let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
+        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
+        let clock = CounterClock::new();
+        let carrier = AttachedQueueTestCarrier::new();
+        let kit = hibana::integration::SessionKit::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            2,
+        >::new(&clock);
+        let rendezvous = kit
+            .add_rendezvous_from_config(
+                Config::from_resources(&mut tap_buf, &mut slab, CounterClock::new()),
+                carrier,
+            )
+            .expect("register fd_write/poll loop rendezvous");
+        let session = SessionId::new(0x5a);
+        let engine_endpoint = kit
+            .enter::<1, _>(rendezvous, session, &role1, NoBinding)
+            .expect("enter loop engine role");
+        let driver_endpoint = kit
+            .enter::<0, _>(rendezvous, session, &role0, NoBinding)
+            .expect("enter loop driver role");
+        let projection = derive_projection_caps_from_program::<BuiltinLoopPollCapsule>(&program);
+        let endpoint_carrier = EndpointCarrierFacts::new(
+            ImageId(10),
+            SiteId(1),
+            RoleSet::from_bits(0b11),
+            TEST_ATTACHED_QUEUE_CARRIER,
+            projection,
+        );
+        let mut engine_ctx: EngineCtx<'_, '_, BuiltinLoopPollCapsule, 1> = EngineCtx::new(
+            RoleEndpointCtx::new(engine_endpoint),
+            endpoint_carrier,
+            Some(module.as_slice()),
+            Some(<crate::site::Local<BridgeImage> as WasiGuestImage<
+                BuiltinLoopPollCapsule,
+            >>::wasi_guest_lease::<1>()),
+        );
+        let mut driver_ctx: DriverCtx<'_, BuiltinLoopPollCapsule, 0> = DriverCtx::new(
+            RoleEndpointCtx::new(driver_endpoint),
+            endpoint_carrier,
+            DriverFacts::EMPTY,
+        );
+        let engine = engine_ctx.drive_wasi_guest(BudgetRun::new(1, 0, 2048, 0));
+        let driver = async move {
+            let mut iteration = 0u8;
+            while iteration < 2 {
+                let branch = driver_ctx
+                    .endpoint()
+                    .offer()
+                    .await
+                    .expect("driver offers loop branch");
+                assert_eq!(branch.label(), LABEL_WASI_FD_WRITE);
+                let request = branch
+                    .decode::<g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>()
+                    .await
+                    .expect("driver decodes loop fd_write request");
+                let EngineReq::FdWrite(write) = request else {
+                    panic!("expected fd_write request");
+                };
+                assert_eq!(write.fd(), 3);
+                assert_eq!(write.as_bytes(), b"1");
+                driver_ctx
+                    .endpoint()
+                    .flow::<g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>>()
+                    .expect("driver opens loop fd_write reply")
+                    .send(&EngineRet::FdWriteDone(FdWriteDone::new(3, 1)))
+                    .await
+                    .expect("driver sends loop fd_write reply");
+                let request = driver_ctx
+                    .endpoint()
+                    .recv::<g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>>()
+                    .await
+                    .expect("driver receives loop poll_oneoff request");
+                let EngineReq::PollOneoff(poll) = request else {
+                    panic!("expected poll_oneoff request");
+                };
+                assert_eq!(poll.timeout_tick(), 80);
+                driver_ctx
+                    .endpoint()
+                    .flow::<g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>>()
+                    .expect("driver opens loop poll_oneoff reply")
+                    .send(&EngineRet::PollReady(PollReady::new(1)))
+                    .await
+                    .expect("driver sends loop poll_oneoff reply");
+                iteration += 1;
+            }
+        };
+        let waker = noop_waker();
+        let mut task_context = Context::from_waker(&waker);
+        let mut engine = core::pin::pin!(engine);
+        let mut driver = core::pin::pin!(driver);
+        let mut engine_result = None;
+        let mut driver_done = false;
+        let mut poll_round = 0u8;
+        while poll_round < 128 {
+            if engine_result.is_none()
+                && let Poll::Ready(result) = engine.as_mut().poll(&mut task_context)
+            {
+                engine_result = Some(result);
+            }
+            if !driver_done && let Poll::Ready(()) = driver.as_mut().poll(&mut task_context) {
+                driver_done = true;
+            }
+            if driver_done || engine_result.is_some() {
+                break;
+            }
+            poll_round += 1;
+        }
+        assert!(
+            driver_done,
+            "driver did not observe two projected WASI loop iterations; engine_result={engine_result:?}"
+        );
+        assert!(
+            engine_result.is_none(),
+            "infinite loop guest must remain live after two iterations; engine_result={engine_result:?}"
+        );
+    }
+
+    #[test]
     fn drive_wasi_guest_completes_memory_grow_after_mem_fence_endpoint_carrier() {
         let module = memory_grow_guest_module();
         let program = <MemoryGrowCapsule as Capsule>::choreography();
@@ -5762,7 +6925,7 @@ mod tests {
         >::new(&clock);
         let rendezvous = kit
             .add_rendezvous_from_config(
-                Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new(), None),
+                Config::from_resources(&mut tap_buf, &mut slab, CounterClock::new()),
                 carrier,
             )
             .expect("register appkit carrier rendezvous");
@@ -5867,14 +7030,7 @@ mod tests {
         >::init_in_place(kit_storage, &clock);
         let rendezvous = kit
             .add_rendezvous_from_config(
-                Config::new(
-                    &mut tap_buf,
-                    rendezvous_slab,
-                    0..8,
-                    1,
-                    CounterClock::new(),
-                    None,
-                ),
+                Config::from_resources(&mut tap_buf, rendezvous_slab, CounterClock::new()),
                 AttachedQueueTestCarrier::new(),
             )
             .expect("register carved in-place carrier rendezvous");
@@ -5906,14 +7062,7 @@ mod tests {
         >::init_in_place(kit_storage, &clock);
         let rendezvous = kit
             .add_rendezvous_from_config(
-                Config::new(
-                    &mut tap_buf,
-                    rendezvous_slab,
-                    0..8,
-                    1,
-                    CounterClock::new(),
-                    None,
-                ),
+                Config::from_resources(&mut tap_buf, rendezvous_slab, CounterClock::new()),
                 AttachedQueueTestCarrier::new(),
             )
             .expect("register embedded-sized timer route rendezvous");
@@ -5967,27 +7116,13 @@ mod tests {
         let carrier = AttachedQueueTestCarrier::new();
         let rendezvous0 = kit0
             .add_rendezvous_from_config(
-                Config::new(
-                    &mut tap0,
-                    rendezvous0_slab,
-                    0..8,
-                    1,
-                    CounterClock::new(),
-                    None,
-                ),
+                Config::from_resources(&mut tap0, rendezvous0_slab, CounterClock::new()),
                 carrier.clone(),
             )
             .expect("register embedded-sized driver rendezvous");
         let rendezvous1 = kit1
             .add_rendezvous_from_config(
-                Config::new(
-                    &mut tap1,
-                    rendezvous1_slab,
-                    0..8,
-                    1,
-                    CounterClock::new(),
-                    None,
-                ),
+                Config::from_resources(&mut tap1, rendezvous1_slab, CounterClock::new()),
                 carrier,
             )
             .expect("register embedded-sized engine rendezvous");
@@ -6103,27 +7238,13 @@ mod tests {
         let carrier = AttachedQueueTestCarrier::new();
         let rendezvous0 = kit0
             .add_rendezvous_from_config(
-                Config::new(
-                    &mut tap0,
-                    rendezvous0_slab,
-                    0..8,
-                    1,
-                    CounterClock::new(),
-                    None,
-                ),
+                Config::from_resources(&mut tap0, rendezvous0_slab, CounterClock::new()),
                 carrier.clone(),
             )
             .expect("register pending driver rendezvous");
         let rendezvous1 = kit1
             .add_rendezvous_from_config(
-                Config::new(
-                    &mut tap1,
-                    rendezvous1_slab,
-                    0..8,
-                    1,
-                    CounterClock::new(),
-                    None,
-                ),
+                Config::from_resources(&mut tap1, rendezvous1_slab, CounterClock::new()),
                 carrier,
             )
             .expect("register pending engine rendezvous");

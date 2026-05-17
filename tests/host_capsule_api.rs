@@ -12,7 +12,7 @@ use hibana::{
         },
         ids::{Lane, SessionId},
         policy::{LoopResolution, ResolverContext, ResolverError, ResolverRef, RouteResolution},
-        program::{Projectable, ProjectionMetadataVisitor, RoleProgram},
+        program::{Projectable, RoleProgram},
         runtime::{Config, CounterClock, DefaultLabelUniverse},
         transport::{
             FrameLabel, Outgoing, TransportError,
@@ -1609,7 +1609,7 @@ fn std_wasi_env_prefix_reaches_choreofs_path_open() {
     >::new(&clock);
     let rv = kit
         .add_rendezvous_from_config(
-            Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new(), None),
+            Config::from_resources(&mut tap_buf, &mut slab, CounterClock::new()),
             MemoryTransport::new(),
         )
         .expect("register rendezvous");
@@ -1718,7 +1718,7 @@ fn std_wasi_optional_env_prefix_allows_direct_choreofs_path_open() {
     >::new(&clock);
     let rv = kit
         .add_rendezvous_from_config(
-            Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new(), None),
+            Config::from_resources(&mut tap_buf, &mut slab, CounterClock::new()),
             MemoryTransport::new(),
         )
         .expect("register rendezvous");
@@ -1849,7 +1849,6 @@ fn choreofs_traffic_attach_succeeds<const ROLE: u8>(
     slab_bytes: usize,
 ) -> bool {
     let role = program.project::<ROLE>();
-    let lane_range = projected_lane_range(program);
     let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); 128];
     let mut slab = vec![0u8; slab_bytes];
     let clock = CounterClock::new();
@@ -1861,14 +1860,7 @@ fn choreofs_traffic_attach_succeeds<const ROLE: u8>(
         1,
     >::new(&clock);
     let Ok(rendezvous) = kit.add_rendezvous_from_config(
-        Config::new(
-            &mut tap_buf,
-            slab.as_mut_slice(),
-            lane_range,
-            1,
-            CounterClock::new(),
-            None,
-        ),
+        Config::from_resources(&mut tap_buf, slab.as_mut_slice(), CounterClock::new()),
         transport,
     ) else {
         return false;
@@ -1882,7 +1874,6 @@ fn choreofs_traffic_embedded_attach_succeeds<const ROLE: u8>(
     slab_bytes: usize,
 ) -> bool {
     let role = program.project::<ROLE>();
-    let lane_range = projected_lane_range(program);
     let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); 128];
     let mut slab = vec![0u8; slab_bytes];
     type Kit<'a> =
@@ -1917,14 +1908,7 @@ fn choreofs_traffic_embedded_attach_succeeds<const ROLE: u8>(
         1,
     >::init_in_place(kit_storage, &clock);
     let Ok(rendezvous) = kit.add_rendezvous_from_config(
-        Config::new(
-            &mut tap_buf,
-            rendezvous_slab,
-            lane_range,
-            1,
-            CounterClock::new(),
-            None,
-        ),
+        Config::from_resources(&mut tap_buf, rendezvous_slab, CounterClock::new()),
         MemoryTransport::new(),
     ) else {
         return false;
@@ -1936,30 +1920,6 @@ fn choreofs_traffic_embedded_attach_succeeds<const ROLE: u8>(
 fn align_up_for_test(value: usize, align: usize) -> usize {
     let mask = align.saturating_sub(1);
     (value + mask) & !mask
-}
-
-#[derive(Default)]
-struct ProjectedLaneRange {
-    max_lane: u8,
-    saw_lane: bool,
-}
-
-impl ProjectionMetadataVisitor for ProjectedLaneRange {
-    fn visit_atom(&mut self, spec: hibana::integration::program::ProjectionAtomSpec) {
-        self.max_lane = self.max_lane.max(spec.lane);
-        self.saw_lane = true;
-    }
-}
-
-fn projected_lane_range(program: &impl Projectable<DefaultLabelUniverse>) -> core::ops::Range<u16> {
-    let mut visitor = ProjectedLaneRange::default();
-    program.visit_projection_metadata(&mut visitor);
-    let end = if visitor.saw_lane {
-        u16::from(visitor.max_lane) + 1
-    } else {
-        1
-    };
-    0..end
 }
 
 fn minimum_choreofs_traffic_attach_slab<const ROLE: u8>(
@@ -2039,7 +1999,7 @@ fn exercise_fd_write_endpoint_round_trip(program: &impl Projectable<DefaultLabel
     >::new(&clock);
     let rv = kit
         .add_rendezvous_from_config(
-            Config::new(&mut tap_buf, &mut slab, 0..8, 2, CounterClock::new(), None),
+            Config::from_resources(&mut tap_buf, &mut slab, CounterClock::new()),
             MemoryTransport::new(),
         )
         .expect("register in-process rendezvous");
@@ -2562,14 +2522,13 @@ fn logical_image_wasi_requirements_follow_requested_role_slice() {
 #[test]
 fn hibana_integration_surfaces_remain_available_to_capsules() {
     fn route_resolution(ctx: ResolverContext) -> Result<RouteResolution, ResolverError> {
-        let retry_hint = ctx.input(0) as u8;
         if ctx
             .attr(hibana::integration::policy::signals::core::LANE)
             .is_some()
         {
             Ok(RouteResolution::Arm(0))
         } else {
-            Ok(RouteResolution::Defer { retry_hint })
+            Ok(RouteResolution::Defer)
         }
     }
 
@@ -2577,9 +2536,7 @@ fn hibana_integration_surfaces_remain_available_to_capsules() {
         if ctx.input(1) == 0 {
             Ok(LoopResolution::Continue)
         } else {
-            Ok(LoopResolution::Defer {
-                retry_hint: ctx.input(1) as u8,
-            })
+            Ok(LoopResolution::Defer)
         }
     }
 

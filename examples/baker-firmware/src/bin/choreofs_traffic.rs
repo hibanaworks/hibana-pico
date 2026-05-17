@@ -9,7 +9,6 @@ use hibana_pico::{
         EngineReq, EngineRet, FdWrite, FdWriteDone, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET,
         LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF,
         LABEL_WASI_POLL_ONEOFF_RET, LABEL_WASI_PROC_EXIT, PathOpen, PathOpened, PollReady,
-        WasiImportLoopBreak, WasiImportLoopContinue,
     },
 };
 
@@ -22,7 +21,6 @@ const RED_LED_MASK: u32 = 1 << 2;
 const LED_PREOPEN_FD: u8 = 9;
 const FD_WRITE_RIGHT: u64 = 1 << 6;
 const EXPECTED_POLL_TIMEOUT_MS: u64 = 80;
-const REENTRY_CYCLES: u32 = 3;
 
 #[derive(Clone, Copy)]
 struct LedObject {
@@ -64,7 +62,7 @@ impl FdWriteStep {
 #[cfg(feature = "embed-wasip1-artifacts")]
 const WASM_CHOREOFS_TRAFFIC: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../target/wasip1-apps/wasm32-wasip1/release/wasip1-led-choreofs-traffic-cycle.wasm"
+    "/../../target/wasip1-apps/wasm32-wasip1/release/wasip1-led-choreofs-traffic-once.wasm"
 ));
 #[cfg(not(feature = "embed-wasip1-artifacts"))]
 const WASM_CHOREOFS_TRAFFIC: &[u8] = &[];
@@ -164,19 +162,49 @@ impl appkit::Capsule for ChoreoFsTraffic {
                 ),
             )
         };
-        let admitted_cycle = || {
-            g::route(
+        let write_waits = || {
+            g::seq(
+                write_wait(),
                 g::seq(
-                    g::send::<g::Role<1>, g::Role<1>, WasiImportLoopContinue, 1>(),
                     write_wait(),
-                ),
-                g::seq(
-                    g::send::<g::Role<1>, g::Role<1>, WasiImportLoopBreak, 1>(),
-                    g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 1>(),
+                    g::seq(
+                        write_wait(),
+                        g::seq(
+                            write_wait(),
+                            g::seq(
+                                write_wait(),
+                                g::seq(
+                                    write_wait(),
+                                    g::seq(
+                                        write_wait(),
+                                        g::seq(
+                                            write_wait(),
+                                            g::seq(
+                                                write_wait(),
+                                                g::seq(
+                                                    write_wait(),
+                                                    g::seq(
+                                                        write_wait(),
+                                                        g::seq(write_wait(), write_wait()),
+                                                    ),
+                                                ),
+                                            ),
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
                 ),
             )
         };
-        g::seq(open_leds(), admitted_cycle())
+        g::seq(
+            open_leds(),
+            g::seq(
+                write_waits(),
+                g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 1>(),
+            ),
+        )
     }
 }
 
@@ -220,24 +248,17 @@ impl appkit::Localside<ChoreoFsTraffic> for ChoreoFsTrafficLocal {
                     path_index += 1usize;
                 }
 
-                let mut cycle = 0u32;
-                loop {
-                    let mut index = 0usize;
-                    while index < FD_WRITE_CYCLE.len() {
-                        let step = FD_WRITE_CYCLE[index];
-                        driver_fd_write(&mut ctx, step.fd, step.payload).await?;
-                        driver_poll_oneoff(&mut ctx).await?;
-                        index += 1usize;
-                    }
-                    cycle += 1;
-                    if cycle >= REENTRY_CYCLES {
-                        break;
-                    }
+                let mut index = 0usize;
+                while index < FD_WRITE_CYCLE.len() {
+                    let step = FD_WRITE_CYCLE[index];
+                    driver_fd_write(&mut ctx, step.fd, step.payload).await?;
+                    driver_poll_oneoff(&mut ctx).await?;
+                    index += 1usize;
                 }
-
+                driver_proc_exit(&mut ctx).await?;
                 baker_firmware::assert_choreofs_markers(
                     PATH_OPEN_STEPS.len() as u32,
-                    REENTRY_CYCLES.saturating_mul(FD_WRITE_CYCLE.len() as u32),
+                    FD_WRITE_CYCLE.len() as u32,
                     RED_LED_MASK,
                     GREEN_LED_MASK | YELLOW_LED_MASK | RED_LED_MASK,
                 );
@@ -275,23 +296,6 @@ async fn recv_engine_req<const ROLE: u8, const LABEL: u8>(
     ctx: &mut appkit::DriverCtx<'_, ChoreoFsTraffic, ROLE>,
 ) -> Result<EngineReq, ChoreoFsTrafficError> {
     Ok(ctx.endpoint().recv::<g::Msg<LABEL, EngineReq>>().await?)
-}
-
-async fn offer_engine_req<const ROLE: u8, const LABEL: u8>(
-    ctx: &mut appkit::DriverCtx<'_, ChoreoFsTraffic, ROLE>,
-) -> Result<EngineReq, ChoreoFsTrafficError> {
-    baker_firmware::record_choreofs_driver_trace(0x5745_c000 | LABEL as u32);
-    let branch = ctx.endpoint().offer().await?;
-    baker_firmware::record_choreofs_driver_trace(0x5745_c100 | branch.label() as u32);
-    if branch.label() != LABEL {
-        #[cfg(feature = "wasm-engine-core")]
-        baker_firmware::record_choreofs_engine_error_code(0x5745_c000 | branch.label() as u32);
-        core::hint::black_box(branch.label());
-        return Err(ChoreoFsTrafficError::RuntimeViolation);
-    }
-    let request = branch.decode::<g::Msg<LABEL, EngineReq>>().await?;
-    baker_firmware::record_choreofs_driver_trace(0x5745_c200 | LABEL as u32);
-    Ok(request)
 }
 
 async fn send_engine_ret<const ROLE: u8, const LABEL: u8>(
@@ -359,7 +363,7 @@ async fn driver_fd_write<const ROLE: u8>(
     expected_fd: u8,
     expected_payload: &[u8],
 ) -> Result<(), ChoreoFsTrafficError> {
-    let request = match offer_engine_req::<ROLE, LABEL_WASI_FD_WRITE>(ctx).await? {
+    let request = match recv_engine_req::<ROLE, LABEL_WASI_FD_WRITE>(ctx).await? {
         EngineReq::FdWrite(request) => request,
         other => {
             core::hint::black_box(other);
@@ -431,6 +435,23 @@ async fn driver_poll_oneoff<const ROLE: u8>(
         EngineRet::PollReady(PollReady::new(1)),
     )
     .await
+}
+
+async fn driver_proc_exit<const ROLE: u8>(
+    ctx: &mut appkit::DriverCtx<'_, ChoreoFsTraffic, ROLE>,
+) -> Result<(), ChoreoFsTrafficError> {
+    let status = match recv_engine_req::<ROLE, LABEL_WASI_PROC_EXIT>(ctx).await? {
+        EngineReq::ProcExit(status) => status,
+        other => {
+            core::hint::black_box(other);
+            return Err(ChoreoFsTrafficError::RuntimeViolation);
+        }
+    };
+    if status.code() != 0 {
+        core::hint::black_box(status);
+        return Err(ChoreoFsTrafficError::RuntimeViolation);
+    }
+    Ok(())
 }
 
 fn find_ledger_fd(

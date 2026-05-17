@@ -994,6 +994,14 @@ global_asm!(
     .thumb_func
 hard_fault_trampoline:
     mrs r0, msp
+    ldr r1, =HIBANA_DEMO_HARDFAULT_R4
+    str r4, [r1]
+    ldr r1, =HIBANA_DEMO_HARDFAULT_R5
+    str r5, [r1]
+    ldr r1, =HIBANA_DEMO_HARDFAULT_R6
+    str r6, [r1]
+    ldr r1, =HIBANA_DEMO_HARDFAULT_R7
+    str r7, [r1]
     ldr r1, 1f
     bx r1
     .align 2
@@ -1230,6 +1238,21 @@ static mut HIBANA_DEMO_HARDFAULT_R12: u32 = 0;
 static mut HIBANA_DEMO_HARDFAULT_SP: u32 = 0;
 #[used]
 #[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_R4: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_R5: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_R6: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_R7: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_STACK: [u32; 80] = [0; 80];
+#[used]
+#[unsafe(no_mangle)]
 static mut HIBANA_DEMO_CORE0_STACK_MAX_USED_BYTES: u32 = 0;
 #[used]
 #[unsafe(no_mangle)]
@@ -1392,10 +1415,123 @@ pub trait BakerCapsuleFacts: appkit::Capsule<Placement = BakerPlacement> {
     const DRIVER_IMAGE_ID: appkit::ImageId;
     const ENGINE_IMAGE_ID: appkit::ImageId;
     const SUCCESS_RESULT: u32 = RESULT_SUCCESS;
-    const OPERATIONAL_DEADLINE_TICKS: u32 = 0;
+    const SIO_OPERATIONAL_DEADLINE_TICKS: u32 = 0;
 
     fn driver_facts() -> appkit::DriverFacts<'static> {
         appkit::DriverFacts::EMPTY
+    }
+}
+
+pub struct BakerSioTransport<C>
+where
+    C: BakerCapsuleFacts,
+{
+    inner: rp2040_sio::SioTransport,
+    capsule: core::marker::PhantomData<fn() -> C>,
+}
+
+impl<C> BakerSioTransport<C>
+where
+    C: BakerCapsuleFacts,
+{
+    pub const fn new() -> Self {
+        Self {
+            inner: rp2040_sio::SioTransport::new(),
+            capsule: core::marker::PhantomData,
+        }
+    }
+}
+
+impl<C> Clone for BakerSioTransport<C>
+where
+    C: BakerCapsuleFacts,
+{
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
+impl<C> Copy for BakerSioTransport<C> where C: BakerCapsuleFacts {}
+
+impl<C> hibana::integration::Transport for BakerSioTransport<C>
+where
+    C: BakerCapsuleFacts,
+{
+    type Error = <rp2040_sio::SioTransport as hibana::integration::Transport>::Error;
+    type Tx<'a>
+        = <rp2040_sio::SioTransport as hibana::integration::Transport>::Tx<'a>
+    where
+        Self: 'a;
+    type Rx<'a>
+        = <rp2040_sio::SioTransport as hibana::integration::Transport>::Rx<'a>
+    where
+        Self: 'a;
+    type Metrics = <rp2040_sio::SioTransport as hibana::integration::Transport>::Metrics;
+
+    fn open<'a>(
+        &'a self,
+        local_role: u8,
+        session_id: u32,
+        lane: u8,
+    ) -> (Self::Tx<'a>, Self::Rx<'a>) {
+        hibana::integration::Transport::open(&self.inner, local_role, session_id, lane)
+    }
+
+    fn poll_send<'a, 'f>(
+        &'a self,
+        tx: &'a mut Self::Tx<'a>,
+        outgoing: hibana::integration::transport::Outgoing<'f>,
+        context: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Result<(), Self::Error>>
+    where
+        'a: 'f,
+    {
+        hibana::integration::Transport::poll_send(&self.inner, tx, outgoing, context)
+    }
+
+    fn cancel_send<'a>(&'a self, tx: &'a mut Self::Tx<'a>) {
+        hibana::integration::Transport::cancel_send(&self.inner, tx);
+    }
+
+    fn poll_recv<'a>(
+        &'a self,
+        rx: &'a mut Self::Rx<'a>,
+        context: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Result<hibana::integration::wire::Payload<'a>, Self::Error>> {
+        hibana::integration::Transport::poll_recv(&self.inner, rx, context)
+    }
+
+    fn requeue<'a>(&'a self, rx: &'a mut Self::Rx<'a>) {
+        hibana::integration::Transport::requeue(&self.inner, rx);
+    }
+
+    fn drain_events(
+        &self,
+        emit: &mut dyn FnMut(hibana::integration::transport::advanced::TransportEvent),
+    ) {
+        hibana::integration::Transport::drain_events(&self.inner, emit);
+    }
+
+    fn recv_frame_hint<'a>(
+        &'a self,
+        rx: &'a Self::Rx<'a>,
+    ) -> Option<hibana::integration::transport::FrameLabel> {
+        hibana::integration::Transport::recv_frame_hint(&self.inner, rx)
+    }
+
+    fn metrics(&self) -> Self::Metrics {
+        hibana::integration::Transport::metrics(&self.inner)
+    }
+
+    fn operational_deadline_ticks(&self) -> Option<u32> {
+        match C::SIO_OPERATIONAL_DEADLINE_TICKS {
+            0 => None,
+            ticks => Some(ticks),
+        }
+    }
+
+    fn apply_pacing_update(&self, interval_us: u32, burst_bytes: u16) {
+        hibana::integration::Transport::apply_pacing_update(&self.inner, interval_us, burst_bytes);
     }
 }
 
@@ -1520,6 +1656,14 @@ fn record_hard_fault_frame(sp: *const u32) {
             stacked_pc,
         );
         core::ptr::write_volatile(core::ptr::addr_of_mut!(HIBANA_DEMO_HARDFAULT_SP), sp as u32);
+        let mut index = 0usize;
+        while index < 80 {
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!(HIBANA_DEMO_HARDFAULT_STACK[index]),
+                core::ptr::read_volatile(sp.add(index)),
+            );
+            index += 1;
+        }
     }
 }
 
@@ -2047,14 +2191,16 @@ where
 {
     type Artifact = C::DriverArtifact;
     type Exit<R> = appkit::RunReport<R, Self>;
-    type Carrier<'a> = rp2040_sio::SioTransport;
+    type Carrier<'a>
+        = BakerSioTransport<C>
+    where
+        C: 'a;
 
     const IMAGE_ID: appkit::ImageId = C::DRIVER_IMAGE_ID;
     const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
     const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(0);
     const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
     const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(C::ENGINE_IMAGE_ID);
-    const OPERATIONAL_DEADLINE_TICKS: u32 = C::OPERATIONAL_DEADLINE_TICKS;
 
     fn init() -> Self {
         Self::new()
@@ -2064,8 +2210,11 @@ where
         mark_safe_state();
     }
 
-    fn carrier<'a>() -> Self::Carrier<'a> {
-        rp2040_sio::SioTransport::new()
+    fn carrier<'a>() -> Self::Carrier<'a>
+    where
+        C: 'a,
+    {
+        BakerSioTransport::<C>::new()
     }
 
     #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -2084,14 +2233,16 @@ where
 {
     type Artifact = C::EngineArtifact;
     type Exit<R> = appkit::RunReport<R, Self>;
-    type Carrier<'a> = rp2040_sio::SioTransport;
+    type Carrier<'a>
+        = BakerSioTransport<C>
+    where
+        C: 'a;
 
     const IMAGE_ID: appkit::ImageId = C::ENGINE_IMAGE_ID;
     const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
     const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(1);
     const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
     const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(C::DRIVER_IMAGE_ID);
-    const OPERATIONAL_DEADLINE_TICKS: u32 = C::OPERATIONAL_DEADLINE_TICKS;
 
     fn init() -> Self {
         Self::new()
@@ -2101,8 +2252,11 @@ where
         mark_safe_state();
     }
 
-    fn carrier<'a>() -> Self::Carrier<'a> {
-        rp2040_sio::SioTransport::new()
+    fn carrier<'a>() -> Self::Carrier<'a>
+    where
+        C: 'a,
+    {
+        BakerSioTransport::<C>::new()
     }
 
     #[cfg(all(target_arch = "arm", target_os = "none"))]

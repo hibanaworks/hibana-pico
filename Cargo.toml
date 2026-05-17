@@ -19,7 +19,7 @@ exclude = [
 resolver = "3"
 
 [dependencies]
-hibana = { version = "0.5.3", default-features = false }
+hibana = { version = "0.6.0", default-features = false }
 
 [features]
 default = []

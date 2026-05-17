@@ -25,7 +25,7 @@ impl BakerCapsuleFacts for DeadlineFault {
 
     const DRIVER_IMAGE_ID: appkit::ImageId = appkit::ImageId(54);
     const ENGINE_IMAGE_ID: appkit::ImageId = appkit::ImageId(55);
-    const OPERATIONAL_DEADLINE_TICKS: u32 = 2;
+    const SIO_OPERATIONAL_DEADLINE_TICKS: u32 = 2;
 }
 
 impl appkit::Localside<DeadlineFault> for DeadlineFaultLocal {

@@ -77,6 +77,7 @@ fn gate_scans_current_guest_layout_and_ignores_nested_targets() {
         &[
             "expected_wasms=(",
             "wasip1-led-choreofs-traffic-cycle.wasm",
+            "wasip1-led-choreofs-traffic-once.wasm",
             "rm -rf \"$artifact_dir\"",
             "diff -u \"$expected_list\" \"$actual_list\"",
         ],
@@ -114,7 +115,7 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
             "pub struct CarrierKind",
             "pub struct PeerImageSet",
             "type Carrier<'a>: hibana::integration::Transport + 'a",
-            "fn carrier<'a>() -> Self::Carrier<'a>;",
+            "fn carrier<'a>() -> Self::Carrier<'a>",
             "fn visit_requested_projected_roles<C, V>",
             "pub trait Placement",
             "pub enum RoleKind",
@@ -157,6 +158,9 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
             "pub control_count: u16",
             "pub capacity_overflow: bool",
             "hibana projection metadata exceeded appkit linked metadata capacity",
+            "let config = hibana::integration::runtime::Config::from_resources(",
+            "attach_tap,",
+            "rendezvous_slab,",
             "pub struct LaneSet",
             "pub struct WasiImports",
             "pub wasi_completion_pair_count: u8",
@@ -181,6 +185,13 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
             "artifact.validate(image_projection.wasi_imports)",
             "logical image artifact must be a WASI Preview 1 artifact or explicit NoWasi",
             "UnsupportedWasiImport",
+            "configured_range_end()",
+            "0..lane_range_end",
+            "endpoint_slots",
+            "EmbeddedTaskContextSlot",
+            "Context<'static>",
+            "context: EmbeddedTaskContextSlot",
+            "embedded_task_context(",
             "pub const fn guest_artifact",
             "pub async fn drive_wasi_guest",
             "pub fn drive_wasi_guest",
@@ -214,12 +225,15 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
             "timeout heuristic",
             "host FS fallback",
             "direct syscall completion",
+            "OPERATIONAL_DEADLINE_TICKS",
+            "operational deadline fuse into `hibana::integration::runtime::Config`",
             "Rp2040Sio",
             "SioTransport",
             "ActiveWasiGuestLease",
             "InlineWasiGuestLease",
             "StaticWasiGuestLease",
             "MaybeUninit<crate::kernel::engine::wasm::Guest",
+            "poll_embedded_future_to_completion",
             "Box<crate::kernel::engine::wasm::Guest",
             "Box<dyn Future",
             "Vec<ScheduledTask",
@@ -425,6 +439,9 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
     let choreofs_wasi_guest = include_str!(
         "../examples/baker-firmware/wasip1/guest/src/bin/wasip1-led-choreofs-traffic-cycle.rs"
     );
+    let choreofs_wasi_once_guest = include_str!(
+        "../examples/baker-firmware/wasip1/guest/src/bin/wasip1-led-choreofs-traffic-once.rs"
+    );
     let fail_safe_bin = include_str!("../examples/baker-firmware/src/bin/fail_safe.rs");
     let recovery_bin = include_str!("../examples/baker-firmware/src/bin/recovery.rs");
     let many_reentry_bin = include_str!("../examples/baker-firmware/src/bin/many_reentry.rs");
@@ -536,7 +553,23 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "impl appkit::Capsule for ChoreoFsTraffic",
             "fn choreography()",
             "impl appkit::Localside<ChoreoFsTraffic> for ChoreoFsTrafficLocal",
+            "wasip1-led-choreofs-traffic-once.wasm",
+            "driver_proc_exit(&mut ctx).await?",
+            "LABEL_WASI_PROC_EXIT",
             "baker_firmware::run::<ChoreoFsTraffic>()",
+        ],
+    );
+    assert_absent(
+        "examples/baker-firmware/src/bin/choreofs_traffic.rs",
+        choreofs_bin,
+        &[
+            "WasiImportLoopContinue",
+            "WasiImportLoopBreak",
+            "g::route(",
+            "REENTRY_CYCLES",
+            "offer_engine_req",
+            "ctx.endpoint().offer().await",
+            "wasip1-led-choreofs-traffic-cycle.wasm",
         ],
     );
     assert_present(
@@ -549,6 +582,10 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "impl appkit::Capsule for ChoreoFsTrafficLoop",
             "const VISUAL_READY_CYCLES: u32 = 1",
             "impl appkit::Localside<ChoreoFsTrafficLoop> for ChoreoFsTrafficLoopLocal",
+            "WasiImportLoopContinue",
+            "WasiImportLoopBreak",
+            "g::route(",
+            "wasip1-led-choreofs-traffic-cycle.wasm",
             "baker_firmware::run::<ChoreoFsTrafficLoop>()",
         ],
     );
@@ -594,6 +631,26 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "set_and_wait(&red, true)",
             "sleep_ms(STEP_MS)",
         ],
+    );
+    assert_present(
+        "examples/baker-firmware/wasip1/guest/src/bin/wasip1-led-choreofs-traffic-once.rs",
+        choreofs_wasi_once_guest,
+        &[
+            "use baker_wasip1_guest::{Led, sleep_ms};",
+            "fn main()",
+            "Led::open(\"/device/led/green\")",
+            "Led::open(\"/device/led/yellow\")",
+            "Led::open(\"/device/led/red\")",
+            "set_and_wait(&green, true)",
+            "set_and_wait(&yellow, true)",
+            "set_and_wait(&red, true)",
+            "sleep_ms(STEP_MS)",
+        ],
+    );
+    assert_absent(
+        "examples/baker-firmware/wasip1/guest/src/bin/wasip1-led-choreofs-traffic-once.rs",
+        choreofs_wasi_once_guest,
+        &["loop {\n        set_and_wait"],
     );
     assert_absent(
         "examples/baker-firmware/wasip1/guest/src/bin/wasip1-led-choreofs-traffic-cycle.rs",
@@ -839,10 +896,16 @@ fn cargo_keeps_plan_private_and_no_demo_meaning_features() {
 
     assert_present("Cargo.toml", cargo, &["exclude = [\"/plan.md\"]"]);
     assert_present(".gitignore", ignore, &["/plan.md"]);
+    assert_present(
+        "Cargo.toml",
+        cargo,
+        &["hibana = { version = \"0.6.0\", default-features = false }"],
+    );
     assert_absent(
         "Cargo.toml",
         cargo,
         &[
+            "[patch.crates-io]",
             "hibana = { path",
             "hibana = { git",
             "baker-choreofs-demo",
@@ -946,12 +1009,16 @@ fn embedded_runner_keeps_scheduler_and_role_future_poll_boundary_separate() {
         appkit,
         &[
             "#[inline(never)]\nunsafe fn poll_embedded_stored_task",
-            "let poll = poll_embedded_stored_task::<F, E>;",
-            "let task_context = embedded_task_context(storage);",
-            "poll(future_arena, task_context)",
+            "let task_waker = embedded_task_waker();",
+            "let mut task_context = Context::from_waker(task_waker);",
+            "poll_embedded_stored_task::<F, E>(future_arena, &mut task_context)",
             "future: EmbeddedFutureArena<APPKIT_EMBEDDED_ROLE_FUTURE_BYTES>",
             "embedded_storage: EmbeddedAttachStorageRef<'static>",
             "self.embedded_storage",
+            "run_canonical_wasi_engine_forever::<C, ImageTy, ROLE>(\n                                self.embedded_storage,",
+            "let ctx_ptr = storage",
+            ".future\n            .cast::<EngineCtx",
+            "ctx_ptr.write(ctx)",
             "bare-metal logical images attach exactly one role",
         ],
     );
@@ -960,11 +1027,17 @@ fn embedded_runner_keeps_scheduler_and_role_future_poll_boundary_separate() {
         appkit,
         &[
             "let mut pinned = Pin::new_unchecked(&mut *future_ptr);",
-            "pinned.as_mut().poll(&mut task_context)",
+            "let poll = poll_embedded_stored_task::<F, E>;",
             "EMBEDDED_ROLE0_FUTURE_ARENA",
             "EMBEDDED_ROLE1_FUTURE_ARENA",
             "fn embedded_task_waker<const ROLE: u8>",
+            "EmbeddedTaskContextSlot",
+            "EmbeddedWakerSlot",
+            "Context<'static>",
+            "waker: EmbeddedWakerSlot",
+            "embedded_task_context(",
             "fn embedded_future_arena_for_role<const ROLE: u8>",
+            "run_canonical_wasi_engine_forever::<C, ImageTy, ROLE>(ctx)",
             "APPKIT_EMBEDDED_ROLE0_FUTURE_BYTES",
             "APPKIT_EMBEDDED_ROLE1_FUTURE_BYTES",
             "fn poll_localside_once",

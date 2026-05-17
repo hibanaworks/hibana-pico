@@ -472,11 +472,11 @@ if [[ "$pattern" == "choreofs-traffic" ]]; then
     echo "Baker hardware pattern $pattern failed: path_open count mismatch" >&2
     exit 1
   fi
-  if [[ "$choreofs_fd_write_count" != "00000027" ]]; then
+  if [[ "$choreofs_fd_write_count" != "0000000d" ]]; then
     echo "Baker hardware pattern $pattern failed: fd_write count mismatch" >&2
     exit 1
   fi
-  if [[ "$choreofs_poll_count" != "00000027" ]]; then
+  if [[ "$choreofs_poll_count" != "0000000d" ]]; then
     echo "Baker hardware pattern $pattern failed: poll_oneoff count mismatch" >&2
     exit 1
   fi

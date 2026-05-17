@@ -17,6 +17,7 @@ expected_wasms=(
   wasip1-exit.wasm
   wasip1-infinite-loop.wasm
   wasip1-led-choreofs-traffic-cycle.wasm
+  wasip1-led-choreofs-traffic-once.wasm
   wasip1-memory-grow-ok.wasm
   wasip1-memory-grow-stale-lease.wasm
   wasip1-random.wasm

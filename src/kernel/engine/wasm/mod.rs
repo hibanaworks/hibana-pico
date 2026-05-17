@@ -30,62 +30,45 @@ impl<'a> Guest<'a> {
         Ok(())
     }
 
-    pub(crate) fn resume<'guest>(
-        &'guest mut self,
-        budget: BudgetRun,
-    ) -> Result<Event<'guest, 'a>, Error> {
+    pub(crate) fn resume(&mut self, budget: BudgetRun) -> Result<Event, Error> {
         match self.engine.resume(budget) {
-            Ok(machine::VmEvent::FdWrite(call)) => Ok(Event::Call(Call::FdWrite(Pending::new(
-                self,
-                FdWrite { call },
-            )))),
-            Ok(machine::VmEvent::FdRead(call)) => Ok(Event::Call(Call::FdRead(Pending::new(
-                self,
-                FdRead { call },
-            )))),
-            Ok(machine::VmEvent::FdFdstatGet(call)) => Ok(Event::Call(Call::FdFdstatGet(
-                Pending::new(self, FdFdstatGet { call }),
-            ))),
-            Ok(machine::VmEvent::FdClose(call)) => Ok(Event::Call(Call::FdClose(Pending::new(
-                self,
-                FdClose { call },
-            )))),
-            Ok(machine::VmEvent::ClockResGet(call)) => Ok(Event::Call(Call::ClockResGet(
-                Pending::new(self, ClockResGet { call }),
-            ))),
-            Ok(machine::VmEvent::ClockTimeGet(call)) => Ok(Event::Call(Call::ClockTimeGet(
-                Pending::new(self, ClockTimeGet { call }),
-            ))),
-            Ok(machine::VmEvent::PollOneoff(call)) => Ok(Event::Call(Call::PollOneoff(
-                Pending::new(self, PollOneoff { call }),
-            ))),
-            Ok(machine::VmEvent::RandomGet(call)) => Ok(Event::Call(Call::RandomGet(
-                Pending::new(self, RandomGet { call }),
-            ))),
-            Ok(machine::VmEvent::FdReaddir(call)) => Ok(Event::Call(Call::FdReaddir(
-                Pending::new(self, FdReaddir { call }),
-            ))),
-            Ok(machine::VmEvent::PathOpen(call)) => Ok(Event::Call(Call::PathOpen(Pending::new(
-                self,
-                PathOpen { call },
-            )))),
-            Ok(machine::VmEvent::ArgsSizesGet(call)) => Ok(Event::Call(Call::ArgsSizesGet(
-                Pending::new(self, ArgsSizesGet { call }),
-            ))),
-            Ok(machine::VmEvent::ArgsGet(call)) => Ok(Event::Call(Call::ArgsGet(Pending::new(
-                self,
-                ArgsGet { call },
-            )))),
-            Ok(machine::VmEvent::EnvironSizesGet(call)) => Ok(Event::Call(Call::EnvironSizesGet(
-                Pending::new(self, EnvironSizesGet { call }),
-            ))),
-            Ok(machine::VmEvent::EnvironGet(call)) => Ok(Event::Call(Call::EnvironGet(
-                Pending::new(self, EnvironGet { call }),
-            ))),
-            Ok(machine::VmEvent::MemoryGrow(event)) => Ok(Event::MemoryFence(Pending::new(
-                self,
-                MemoryFence { event },
-            ))),
+            Ok(machine::VmEvent::FdWrite(call)) => Ok(Event::Call(Call::FdWrite(FdWrite { call }))),
+            Ok(machine::VmEvent::FdRead(call)) => Ok(Event::Call(Call::FdRead(FdRead { call }))),
+            Ok(machine::VmEvent::FdFdstatGet(call)) => {
+                Ok(Event::Call(Call::FdFdstatGet(FdFdstatGet { call })))
+            }
+            Ok(machine::VmEvent::FdClose(call)) => Ok(Event::Call(Call::FdClose(FdClose { call }))),
+            Ok(machine::VmEvent::ClockResGet(call)) => {
+                Ok(Event::Call(Call::ClockResGet(ClockResGet { call })))
+            }
+            Ok(machine::VmEvent::ClockTimeGet(call)) => {
+                Ok(Event::Call(Call::ClockTimeGet(ClockTimeGet { call })))
+            }
+            Ok(machine::VmEvent::PollOneoff(call)) => {
+                Ok(Event::Call(Call::PollOneoff(PollOneoff { call })))
+            }
+            Ok(machine::VmEvent::RandomGet(call)) => {
+                Ok(Event::Call(Call::RandomGet(RandomGet { call })))
+            }
+            Ok(machine::VmEvent::FdReaddir(call)) => {
+                Ok(Event::Call(Call::FdReaddir(FdReaddir { call })))
+            }
+            Ok(machine::VmEvent::PathOpen(call)) => {
+                Ok(Event::Call(Call::PathOpen(PathOpen { call })))
+            }
+            Ok(machine::VmEvent::ArgsSizesGet(call)) => {
+                Ok(Event::Call(Call::ArgsSizesGet(ArgsSizesGet { call })))
+            }
+            Ok(machine::VmEvent::ArgsGet(call)) => Ok(Event::Call(Call::ArgsGet(ArgsGet { call }))),
+            Ok(machine::VmEvent::EnvironSizesGet(call)) => {
+                Ok(Event::Call(Call::EnvironSizesGet(EnvironSizesGet { call })))
+            }
+            Ok(machine::VmEvent::EnvironGet(call)) => {
+                Ok(Event::Call(Call::EnvironGet(EnvironGet { call })))
+            }
+            Ok(machine::VmEvent::MemoryGrow(event)) => {
+                Ok(Event::MemoryFence(MemoryFence { event }))
+            }
             Ok(machine::VmEvent::BudgetExpired(expired)) => Ok(Event::BudgetExpired(expired)),
             Ok(machine::VmEvent::ProcExit(status)) => Ok(Event::Exit(ProcExit::new(status))),
             Ok(machine::VmEvent::Done) => Ok(Event::Done),
@@ -94,49 +77,29 @@ impl<'a> Guest<'a> {
     }
 }
 
-pub(crate) enum Event<'guest, 'a> {
-    Call(Call<'guest, 'a>),
-    MemoryFence(Pending<'guest, 'a, MemoryFence>),
+pub(crate) enum Event {
+    Call(Call),
+    MemoryFence(MemoryFence),
     BudgetExpired(BudgetExpired),
     Done,
     Exit(ProcExit),
 }
 
-pub(crate) enum Call<'guest, 'a> {
-    FdWrite(Pending<'guest, 'a, FdWrite>),
-    FdRead(Pending<'guest, 'a, FdRead>),
-    FdFdstatGet(Pending<'guest, 'a, FdFdstatGet>),
-    FdClose(Pending<'guest, 'a, FdClose>),
-    ClockResGet(Pending<'guest, 'a, ClockResGet>),
-    ClockTimeGet(Pending<'guest, 'a, ClockTimeGet>),
-    PollOneoff(Pending<'guest, 'a, PollOneoff>),
-    RandomGet(Pending<'guest, 'a, RandomGet>),
-    FdReaddir(Pending<'guest, 'a, FdReaddir>),
-    PathOpen(Pending<'guest, 'a, PathOpen>),
-    ArgsSizesGet(Pending<'guest, 'a, ArgsSizesGet>),
-    ArgsGet(Pending<'guest, 'a, ArgsGet>),
-    EnvironSizesGet(Pending<'guest, 'a, EnvironSizesGet>),
-    EnvironGet(Pending<'guest, 'a, EnvironGet>),
-}
-
-pub(crate) struct Pending<'guest, 'a, K> {
-    guest: &'guest mut Guest<'a>,
-    call: K,
-}
-
-impl<'guest, 'a, K> Pending<'guest, 'a, K> {
-    fn new(guest: &'guest mut Guest<'a>, call: K) -> Self {
-        Self { guest, call }
-    }
-
-    fn engine(&self) -> &machine::Vm<'a> {
-        &self.guest.engine
-    }
-
-    fn complete_with<R>(self, f: impl FnOnce(&mut machine::Vm<'a>, K) -> R) -> R {
-        let Self { guest, call } = self;
-        f(&mut guest.engine, call)
-    }
+pub(crate) enum Call {
+    FdWrite(FdWrite),
+    FdRead(FdRead),
+    FdFdstatGet(FdFdstatGet),
+    FdClose(FdClose),
+    ClockResGet(ClockResGet),
+    ClockTimeGet(ClockTimeGet),
+    PollOneoff(PollOneoff),
+    RandomGet(RandomGet),
+    FdReaddir(FdReaddir),
+    PathOpen(PathOpen),
+    ArgsSizesGet(ArgsSizesGet),
+    ArgsGet(ArgsGet),
+    EnvironSizesGet(EnvironSizesGet),
+    EnvironGet(EnvironGet),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,19 +135,19 @@ pub(crate) struct FdWrite {
     call: machine::FdWriteCall,
 }
 
-impl Pending<'_, '_, FdWrite> {
+impl FdWrite {
     pub(crate) const fn fd(&self) -> u8 {
-        self.call.call.fd()
+        self.call.fd()
     }
 
-    pub(crate) fn payload(&self) -> Result<Payload, Error> {
+    pub(crate) fn payload(&self, guest: &Guest<'_>) -> Result<Payload, Error> {
         Ok(Payload {
-            raw: self.engine().fd_write_payload(self.call.call)?,
+            raw: guest.engine.fd_write_payload(self.call)?,
         })
     }
 
-    pub(crate) fn complete(self, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.finish_fd_write(call.call, errno))
+    pub(crate) fn complete(self, guest: &mut Guest<'_>, errno: u32) -> Result<(), Error> {
+        guest.engine.finish_fd_write(self.call, errno)
     }
 }
 
@@ -192,18 +155,23 @@ pub(crate) struct FdRead {
     call: machine::FdReadCall,
 }
 
-impl Pending<'_, '_, FdRead> {
+impl FdRead {
     pub(crate) const fn fd(&self) -> u8 {
-        self.call.call.fd()
+        self.call.fd()
     }
 
-    pub(crate) fn max_len(&self) -> Result<usize, Error> {
-        let (_, max_len) = self.engine().fd_read_iovec(self.call.call)?;
+    pub(crate) fn max_len(&self, guest: &Guest<'_>) -> Result<usize, Error> {
+        let (_, max_len) = guest.engine.fd_read_iovec(self.call)?;
         Ok(max_len as usize)
     }
 
-    pub(crate) fn complete(self, bytes: &[u8], errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.finish_fd_read(call.call, bytes, errno))
+    pub(crate) fn complete(
+        self,
+        guest: &mut Guest<'_>,
+        bytes: &[u8],
+        errno: u32,
+    ) -> Result<(), Error> {
+        guest.engine.finish_fd_read(self.call, bytes, errno)
     }
 }
 
@@ -211,13 +179,18 @@ pub(crate) struct FdFdstatGet {
     call: machine::FdRequestCall,
 }
 
-impl Pending<'_, '_, FdFdstatGet> {
+impl FdFdstatGet {
     pub(crate) const fn fd(&self) -> u8 {
-        self.call.call.fd()
+        self.call.fd()
     }
 
-    pub(crate) fn complete(self, stat: FdStat, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.finish_fd_fdstat_get(call.call, stat, errno))
+    pub(crate) fn complete(
+        self,
+        guest: &mut Guest<'_>,
+        stat: FdStat,
+        errno: u32,
+    ) -> Result<(), Error> {
+        guest.engine.finish_fd_fdstat_get(self.call, stat, errno)
     }
 }
 
@@ -225,13 +198,13 @@ pub(crate) struct FdClose {
     call: machine::FdRequestCall,
 }
 
-impl Pending<'_, '_, FdClose> {
+impl FdClose {
     pub(crate) const fn fd(&self) -> u8 {
-        self.call.call.fd()
+        self.call.fd()
     }
 
-    pub(crate) fn complete(self, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, _| vm.finish_host_call(errno))
+    pub(crate) fn complete(self, guest: &mut Guest<'_>, errno: u32) -> Result<(), Error> {
+        guest.engine.finish_fd_close(self.call, errno)
     }
 }
 
@@ -239,13 +212,20 @@ pub(crate) struct ClockResGet {
     call: machine::ClockResGetCall,
 }
 
-impl Pending<'_, '_, ClockResGet> {
+impl ClockResGet {
     pub(crate) const fn clock_id(&self) -> u32 {
-        self.call.call.clock_id()
+        self.call.clock_id()
     }
 
-    pub(crate) fn complete(self, resolution_nanos: u64, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.finish_clock_res_get(call.call, resolution_nanos, errno))
+    pub(crate) fn complete(
+        self,
+        guest: &mut Guest<'_>,
+        resolution_nanos: u64,
+        errno: u32,
+    ) -> Result<(), Error> {
+        guest
+            .engine
+            .finish_clock_res_get(self.call, resolution_nanos, errno)
     }
 }
 
@@ -253,17 +233,22 @@ pub(crate) struct ClockTimeGet {
     call: machine::ClockTimeGetCall,
 }
 
-impl Pending<'_, '_, ClockTimeGet> {
+impl ClockTimeGet {
     pub(crate) const fn clock_id(&self) -> u32 {
-        self.call.call.clock_id()
+        self.call.clock_id()
     }
 
     pub(crate) const fn precision(&self) -> u64 {
-        self.call.call.precision()
+        self.call.precision()
     }
 
-    pub(crate) fn complete(self, nanos: u64, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.finish_clock_time_get(call.call, nanos, errno))
+    pub(crate) fn complete(
+        self,
+        guest: &mut Guest<'_>,
+        nanos: u64,
+        errno: u32,
+    ) -> Result<(), Error> {
+        guest.engine.finish_clock_time_get(self.call, nanos, errno)
     }
 }
 
@@ -271,13 +256,18 @@ pub(crate) struct PollOneoff {
     call: machine::PollOneoffCall,
 }
 
-impl Pending<'_, '_, PollOneoff> {
-    pub(crate) fn delay_ticks(&self) -> Result<u64, Error> {
-        self.engine().poll_oneoff_delay_ticks(self.call.call)
+impl PollOneoff {
+    pub(crate) fn delay_ticks(&self, guest: &Guest<'_>) -> Result<u64, Error> {
+        guest.engine.poll_oneoff_delay_ticks(self.call)
     }
 
-    pub(crate) fn complete(self, ready: u32, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.finish_poll_oneoff(call.call, ready, errno))
+    pub(crate) fn complete(
+        self,
+        guest: &mut Guest<'_>,
+        ready: u32,
+        errno: u32,
+    ) -> Result<(), Error> {
+        guest.engine.finish_poll_oneoff(self.call, ready, errno)
     }
 }
 
@@ -285,57 +275,72 @@ pub(crate) struct RandomGet {
     call: machine::RandomGetCall,
 }
 
-impl Pending<'_, '_, RandomGet> {
+impl RandomGet {
     pub(crate) const fn buf_len(&self) -> u32 {
-        self.call.call.buf_len()
+        self.call.buf_len()
     }
 
-    pub(crate) fn complete(self, bytes: &[u8], errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.finish_random_get(call.call, bytes, errno))
+    pub(crate) fn complete(
+        self,
+        guest: &mut Guest<'_>,
+        bytes: &[u8],
+        errno: u32,
+    ) -> Result<(), Error> {
+        guest.engine.finish_random_get(self.call, bytes, errno)
     }
 }
 
 pub(crate) struct FdReaddir {
-    call: machine::PathCall,
+    call: machine::FdReaddirCall,
 }
 
-impl Pending<'_, '_, FdReaddir> {
-    pub(crate) fn fd(&self) -> Result<u8, Error> {
-        self.call.call.fd()
+impl FdReaddir {
+    pub(crate) const fn fd(&self) -> u8 {
+        self.call.fd()
     }
 
-    pub(crate) fn cookie(&self) -> Result<u64, Error> {
-        self.call.call.arg_i64(3)
+    pub(crate) const fn cookie(&self) -> u64 {
+        self.call.cookie()
     }
 
-    pub(crate) fn max_len(&self) -> Result<usize, Error> {
-        Ok(self.call.call.arg_i32(2)? as usize)
+    pub(crate) const fn max_len(&self) -> usize {
+        self.call.max_len()
     }
 
-    pub(crate) fn complete(self, bytes: &[u8], errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.finish_fd_readdir(call.call, bytes, errno))
+    pub(crate) fn complete(
+        self,
+        guest: &mut Guest<'_>,
+        bytes: &[u8],
+        errno: u32,
+    ) -> Result<(), Error> {
+        guest.engine.finish_fd_readdir(self.call, bytes, errno)
     }
 }
 
 pub(crate) struct PathOpen {
-    call: machine::PathCall,
+    call: machine::PathOpenCall,
 }
 
-impl Pending<'_, '_, PathOpen> {
-    pub(crate) fn fd(&self) -> Result<u8, Error> {
-        self.call.call.fd()
+impl PathOpen {
+    pub(crate) const fn fd(&self) -> u8 {
+        self.call.fd()
     }
 
-    pub(crate) fn rights_base(&self) -> Result<u64, Error> {
-        self.call.call.arg_i64(5)
+    pub(crate) const fn rights_base(&self) -> u64 {
+        self.call.rights_base()
     }
 
-    pub(crate) fn path_bytes(&self) -> Result<PathBytes, Error> {
-        self.engine().path_bytes(self.call.call)
+    pub(crate) fn path_bytes(&self, guest: &Guest<'_>) -> Result<PathBytes, Error> {
+        guest.engine.path_bytes(self.call)
     }
 
-    pub(crate) fn complete(self, opened_fd: u32, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.finish_path_open(call.call, opened_fd, errno))
+    pub(crate) fn complete(
+        self,
+        guest: &mut Guest<'_>,
+        opened_fd: u32,
+        errno: u32,
+    ) -> Result<(), Error> {
+        guest.engine.finish_path_open(self.call, opened_fd, errno)
     }
 }
 
@@ -343,11 +348,17 @@ pub(crate) struct ArgsSizesGet {
     call: machine::ArgsSizesGetCall,
 }
 
-impl Pending<'_, '_, ArgsSizesGet> {
-    pub(crate) fn complete(self, argc: u32, argv_buf_size: u32, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| {
-            vm.finish_args_sizes_get(call.call, argc, argv_buf_size, errno)
-        })
+impl ArgsSizesGet {
+    pub(crate) fn complete(
+        self,
+        guest: &mut Guest<'_>,
+        argc: u32,
+        argv_buf_size: u32,
+        errno: u32,
+    ) -> Result<(), Error> {
+        guest
+            .engine
+            .finish_args_sizes_get(self.call, argc, argv_buf_size, errno)
     }
 }
 
@@ -355,13 +366,18 @@ pub(crate) struct ArgsGet {
     call: machine::ArgsGetCall,
 }
 
-impl Pending<'_, '_, ArgsGet> {
+impl ArgsGet {
     pub(crate) const fn max_len(&self) -> u8 {
         u8::MAX
     }
 
-    pub(crate) fn complete(self, args: &[&[u8]], errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.finish_args_get(call.call, args, errno))
+    pub(crate) fn complete(
+        self,
+        guest: &mut Guest<'_>,
+        args: &[&[u8]],
+        errno: u32,
+    ) -> Result<(), Error> {
+        guest.engine.finish_args_get(self.call, args, errno)
     }
 }
 
@@ -369,11 +385,17 @@ pub(crate) struct EnvironSizesGet {
     call: machine::EnvironSizesGetCall,
 }
 
-impl Pending<'_, '_, EnvironSizesGet> {
-    pub(crate) fn complete(self, count: u32, buf_size: u32, errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| {
-            vm.finish_environ_sizes_get(call.call, count, buf_size, errno)
-        })
+impl EnvironSizesGet {
+    pub(crate) fn complete(
+        self,
+        guest: &mut Guest<'_>,
+        count: u32,
+        buf_size: u32,
+        errno: u32,
+    ) -> Result<(), Error> {
+        guest
+            .engine
+            .finish_environ_sizes_get(self.call, count, buf_size, errno)
     }
 }
 
@@ -381,13 +403,18 @@ pub(crate) struct EnvironGet {
     call: machine::EnvironGetCall,
 }
 
-impl Pending<'_, '_, EnvironGet> {
+impl EnvironGet {
     pub(crate) const fn max_len(&self) -> u8 {
         u8::MAX
     }
 
-    pub(crate) fn complete(self, environ: &[(&[u8], &[u8])], errno: u32) -> Result<(), Error> {
-        self.complete_with(|vm, call| vm.finish_environ_get(call.call, environ, errno))
+    pub(crate) fn complete(
+        self,
+        guest: &mut Guest<'_>,
+        environ: &[(&[u8], &[u8])],
+        errno: u32,
+    ) -> Result<(), Error> {
+        guest.engine.finish_environ_get(self.call, environ, errno)
     }
 }
 
@@ -395,13 +422,13 @@ pub(crate) struct MemoryFence {
     event: machine::MemoryGrowEvent,
 }
 
-impl Pending<'_, '_, MemoryFence> {
+impl MemoryFence {
     pub(crate) const fn previous_pages(&self) -> u32 {
-        self.call.event.previous_pages
+        self.event.previous_pages
     }
 
     pub(crate) const fn new_pages(&self) -> Option<u32> {
-        self.call.event.new_pages
+        self.event.new_pages
     }
 
     pub(crate) const fn fence_epoch(&self) -> u32 {
@@ -411,7 +438,12 @@ impl Pending<'_, '_, MemoryFence> {
         }
     }
 
-    pub(crate) fn complete(self) -> Result<(), Error> {
-        self.complete_with(|vm, _| vm.finish_memory_grow_event().map(|_| ()))
+    pub(crate) fn complete(self, guest: &mut Guest<'_>) -> Result<(), Error> {
+        let completed = guest.engine.finish_memory_grow_event()?;
+        if completed == self.event {
+            Ok(())
+        } else {
+            Err(Error::PendingMismatch)
+        }
     }
 }

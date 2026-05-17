@@ -13,6 +13,10 @@ hibana-wasip1-guest = { path = "../../../../guest/hibana-wasip1-guest" }
 name = "wasip1-led-choreofs-traffic-cycle"
 path = "src/bin/wasip1-led-choreofs-traffic-cycle.rs"
 
+[[bin]]
+name = "wasip1-led-choreofs-traffic-once"
+path = "src/bin/wasip1-led-choreofs-traffic-once.rs"
+
 [profile.release]
 panic = "abort"
 opt-level = "z"
