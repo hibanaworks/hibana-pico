@@ -15,6 +15,7 @@ if cargo package --list --allow-dirty 2>/dev/null | rg -n '(^|/)plan\.md$'; then
 fi
 
 bash ./scripts/check_wasip1_guest_builds.sh
+bash ./scripts/check_baker_section_budgets.sh
 cargo check --workspace --all-targets
 cargo check --workspace --all-targets --all-features
 cargo check -p heterogeneous-split-example --all-targets
@@ -46,7 +47,7 @@ if rg -n -S 'appkit build|proc_macro choreography|choreo!|placement!|xtask requi
   exit 1
 fi
 
-if rg -n -S 'wasi:(cli|clocks|filesystem|http|io|random|sockets)|wasi_snapshot_preview2|wasm32-wasip2|wasip2|wit-bindgen|wit_component|component-model' Cargo.toml README.md src examples guest --glob '!src/appkit.rs'; then
+if rg -n -S 'wasi:(cli|clocks|filesystem|http|io|random|sockets)|wasi_snapshot_preview2|wasm32-wasip2|wasip2|wit-bindgen|wit_component|component-model' Cargo.toml README.md src examples guest --glob '!src/appkit/internal.rs'; then
   echo "plan gate failed: forbidden WASI P2 / WIT / Component Model surface" >&2
   exit 1
 fi
@@ -76,7 +77,7 @@ if sed -n '/^\[features\]/,/^\[/p' Cargo.toml | rg -n -S 'embed-wasip1-artifacts
   exit 1
 fi
 
-if rg -n -S 'Box<dyn Future|Vec<ScheduledTask|Box::pin|std::vec!\[' src/appkit.rs; then
+if rg -n -S 'Box<dyn Future|Vec<ScheduledTask|Box::pin|std::vec!\[' src/appkit; then
   echo "plan gate failed: appkit scheduler/storage must use bounded in-place storage, not host heap shortcuts" >&2
   exit 1
 fi
@@ -91,12 +92,12 @@ if rg -n -S 'site::carrier|appkit::InProcessCarrier|pub struct InProcess(Carrier
   exit 1
 fi
 
-if rg -n -S 'RefCell|CarrierAttachState|AttachedCarrierFrame|push_attached_frame|pop_attached_frame|requeue_attached_frame' src/appkit.rs; then
+if rg -n -S 'RefCell|CarrierAttachState|AttachedCarrierFrame|push_attached_frame|pop_attached_frame|requeue_attached_frame' src/appkit; then
   echo "plan gate failed: appkit core must not carry local queue/refcell carrier implementation details" >&2
   exit 1
 fi
 
-if rg -n -S 'AtomicBool|compare_exchange\(false, true|unsafe impl Sync for WasiGuestArena|pub fn storage<.*&'\''static self|pub unsafe fn storage_from_owner|storage_from_owner\(|WasiGuestStorage|wasi_guest_storage' src/appkit.rs; then
+if rg -n -S 'AtomicBool|compare_exchange\(false, true|unsafe impl Sync for WasiGuestArena|pub fn storage<.*&'\''static self|pub unsafe fn storage_from_owner|storage_from_owner\(|WasiGuestStorage|wasi_guest_storage' src/appkit; then
   echo "plan gate failed: WASI guest arena must be single-owner storage, not a shared atomic lease" >&2
   exit 1
 fi

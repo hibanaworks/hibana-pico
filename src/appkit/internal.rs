@@ -42,8 +42,6 @@ use crate::choreography::protocol::{
     LABEL_WASIP1_STDOUT_RET,
 };
 
-pub use crate::choreography::protocol::BuiltInLabelUniverse as BuiltInUniverse;
-
 #[cfg(feature = "wasm-engine-core")]
 use crate::choreography::protocol::{
     ArgsGet, ArgsSizesGet, BudgetExpired, BudgetRun, ClockResGet, ClockTimeGet, EnvironGet,

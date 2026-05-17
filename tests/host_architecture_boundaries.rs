@@ -16,6 +16,18 @@ fn assert_present(path: &str, source: &str, required: &[&str]) {
     }
 }
 
+fn appkit_public_source() -> &'static str {
+    include_str!("../src/appkit/mod.rs")
+}
+
+fn appkit_sources() -> String {
+    [
+        include_str!("../src/appkit/mod.rs"),
+        include_str!("../src/appkit/internal.rs"),
+    ]
+    .join("\n")
+}
+
 #[test]
 fn public_root_is_the_capsule_surface_only() {
     let lib = include_str!("../src/lib.rs");
@@ -52,6 +64,7 @@ fn gate_scans_current_guest_layout_and_ignores_nested_targets() {
     let ignore = include_str!("../.gitignore");
     let gate = include_str!("../scripts/check_plan_pico_gates.sh");
     let wasip1_gate = include_str!("../scripts/check_wasip1_guest_builds.sh");
+    let section_gate = include_str!("../scripts/check_baker_section_budgets.sh");
 
     assert_present(".gitignore", ignore, &["target/"]);
     assert_absent(
@@ -65,6 +78,7 @@ fn gate_scans_current_guest_layout_and_ignores_nested_targets() {
         &[
             "src examples guest Cargo.toml",
             "src tests examples guest",
+            "bash ./scripts/check_baker_section_budgets.sh",
             "git ls-files --others --exclude-standard | rg -n '/target/'",
             "cargo check -p heterogeneous-split-example --target thumbv6m-none-eabi --bin rp2040-io",
             "(^|[(,])\\s*_[A-Za-z0-9_]+\\s*:",
@@ -87,15 +101,59 @@ fn gate_scans_current_guest_layout_and_ignores_nested_targets() {
         wasip1_gate,
         &["sock_(accept|recv|send|shutdown)"],
     );
+    assert_present(
+        "scripts/check_baker_section_budgets.sh",
+        section_gate,
+        &[
+            "budget_for_bin()",
+            "baker-choreofs-traffic-loop",
+            "section_size()",
+            "check_budget \"$bin\" \".text\"",
+            "check_budget \"$bin\" \".rodata\"",
+            "check_budget \"$bin\" \".data\"",
+            "check_budget \"$bin\" \".bss\"",
+            "flash(.text+.rodata+.data)",
+            "section-budget bin=%s",
+        ],
+    );
 }
 
 #[test]
 fn appkit_has_capsule_shape_without_legacy_facades() {
-    let appkit = include_str!("../src/appkit.rs");
+    let appkit_public = appkit_public_source();
+    let appkit = appkit_sources();
 
     assert_present(
-        "src/appkit.rs",
-        appkit,
+        "src/appkit/mod.rs",
+        appkit_public,
+        &[
+            "mod internal;",
+            "pub use crate::choreography::protocol::BuiltInLabelUniverse as BuiltInUniverse;",
+            "pub use internal::{",
+            "Capsule",
+            "LogicalImage",
+            "Placement",
+            "ArtifactBundle",
+            "Localside",
+            "run",
+        ],
+    );
+    assert_absent(
+        "src/appkit/mod.rs",
+        appkit_public,
+        &[
+            "pub mod",
+            "pub struct",
+            "pub enum",
+            "pub trait",
+            "pub fn",
+            "pub use internal::*",
+        ],
+    );
+
+    assert_present(
+        "src/appkit",
+        &appkit,
         &[
             "pub trait Capsule",
             "fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe>;",
@@ -172,8 +230,8 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
         ],
     );
     assert_absent(
-        "src/appkit.rs",
-        appkit,
+        "src/appkit",
+        &appkit,
         &[
             "pub mod support",
             "pub struct Choreo<",
@@ -780,6 +838,10 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "not admission authority",
             "not reject a `WasiImage` because static imports exceed",
             "An import becomes meaningful only when the guest actually calls it",
+            "`appkit` itself is also a curated facade",
+            "implementation modules under `src/appkit/` remain",
+            "bash ./scripts/check_baker_section_budgets.sh",
+            "gates `.text`, `.rodata`, `.data`, `.bss`, and flash-size totals",
         ],
     );
 }
@@ -927,7 +989,7 @@ fn cargo_keeps_plan_private_and_no_demo_meaning_features() {
 fn readme_fixes_failure_deadline_cancellation_as_fail_closed_evidence() {
     let readme = include_str!("../README.md");
     let lib = include_str!("../src/lib.rs");
-    let appkit = include_str!("../src/appkit.rs");
+    let appkit = appkit_sources();
 
     assert_present(
         "README.md",
@@ -971,7 +1033,7 @@ fn readme_fixes_failure_deadline_cancellation_as_fail_closed_evidence() {
         ],
     );
 
-    for (path, source) in [("src/lib.rs", lib), ("src/appkit.rs", appkit)] {
+    for (path, source) in [("src/lib.rs", lib), ("src/appkit", appkit.as_str())] {
         assert_absent(
             path,
             source,
@@ -1002,11 +1064,11 @@ fn readme_fixes_failure_deadline_cancellation_as_fail_closed_evidence() {
 
 #[test]
 fn embedded_runner_keeps_scheduler_and_role_future_poll_boundary_separate() {
-    let appkit = include_str!("../src/appkit.rs");
+    let appkit = appkit_sources();
 
     assert_present(
-        "src/appkit.rs",
-        appkit,
+        "src/appkit",
+        &appkit,
         &[
             "#[inline(never)]\nunsafe fn poll_embedded_stored_task",
             "let task_waker = embedded_task_waker();",
@@ -1023,8 +1085,8 @@ fn embedded_runner_keeps_scheduler_and_role_future_poll_boundary_separate() {
         ],
     );
     assert_absent(
-        "src/appkit.rs",
-        appkit,
+        "src/appkit",
+        &appkit,
         &[
             "let mut pinned = Pin::new_unchecked(&mut *future_ptr);",
             "let poll = poll_embedded_stored_task::<F, E>;",

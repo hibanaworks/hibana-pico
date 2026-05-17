@@ -34,6 +34,10 @@ services. There are no root `machine`, `port`, `projects`, `artifacts`, or
 `proof` modules/directories in the crate shape. Demo build packages live under
 `examples/`.
 
+`appkit` itself is also a curated facade. Its public path stays flat as
+`hibana_pico::appkit::*`; implementation modules under `src/appkit/` remain
+private and are re-exported only through the facade.
+
 ## Capsule API
 
 Users define a Capsule from raw `hibana::g` choreography:
@@ -288,8 +292,14 @@ cargo test --test host_architecture_boundaries
 cargo test --test host_capsule_api
 cargo test -p hibana-pico --features wasm-engine-core,wasip1-sys-fd-write --lib drive_wasi_guest_completes_import_only_through_endpoint_carrier
 bash ./scripts/check_wasip1_guest_builds.sh
+bash ./scripts/check_baker_section_budgets.sh
 bash ./scripts/check_plan_pico_gates.sh
 ```
+
+`check_baker_section_budgets.sh` builds every Baker RP2040 release artifact and
+gates `.text`, `.rodata`, `.data`, `.bss`, and flash-size totals with explicit
+numeric budgets. Size growth in the proof firmware is treated as a regression,
+not as an incidental build artifact.
 
 This workspace depends on the crates.io `hibana` release directly. During
 Hibana core development, use a temporary local patch only for pre-release
