@@ -11,10 +11,26 @@ pub struct WriteFile {
     fd: u32,
 }
 
+pub struct ReadFile {
+    fd: u32,
+}
+
 impl WriteFile {
     pub fn write_once_exact(&self, bytes: &[u8]) -> Result<()> {
         sys::write_once_exact(self.fd, bytes)
     }
+}
+
+impl ReadFile {
+    pub fn read_once(&self, out: &mut [u8]) -> Result<usize> {
+        sys::read_once(self.fd, out)
+    }
+}
+
+pub fn open_read(preopen_fd: u32, path: &str) -> Result<ReadFile> {
+    let path = normalize_choreofs_path(path)?;
+    let fd = sys::open_path(preopen_fd, path.as_bytes(), sys::FD_READ_RIGHT)?;
+    Ok(ReadFile { fd })
 }
 
 pub fn open_write(preopen_fd: u32, path: &str) -> Result<WriteFile> {

@@ -1,0 +1,20 @@
+[package]
+name = "pico-nod-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+exclude = ["plan.md"]
+
+[dependencies]
+hibana = { version = "0.6.1", default-features = false }
+hibana-pico = { path = "../.." }
+
+[features]
+default = []
+runtime-wasip1 = [
+    "hibana-pico/wasm-engine-core",
+    "hibana-pico/wasip1-sys-fd-read",
+    "hibana-pico/wasip1-sys-fd-write",
+    "hibana-pico/wasip1-sys-path-open",
+    "hibana-pico/wasip1-sys-proc-exit",
+]

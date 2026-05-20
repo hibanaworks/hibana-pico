@@ -1,0 +1,57 @@
+[package]
+name = "uno-q-heterogeneous"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+hibana = { version = "0.6.1", default-features = false }
+hibana-pico = { path = "../.." }
+
+[features]
+default = []
+runtime-wasip1 = [
+    "hibana-pico/wasm-engine-core",
+    "hibana-pico/wasip1-sys-fd-read",
+    "hibana-pico/wasip1-sys-fd-write",
+    "hibana-pico/wasip1-sys-path-open",
+    "hibana-pico/wasip1-sys-poll-oneoff",
+    "hibana-pico/wasip1-sys-proc-exit",
+]
+embed-wasip1-artifacts = []
+
+[[bin]]
+name = "host-loopback-proof"
+path = "src/bin/host_loopback_proof.rs"
+
+[[bin]]
+name = "uno-q-hardware-proof"
+path = "src/bin/uno_q_hardware_proof.rs"
+
+[[bin]]
+name = "uno-q-linux-kernel"
+path = "src/bin/uno_q_linux_kernel.rs"
+
+[[bin]]
+name = "uno-q-wasi-llm-cell"
+path = "src/bin/uno_q_wasi_llm_cell.rs"
+
+[[bin]]
+name = "uno-q-llm-sidecar"
+path = "src/bin/uno_q_llm_sidecar.rs"
+
+[[bin]]
+name = "ios-prompt-ingress"
+path = "src/bin/ios_prompt_ingress.rs"
+
+[[bin]]
+name = "uno-q-m33-led-kernel"
+path = "src/bin/uno_q_m33_led_kernel.rs"
+
+[[bin]]
+name = "uno-q-m33-native-kernel"
+path = "src/bin/uno_q_m33_native_kernel.rs"
+
+[[bin]]
+name = "challenger-net-kernel"
+path = "src/bin/challenger_net_kernel.rs"

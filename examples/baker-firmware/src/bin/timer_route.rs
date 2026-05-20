@@ -16,7 +16,6 @@ const LABEL_TIMER_EXPIRED: u8 = 121;
 const LABEL_RESPONSE_MESSAGE: u8 = 133;
 const LABEL_TIMER_EXPIRED_MESSAGE: u8 = 134;
 const LABEL_TIMER_ROUTE_DONE: u8 = 135;
-const LABEL_TIMER_FIRED_FACT: u8 = 136;
 const LABEL_TIMER_ROUTE_ACK: u8 = 137;
 const TIMER_ROUTE_POLICY: u16 = 56;
 
@@ -29,7 +28,6 @@ type TimerExpiredRoute =
 type ResponseReady = g::Msg<LABEL_RESPONSE_MESSAGE, u8>;
 type TimerExpired = g::Msg<LABEL_TIMER_EXPIRED_MESSAGE, u8>;
 type TimerRouteDone = g::Msg<LABEL_TIMER_ROUTE_DONE, u8>;
-type TimerFiredFact = g::Msg<LABEL_TIMER_FIRED_FACT, u8>;
 type TimerRouteAck = g::Msg<LABEL_TIMER_ROUTE_ACK, u8>;
 
 pub struct TimerRoute;
@@ -68,6 +66,9 @@ fn timer_route_resolver(context: ResolverContext) -> Result<RouteResolution, Res
         return Err(ResolverError::reject());
     }
 
+    if !baker_firmware::baker_timer_route_resolver_ready(100) {
+        return Ok(RouteResolution::Defer);
+    }
     Ok(RouteResolution::Arm(1))
 }
 
@@ -79,24 +80,21 @@ impl appkit::Capsule for TimerRoute {
 
     fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
         g::seq(
-            g::send::<g::Role<0>, g::Role<1>, TimerFiredFact, 1>(),
-            g::seq(
-                g::route(
-                    g::seq(
-                        g::send::<g::Role<1>, g::Role<1>, ResponseRoute, 1>()
-                            .policy::<TIMER_ROUTE_POLICY>(),
-                        g::send::<g::Role<1>, g::Role<0>, ResponseReady, 1>(),
-                    ),
-                    g::seq(
-                        g::send::<g::Role<1>, g::Role<1>, TimerExpiredRoute, 1>()
-                            .policy::<TIMER_ROUTE_POLICY>(),
-                        g::send::<g::Role<1>, g::Role<0>, TimerExpired, 1>(),
-                    ),
+            g::route(
+                g::seq(
+                    g::send::<g::Role<1>, g::Role<1>, ResponseRoute, 1>()
+                        .policy::<TIMER_ROUTE_POLICY>(),
+                    g::send::<g::Role<1>, g::Role<0>, ResponseReady, 1>(),
                 ),
                 g::seq(
-                    g::send::<g::Role<0>, g::Role<1>, TimerRouteDone, 1>(),
-                    g::send::<g::Role<1>, g::Role<0>, TimerRouteAck, 1>(),
+                    g::send::<g::Role<1>, g::Role<1>, TimerExpiredRoute, 1>()
+                        .policy::<TIMER_ROUTE_POLICY>(),
+                    g::send::<g::Role<1>, g::Role<0>, TimerExpired, 1>(),
                 ),
+            ),
+            g::seq(
+                g::send::<g::Role<0>, g::Role<1>, TimerRouteDone, 1>(),
+                g::send::<g::Role<1>, g::Role<0>, TimerRouteAck, 1>(),
             ),
         )
     }
@@ -130,34 +128,24 @@ impl appkit::Localside<TimerRoute> for TimerRouteLocal {
         async move {
             if ROLE == 1 {
                 baker_firmware::record_choreofs_engine_status(0x5452_010f);
-                let fact = ctx.endpoint().recv::<TimerFiredFact>().await?;
-                if fact != 1 {
-                    return Err(TimerRouteError::RuntimeViolation);
-                }
-                baker_firmware::record_choreofs_engine_status(0x5452_0110);
-                baker_firmware::record_choreofs_driver_trace(0x5452_0110);
 
                 let route = ctx.endpoint().flow::<TimerExpiredRoute>()?;
                 route.send(()).await?;
                 baker_firmware::record_choreofs_engine_status(0x5452_0111);
-                baker_firmware::record_choreofs_driver_trace(0x5452_0111);
 
                 let expired = ctx.endpoint().flow::<TimerExpired>()?;
                 expired.send(&1).await?;
                 baker_firmware::record_choreofs_engine_status(0x5452_0112);
-                baker_firmware::record_choreofs_driver_trace(0x5452_0112);
 
                 let done = ctx.endpoint().recv::<TimerRouteDone>().await?;
                 if done != 1 {
                     return Err(TimerRouteError::RuntimeViolation);
                 }
                 baker_firmware::record_choreofs_engine_status(0x5452_0113);
-                baker_firmware::record_choreofs_driver_trace(0x5452_0113);
 
                 let ack = ctx.endpoint().flow::<TimerRouteAck>()?;
                 ack.send(&1).await?;
                 baker_firmware::record_choreofs_engine_status(0x5452_0114);
-                baker_firmware::record_choreofs_driver_trace(0x5452_0114);
 
                 baker_firmware::mark_runtime_ready();
                 return ctx.pending().await;
@@ -172,12 +160,7 @@ impl appkit::Localside<TimerRoute> for TimerRouteLocal {
         async move {
             if ROLE == 0 {
                 baker_firmware::record_choreofs_driver_trace(0x5452_000f);
-                baker_firmware::baker_poll_delay(100);
                 baker_firmware::record_choreofs_driver_trace(0x5452_0010);
-
-                let fact = ctx.endpoint().flow::<TimerFiredFact>()?;
-                fact.send(&1).await?;
-                baker_firmware::record_choreofs_driver_trace(0x5452_0011);
 
                 let branch = ctx.endpoint().offer().await?;
                 baker_firmware::record_choreofs_driver_trace(

@@ -30,10 +30,13 @@ expected_wasms=(
   wasip1-stdin.wasm
   wasip1-stdout.wasm
   wasip1-timer.wasm
+  uno-q-llm-face-cell.wasm
   wasip1-trap.wasm
+  wasip1-xbot-reply-normalizer.wasm
 )
 
-rm -rf "$artifact_dir"
+rm -rf "$target_dir"
+mkdir -p "$target_dir"
 
 RUSTFLAGS="$wasip1_rustflags" \
 CARGO_TARGET_DIR="$target_dir" \
@@ -47,6 +50,22 @@ RUSTFLAGS="$wasip1_rustflags" \
 CARGO_TARGET_DIR="$target_dir" \
   cargo build \
     --manifest-path examples/baker-firmware/wasip1/guest/Cargo.toml \
+    --target wasm32-wasip1 \
+    --release \
+    --bins
+
+RUSTFLAGS="$wasip1_rustflags" \
+CARGO_TARGET_DIR="$target_dir" \
+  cargo build \
+    --manifest-path examples/xbot/wasip1/guest/Cargo.toml \
+    --target wasm32-wasip1 \
+    --release \
+    --bins
+
+RUSTFLAGS="$wasip1_rustflags" \
+CARGO_TARGET_DIR="$target_dir" \
+  cargo build \
+    --manifest-path examples/uno-q-heterogeneous/wasip1/guest/Cargo.toml \
     --target wasm32-wasip1 \
     --release \
     --bins

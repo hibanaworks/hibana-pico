@@ -3,23 +3,28 @@ name = "hibana-pico"
 version = "0.1.0"
 edition = "2024"
 publish = false
-exclude = ["/plan.md"]
+exclude = ["/plan.md", "/examples/**/plan.md"]
 
 [workspace]
 members = [
     ".",
     "examples/baker-firmware",
     "examples/heterogeneous-split-example",
+    "examples/uno-q-heterogeneous",
+    "examples/pico-nod",
+    "examples/xbot",
 ]
 exclude = [
     "examples/baker-firmware/wasip1/guest",
+    "examples/uno-q-heterogeneous/wasip1/guest",
+    "examples/xbot/wasip1/guest",
     "guest/hibana-wasip1-guest",
     "guest/wasip1-programs",
 ]
 resolver = "3"
 
 [dependencies]
-hibana = { version = "0.6.0", default-features = false }
+hibana = { version = "0.6.1", default-features = false }
 
 [features]
 default = []

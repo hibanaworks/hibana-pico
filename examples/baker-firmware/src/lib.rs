@@ -265,7 +265,7 @@ mod rp2040_sio {
     }
 
     #[cfg(all(target_arch = "arm", target_os = "none"))]
-    const SIO_DEMUX_LANES: usize = 16;
+    const SIO_DEMUX_LANES: usize = 2;
 
     #[cfg(all(target_arch = "arm", target_os = "none"))]
     static mut SIO_DEMUX_CORE0: [BufferedFrame; SIO_DEMUX_LANES] =
@@ -550,6 +550,44 @@ mod rp2040_sio {
             assert_eq!(decoded.lane, 3);
             assert_eq!(&decoded.bytes[..decoded.len], b"abcd");
             assert!(!accumulator.is_partial());
+        }
+
+        #[test]
+        fn delivered_sio_payload_emits_route_hint_once() {
+            let transport = SioTransport::new();
+            let label = hibana::integration::transport::FrameLabel::new(7);
+            let mut rx = SioRx::new(0, 42, 1);
+            rx.frame_label = Some(label);
+            rx.hint_frame_label.set(Some(label));
+            rx.delivered = true;
+
+            assert_eq!(
+                <SioTransport as hibana::integration::Transport>::recv_frame_hint(&transport, &rx,),
+                Some(label)
+            );
+            assert_eq!(
+                <SioTransport as hibana::integration::Transport>::recv_frame_hint(&transport, &rx,),
+                None
+            );
+        }
+
+        #[test]
+        fn staged_sio_payload_emits_route_hint_before_delivery() {
+            let transport = SioTransport::new();
+            let label = hibana::integration::transport::FrameLabel::new(7);
+            let mut rx = SioRx::new(0, 42, 1);
+            rx.frame_label = Some(label);
+            rx.hint_frame_label.set(Some(label));
+            rx.delivered = false;
+
+            assert_eq!(
+                <SioTransport as hibana::integration::Transport>::recv_frame_hint(&transport, &rx,),
+                Some(label)
+            );
+            assert_eq!(
+                <SioTransport as hibana::integration::Transport>::recv_frame_hint(&transport, &rx,),
+                None
+            );
         }
     }
 
@@ -1129,6 +1167,8 @@ const BAKER_TIMER_TICKS_PER_MS: u64 = 1_000;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 static mut BAKER_TIMER_ALARM0_READY: u32 = 0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+static mut BAKER_TIMER_ROUTE_ARMED: u32 = 0;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 unsafe extern "C" {
@@ -1551,6 +1591,49 @@ where
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 pub fn baker_poll_delay(timeout_ms: u64) {
+    baker_timer_route_arm(timeout_ms);
+    while !baker_timer_route_ready() {
+        unsafe {
+            asm!("wfi", options(nomem, nostack, preserves_flags));
+        }
+    }
+    baker_timer_route_finish();
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub fn baker_poll_delay(timeout_ms: u64) {
+    core::hint::black_box(timeout_ms);
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn baker_timer_route_resolver_ready(timeout_ms: u64) -> bool {
+    unsafe {
+        if read_volatile(core::ptr::addr_of!(BAKER_TIMER_ROUTE_ARMED)) == 0 {
+            write_volatile(core::ptr::addr_of_mut!(BAKER_TIMER_ROUTE_ARMED), 1);
+            baker_timer_route_arm(timeout_ms);
+            return false;
+        }
+    }
+
+    if !baker_timer_route_ready() {
+        return false;
+    }
+
+    baker_timer_route_finish();
+    unsafe {
+        write_volatile(core::ptr::addr_of_mut!(BAKER_TIMER_ROUTE_ARMED), 0);
+    }
+    true
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub fn baker_timer_route_resolver_ready(timeout_ms: u64) -> bool {
+    core::hint::black_box(timeout_ms);
+    true
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn baker_timer_route_arm(timeout_ms: u64) {
     let delay_ticks = core::cmp::min(
         timeout_ms.saturating_mul(BAKER_TIMER_TICKS_PER_MS),
         u32::MAX as u64,
@@ -1566,17 +1649,20 @@ pub fn baker_poll_delay(timeout_ms: u64) {
         write_volatile(NVIC_ISER, NVIC_TIMER_IRQ0_BIT);
         write_volatile(TIMER_ALARM0, alarm);
         asm!("cpsie i", options(nomem, nostack, preserves_flags));
-        while read_volatile(core::ptr::addr_of!(BAKER_TIMER_ALARM0_READY)) == 0 {
-            asm!("wfi", options(nomem, nostack, preserves_flags));
-        }
-        write_volatile(TIMER_INTE, read_volatile(TIMER_INTE) & !TIMER_ALARM0_BIT);
-        write_volatile(TIMER_INTR, TIMER_ALARM0_BIT);
     }
 }
 
-#[cfg(not(all(target_arch = "arm", target_os = "none")))]
-pub fn baker_poll_delay(timeout_ms: u64) {
-    core::hint::black_box(timeout_ms);
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn baker_timer_route_ready() -> bool {
+    unsafe { read_volatile(core::ptr::addr_of!(BAKER_TIMER_ALARM0_READY)) != 0 }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn baker_timer_route_finish() {
+    unsafe {
+        write_volatile(TIMER_INTE, read_volatile(TIMER_INTE) & !TIMER_ALARM0_BIT);
+        write_volatile(TIMER_INTR, TIMER_ALARM0_BIT);
+    }
 }
 
 fn park() -> ! {

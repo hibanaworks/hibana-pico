@@ -125,16 +125,35 @@ symbol_addr() {
   printf '0x%s\n' "$value"
 }
 
+probe_read() {
+  local width="$1"
+  local addr="$2"
+  local len="$3"
+  local attempt=0
+  local output
+  while :; do
+    if output="$(probe-rs read --chip RP2040 --non-interactive "$width" "$addr" "$len" 2>&1)"; then
+      printf '%s\n' "$output"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    if (( attempt >= 5 )); then
+      printf '%s\n' "$output" >&2
+      return 1
+    fi
+    sleep 0.25
+  done
+}
+
 read_word() {
   local addr="$1"
-  probe-rs read --chip RP2040 --non-interactive b32 "$addr" 1 \
-    | awk 'NF { value=$NF } END { print tolower(value) }'
+  probe_read b32 "$addr" 1 | awk 'NF { value=$NF } END { print tolower(value) }'
 }
 
 read_bytes_hex() {
   local addr="$1"
   local len="$2"
-  probe-rs read --chip RP2040 --non-interactive b8 "$addr" "$len" \
+  probe_read b8 "$addr" "$len" \
     | awk '
       {
         for (i = 1; i <= NF; i++) {
@@ -149,8 +168,7 @@ read_bytes_hex() {
 
 read_mmio_word() {
   local addr="$1"
-  probe-rs read --chip RP2040 --non-interactive b32 "$addr" 1 \
-    | awk 'NF { value=$NF } END { print tolower(value) }'
+  probe_read b32 "$addr" 1 | awk 'NF { value=$NF } END { print tolower(value) }'
 }
 
 result_addr="$(symbol_addr HIBANA_DEMO_RESULT)"

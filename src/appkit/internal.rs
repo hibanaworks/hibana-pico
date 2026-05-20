@@ -26,7 +26,7 @@ use core::future::Future;
 use core::cell::UnsafeCell;
 
 use crate::choreography::protocol::{
-    EngineReq, EngineRet, LABEL_WASI_ARGS_GET, LABEL_WASI_ARGS_GET_RET, LABEL_WASI_ARGS_SIZES_GET,
+    LABEL_WASI_ARGS_GET, LABEL_WASI_ARGS_GET_RET, LABEL_WASI_ARGS_SIZES_GET,
     LABEL_WASI_ARGS_SIZES_GET_RET, LABEL_WASI_CLOCK_RES_GET, LABEL_WASI_CLOCK_RES_GET_RET,
     LABEL_WASI_CLOCK_TIME_GET, LABEL_WASI_CLOCK_TIME_GET_RET, LABEL_WASI_ENVIRON_GET,
     LABEL_WASI_ENVIRON_GET_RET, LABEL_WASI_ENVIRON_SIZES_GET, LABEL_WASI_ENVIRON_SIZES_GET_RET,
@@ -41,6 +41,9 @@ use crate::choreography::protocol::{
     LABEL_WASIP1_STDERR_RET, LABEL_WASIP1_STDIN, LABEL_WASIP1_STDIN_RET, LABEL_WASIP1_STDOUT,
     LABEL_WASIP1_STDOUT_RET,
 };
+
+#[cfg(feature = "wasm-engine-core")]
+use crate::choreography::protocol::{EngineReq, EngineRet};
 
 #[cfg(feature = "wasm-engine-core")]
 use crate::choreography::protocol::{
@@ -406,11 +409,6 @@ impl Drop for WasiGuestLease<'_> {
 #[cfg(all(not(test), target_os = "none"))]
 #[inline(always)]
 fn embedded_wait_for_event() {
-    #[cfg(target_arch = "arm")]
-    unsafe {
-        core::arch::asm!("wfe", options(nomem, nostack, preserves_flags));
-    }
-    #[cfg(not(target_arch = "arm"))]
     core::hint::spin_loop();
 }
 
@@ -1378,6 +1376,31 @@ fn wasi_completion_label_for_engine_req_label(label: u8) -> Option<u8> {
     }
 }
 
+fn is_engine_ret_label(label: u8) -> bool {
+    matches!(
+        label,
+        LABEL_WASIP1_STDOUT_RET
+            | LABEL_WASIP1_STDERR_RET
+            | LABEL_WASIP1_STDIN_RET
+            | LABEL_WASIP1_CLOCK_NOW_RET
+            | LABEL_WASIP1_RANDOM_SEED_RET
+            | LABEL_WASI_FD_WRITE_RET
+            | LABEL_WASI_FD_READ_RET
+            | LABEL_WASI_FD_FDSTAT_GET_RET
+            | LABEL_WASI_FD_CLOSE_RET
+            | LABEL_WASI_CLOCK_RES_GET_RET
+            | LABEL_WASI_CLOCK_TIME_GET_RET
+            | LABEL_WASI_POLL_ONEOFF_RET
+            | LABEL_WASI_RANDOM_GET_RET
+            | LABEL_WASI_ARGS_SIZES_GET_RET
+            | LABEL_WASI_ARGS_GET_RET
+            | LABEL_WASI_ENVIRON_SIZES_GET_RET
+            | LABEL_WASI_ENVIRON_GET_RET
+            | LABEL_WASI_PATH_OPEN_RET
+            | LABEL_WASI_FD_READDIR_RET
+    )
+}
+
 impl ArtifactEvidence for WasiImage<'_> {
     fn byte_len(&self) -> usize {
         self.bytes.len()
@@ -1738,23 +1761,31 @@ impl ProjectionCapsVisitor {
         false
     }
 
-    fn wasi_completion_pair_count(&self) -> u8 {
+    fn finalize_wasi_imports(&mut self, require_completions: bool) {
         let mut count = 0u8;
         let mut idx = 0usize;
         while idx < self.engine_req_label_count as usize {
             let label = self.engine_req_labels[idx];
-            if wasi_import_for_engine_req_label(label).is_some() {
+            if let Some(import) = wasi_import_for_engine_req_label(label) {
                 if let Some(reply_label) = wasi_completion_label_for_engine_req_label(label) {
-                    assert!(
-                        self.has_engine_ret_label(reply_label),
-                        "WASI P1 import request label must have a projected typed EngineRet completion"
-                    );
-                    count = count.saturating_add(1);
+                    let has_completion = self.has_engine_ret_label(reply_label);
+                    if require_completions {
+                        assert!(
+                            has_completion,
+                            "WASI P1 import request label must have a projected numeric EngineRet completion"
+                        );
+                    }
+                    if has_completion {
+                        self.caps.wasi_imports = self.caps.wasi_imports.union(import);
+                        count = count.saturating_add(1);
+                    }
+                } else {
+                    self.caps.wasi_imports = self.caps.wasi_imports.union(import);
                 }
             }
             idx += 1;
         }
-        count
+        self.caps.wasi_completion_pair_count = count;
     }
 }
 
@@ -1793,6 +1824,45 @@ type ScheduledTaskPoll<E> = unsafe fn(*mut u8, &mut Context<'_>) -> Poll<RoleRes
 
 #[cfg(any(test, not(target_os = "none")))]
 type ScheduledTaskDrop = unsafe fn(*mut u8);
+
+#[cfg(all(not(test), not(target_os = "none")))]
+struct HostMonotonicClock {
+    start: std::time::Instant,
+}
+
+#[cfg(all(not(test), not(target_os = "none")))]
+impl HostMonotonicClock {
+    fn new() -> Self {
+        Self {
+            start: std::time::Instant::now(),
+        }
+    }
+}
+
+#[cfg(all(not(test), not(target_os = "none")))]
+impl hibana::integration::runtime::Clock for HostMonotonicClock {
+    fn now32(&self) -> u32 {
+        let elapsed = self.start.elapsed().as_millis();
+        elapsed.min(u128::from(u32::MAX)) as u32
+    }
+}
+
+#[cfg(all(not(test), not(target_os = "none")))]
+type AppkitAttachClock = HostMonotonicClock;
+
+#[cfg(any(test, target_os = "none"))]
+type AppkitAttachClock = hibana::integration::runtime::CounterClock;
+
+fn new_appkit_attach_clock() -> AppkitAttachClock {
+    #[cfg(all(not(test), not(target_os = "none")))]
+    {
+        HostMonotonicClock::new()
+    }
+    #[cfg(any(test, target_os = "none"))]
+    {
+        hibana::integration::runtime::CounterClock::new()
+    }
+}
 
 #[cfg(any(test, not(target_os = "none")))]
 unsafe fn poll_scheduled_task<F, E>(ptr: *mut u8, cx: &mut Context<'_>) -> Poll<RoleResult<E>>
@@ -2152,7 +2222,7 @@ where
         ) {
             Ok(endpoint) => endpoint,
             #[cfg(any(test, not(target_os = "none")))]
-            Err(error) => panic!("projected role must attach through SessionKit: {error:?}"),
+            Err(error) => panic!("projected role {ROLE} must attach through SessionKit: {error:?}"),
             #[cfg(all(not(test), target_os = "none"))]
             Err(error) => panic_appkit_attach_role_error::<ROLE>(error),
         };
@@ -2335,24 +2405,24 @@ where
     let attach_tap = &mut tap_buf;
     #[cfg(any(test, not(target_os = "none")))]
     let attach_slab = &mut slab_storage[..];
-    let clock = hibana::integration::runtime::CounterClock::new();
+    let clock = new_appkit_attach_clock();
     let carrier = I::carrier();
     let (kit_storage, rendezvous_slab) = carve_session_kit_storage::<
         I::Carrier<'_>,
         C::Universe,
-        hibana::integration::runtime::CounterClock,
+        AppkitAttachClock,
         APPKIT_SESSION_RV_SLOTS,
     >(attach_slab);
     let kit = hibana::integration::SessionKit::<
         I::Carrier<'_>,
         C::Universe,
-        hibana::integration::runtime::CounterClock,
+        AppkitAttachClock,
         APPKIT_SESSION_RV_SLOTS,
     >::init_in_place(kit_storage, &clock);
     let config = hibana::integration::runtime::Config::from_resources(
         attach_tap,
         rendezvous_slab,
-        hibana::integration::runtime::CounterClock::new(),
+        new_appkit_attach_clock(),
     );
     let rendezvous = kit
         .add_rendezvous_from_config(config, carrier)
@@ -2363,6 +2433,8 @@ where
         "appkit registered invalid rendezvous id"
     );
     let session = hibana::integration::ids::SessionId::new(endpoint_carrier.session_id());
+    #[cfg(any(test, not(target_os = "none")))]
+    let mut tasks = ScheduledTasks::new();
     {
         let mut resolver_registry = AttachResolverRegistry::<
             '_,
@@ -2372,7 +2444,7 @@ where
             _,
             I::Carrier<'_>,
             C::Universe,
-            hibana::integration::runtime::CounterClock,
+            AppkitAttachClock,
             APPKIT_SESSION_RV_SLOTS,
         > {
             kit: &kit,
@@ -2388,8 +2460,6 @@ where
         rendezvous_raw,
         "appkit rendezvous id changed during resolver registration"
     );
-    #[cfg(any(test, not(target_os = "none")))]
-    let mut tasks = ScheduledTasks::new();
     let summary = {
         assert_eq!(
             rendezvous.raw(),
@@ -2457,27 +2527,18 @@ impl hibana::integration::program::ProjectionMetadataVisitor for ProjectionCapsV
         {
             self.push_loop_break_eff(spec.eff_index);
         }
-    }
 
-    fn visit_message(&mut self, spec: hibana::integration::program::ProjectionMessageSpec) {
-        let engine_req = hibana::integration::program::ProjectionTypeFingerprint::of::<EngineReq>();
-        let engine_ret = hibana::integration::program::ProjectionTypeFingerprint::of::<EngineRet>();
-        if spec.payload_type == engine_req {
-            self.push_engine_req_label(spec.label);
-        }
-        if spec.payload_type == engine_ret {
+        let engine_req_import = wasi_import_for_engine_req_label(spec.label);
+        if is_engine_ret_label(spec.label) {
             self.push_engine_ret_label(spec.label);
         }
-        if spec.payload_type == engine_req {
-            let Some(import) = wasi_import_for_engine_req_label(spec.label) else {
-                return;
-            };
+        if engine_req_import.is_some() {
             let include_import = match self.import_roles {
                 Some(roles) => roles.contains(spec.from),
                 None => true,
             };
             if include_import {
-                self.caps.wasi_imports = self.caps.wasi_imports.union(import);
+                self.push_engine_req_label(spec.label);
                 if self.has_loop_continue_head_eff(spec.eff_index) {
                     self.push_wasi_loop_continue_head_label(spec.label);
                 }
@@ -2508,7 +2569,7 @@ where
 {
     let mut visitor = ProjectionCapsVisitor::new();
     program.visit_projection_metadata(&mut visitor);
-    visitor.caps.wasi_completion_pair_count = visitor.wasi_completion_pair_count();
+    visitor.finalize_wasi_imports(false);
     visitor.caps
 }
 
@@ -2521,7 +2582,7 @@ where
 {
     let mut visitor = ProjectionCapsVisitor::for_import_roles(requested_roles);
     program.visit_projection_metadata(&mut visitor);
-    visitor.caps.wasi_completion_pair_count = visitor.wasi_completion_pair_count();
+    visitor.finalize_wasi_imports(true);
     visitor.caps
 }
 
@@ -2588,6 +2649,29 @@ pub struct ImageManifest {
     pub has_control: bool,
 }
 
+#[cfg(not(target_os = "none"))]
+#[inline(always)]
+fn host_metadata_type_fingerprint<T: ?Sized>() -> [u64; 2] {
+    let name = core::any::type_name::<T>().as_bytes();
+    let mut hi = 0xcbf2_9ce4_8422_2325u64;
+    let mut lo = 0x1000_0000_01b3_5a5au64;
+    let mut idx = 0usize;
+    while idx < name.len() {
+        let byte = name[idx] as u64;
+        hi ^= byte;
+        hi = hi.wrapping_mul(0x0000_0100_0000_01b3);
+        lo = lo.rotate_left(5) ^ byte.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        idx += 1;
+    }
+    [hi, lo]
+}
+
+#[cfg(target_os = "none")]
+#[inline(always)]
+fn host_metadata_type_fingerprint<T: ?Sized>() -> [u64; 2] {
+    [0; 2]
+}
+
 impl ImageManifest {
     fn new<C>(
         image_id: ImageId,
@@ -2600,12 +2684,9 @@ impl ImageManifest {
     where
         C: Capsule,
     {
-        let capsule_fingerprint =
-            hibana::integration::program::ProjectionTypeFingerprint::of::<C>().words;
-        let placement_fingerprint =
-            hibana::integration::program::ProjectionTypeFingerprint::of::<C::Placement>().words;
-        let label_universe_fingerprint =
-            hibana::integration::program::ProjectionTypeFingerprint::of::<C::Universe>().words;
+        let capsule_fingerprint = host_metadata_type_fingerprint::<C>();
+        let placement_fingerprint = host_metadata_type_fingerprint::<C::Placement>();
+        let label_universe_fingerprint = host_metadata_type_fingerprint::<C::Universe>();
         Self {
             capsule_fingerprint,
             placement_fingerprint,
@@ -2642,9 +2723,6 @@ impl ImageManifest {
     pub fn can_attach_peer(&self, peer: &Self) -> bool {
         self.logical_image_id != peer.logical_image_id
             && self.choreography_fingerprint == peer.choreography_fingerprint
-            && self.capsule_fingerprint == peer.capsule_fingerprint
-            && self.placement_fingerprint == peer.placement_fingerprint
-            && self.label_universe_fingerprint == peer.label_universe_fingerprint
             && self.choreography_session_id == peer.choreography_session_id
             && self.carrier == peer.carrier
             && self.projected_role_set == peer.projected_role_set
@@ -4453,7 +4531,6 @@ mod tests {
     const TEST_RESPONSE_PAYLOAD_LABEL: u8 = 133;
     const TEST_TIMER_EXPIRED_PAYLOAD_LABEL: u8 = 134;
     const TEST_TIMER_ROUTE_DONE_LABEL: u8 = 135;
-    const TEST_TIMER_FIRED_FACT_LABEL: u8 = 136;
     const TEST_TIMER_ROUTE_ACK_LABEL: u8 = 137;
 
     type TestResponseRouteKind = RouteControl<TEST_RESPONSE_READY_CONTROL_LABEL, 0>;
@@ -4471,7 +4548,6 @@ mod tests {
     type TestResponseReady = g::Msg<TEST_RESPONSE_PAYLOAD_LABEL, u8>;
     type TestTimerExpired = g::Msg<TEST_TIMER_EXPIRED_PAYLOAD_LABEL, u8>;
     type TestTimerRouteDone = g::Msg<TEST_TIMER_ROUTE_DONE_LABEL, u8>;
-    type TestTimerFiredFact = g::Msg<TEST_TIMER_FIRED_FACT_LABEL, u8>;
     type TestTimerRouteAck = g::Msg<TEST_TIMER_ROUTE_ACK_LABEL, u8>;
 
     #[derive(Clone, Copy, Debug)]
@@ -5248,24 +5324,21 @@ mod tests {
 
         fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
             g::seq(
-                g::send::<g::Role<0>, g::Role<1>, TestTimerFiredFact, 1>(),
-                g::seq(
-                    g::route(
-                        g::seq(
-                            g::send::<g::Role<1>, g::Role<1>, TestResponseRoute, 1>()
-                                .policy::<TEST_TIMER_ROUTE_POLICY>(),
-                            g::send::<g::Role<1>, g::Role<0>, TestResponseReady, 1>(),
-                        ),
-                        g::seq(
-                            g::send::<g::Role<1>, g::Role<1>, TestTimerExpiredRoute, 1>()
-                                .policy::<TEST_TIMER_ROUTE_POLICY>(),
-                            g::send::<g::Role<1>, g::Role<0>, TestTimerExpired, 1>(),
-                        ),
+                g::route(
+                    g::seq(
+                        g::send::<g::Role<1>, g::Role<1>, TestResponseRoute, 1>()
+                            .policy::<TEST_TIMER_ROUTE_POLICY>(),
+                        g::send::<g::Role<1>, g::Role<0>, TestResponseReady, 1>(),
                     ),
                     g::seq(
-                        g::send::<g::Role<0>, g::Role<1>, TestTimerRouteDone, 1>(),
-                        g::send::<g::Role<1>, g::Role<0>, TestTimerRouteAck, 1>(),
+                        g::send::<g::Role<1>, g::Role<1>, TestTimerExpiredRoute, 1>()
+                            .policy::<TEST_TIMER_ROUTE_POLICY>(),
+                        g::send::<g::Role<1>, g::Role<0>, TestTimerExpired, 1>(),
                     ),
+                ),
+                g::seq(
+                    g::send::<g::Role<0>, g::Role<1>, TestTimerRouteDone, 1>(),
+                    g::send::<g::Role<1>, g::Role<0>, TestTimerRouteAck, 1>(),
                 ),
             )
         }
@@ -7148,17 +7221,6 @@ mod tests {
             .expect("enter embedded-sized engine timer route role");
 
         poll_ready(
-            driver
-                .flow::<TestTimerFiredFact>()
-                .expect("driver opens timer fact flow")
-                .send(&1),
-        )
-        .expect("driver sends timer fact");
-        let fact =
-            poll_ready(engine.recv::<TestTimerFiredFact>()).expect("engine receives timer fact");
-        assert_eq!(fact, 1);
-
-        poll_ready(
             engine
                 .flow::<TestTimerExpiredRoute>()
                 .expect("engine opens timer-expired route control")
@@ -7270,19 +7332,6 @@ mod tests {
             .expect("enter pending engine timer route role");
 
         poll_ready(
-            driver
-                .flow::<TestTimerFiredFact>()
-                .expect("driver opens pending timer fact flow")
-                .send(&1),
-        )
-        .expect("driver sends pending timer fact");
-        assert_eq!(
-            poll_ready(engine.recv::<TestTimerFiredFact>())
-                .expect("engine receives pending timer fact"),
-            1
-        );
-
-        poll_ready(
             engine
                 .flow::<TestTimerExpiredRoute>()
                 .expect("engine opens pending timer-expired route control")
@@ -7336,6 +7385,118 @@ mod tests {
             poll_ready(driver.recv::<TestTimerRouteAck>())
                 .expect("driver receives pending timer route ack"),
             1
+        );
+    }
+
+    #[test]
+    fn embedded_sized_split_timer_route_offer_progresses_after_pending() {
+        let clock0 = CounterClock::new();
+        let clock1 = CounterClock::new();
+        let mut tap0 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap1 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut slab0 = Box::new([0u8; 96 * 1024]);
+        let mut slab1 = Box::new([0u8; 112 * 1024]);
+        let (kit0_storage, rendezvous0_slab) = carve_session_kit_storage::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            APPKIT_SESSION_RV_SLOTS,
+        >(&mut slab0[..]);
+        let (kit1_storage, rendezvous1_slab) = carve_session_kit_storage::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            APPKIT_SESSION_RV_SLOTS,
+        >(&mut slab1[..]);
+        let kit0 = hibana::integration::SessionKit::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            APPKIT_SESSION_RV_SLOTS,
+        >::init_in_place(kit0_storage, &clock0);
+        let kit1 = hibana::integration::SessionKit::<
+            AttachedQueueTestCarrier,
+            DefaultLabelUniverse,
+            CounterClock,
+            APPKIT_SESSION_RV_SLOTS,
+        >::init_in_place(kit1_storage, &clock1);
+        let carrier = AttachedQueueTestCarrier::new();
+        let inspector = carrier.clone();
+        let rendezvous0 = kit0
+            .add_rendezvous_from_config(
+                Config::from_resources(&mut tap0, rendezvous0_slab, CounterClock::new()),
+                carrier.clone(),
+            )
+            .expect("register pending-offer driver rendezvous");
+        let rendezvous1 = kit1
+            .add_rendezvous_from_config(
+                Config::from_resources(&mut tap1, rendezvous1_slab, CounterClock::new()),
+                carrier,
+            )
+            .expect("register pending-offer engine rendezvous");
+        let program = <TimerRouteAttachCapsule as Capsule>::choreography();
+        let role0 = program.project::<0>();
+        let role1 = program.project::<1>();
+        kit0.set_resolver::<TEST_TIMER_ROUTE_POLICY, 0>(
+            rendezvous0,
+            &role0,
+            ResolverRef::route_fn(test_timer_route_resolver),
+        )
+        .expect("register pending-offer driver timer route resolver");
+        kit1.set_resolver::<TEST_TIMER_ROUTE_POLICY, 1>(
+            rendezvous1,
+            &role1,
+            ResolverRef::route_fn(test_timer_route_resolver),
+        )
+        .expect("register pending-offer engine timer route resolver");
+        let session = SessionId::new(0x5a);
+        let mut driver = kit0
+            .enter::<0, _>(rendezvous0, session, &role0, NoBinding)
+            .expect("enter pending-offer driver timer route role");
+        let mut engine = kit1
+            .enter::<1, _>(rendezvous1, session, &role1, NoBinding)
+            .expect("enter pending-offer engine timer route role");
+
+        let offer = driver.offer();
+        let mut offer = core::pin::pin!(offer);
+        poll_once_pending(offer.as_mut());
+
+        poll_ready(
+            engine
+                .flow::<TestTimerExpiredRoute>()
+                .expect("engine opens pending-offer route control")
+                .send(()),
+        )
+        .expect("engine sends pending-offer route control");
+        poll_ready(
+            engine
+                .flow::<TestTimerExpired>()
+                .expect("engine opens pending-offer payload flow")
+                .send(&1),
+        )
+        .expect("engine sends pending-offer payload");
+
+        let branch = poll_pinned_ready(offer.as_mut(), 1)
+            .expect("driver pending offer must complete after peer route payload")
+            .expect("driver offers pending route branch");
+        assert_eq!(branch.label(), TEST_TIMER_EXPIRED_PAYLOAD_LABEL);
+        assert_eq!(
+            poll_ready(branch.decode::<TestTimerExpired>())
+                .expect("driver decodes pending-offer timer-expired payload"),
+            1
+        );
+        let (recv_count, hint_count, requeue_count) = inspector.counters();
+        assert_eq!(
+            recv_count, 1,
+            "pending timer-route offer must stage the received payload"
+        );
+        assert!(
+            hint_count >= 1,
+            "pending timer-route offer must consume the fresh frame hint staged by poll_recv"
+        );
+        assert_eq!(
+            requeue_count, 0,
+            "pending timer-route offer must not requeue the selected payload"
         );
     }
 }

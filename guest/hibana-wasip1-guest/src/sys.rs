@@ -8,10 +8,17 @@ const SUBSCRIPTION_EVENTTYPE_OFFSET: usize = 8;
 const SUBSCRIPTION_CLOCK_TIMEOUT_OFFSET: usize = 24;
 
 pub(crate) const FD_WRITE_RIGHT: u64 = 1 << 6;
+pub(crate) const FD_READ_RIGHT: u64 = 1 << 1;
 
 #[repr(C)]
 struct Ciovec {
     buf: *const u8,
+    buf_len: usize,
+}
+
+#[repr(C)]
+struct Iovec {
+    buf: *mut u8,
     buf_len: usize,
 }
 
@@ -28,6 +35,7 @@ unsafe extern "C" {
         fdflags: u32,
         opened_fd: *mut u32,
     ) -> u16;
+    fn fd_read(fd: u32, iovs: *mut Iovec, iovs_len: usize, nread: *mut usize) -> u16;
     fn fd_write(fd: u32, iovs: *const Ciovec, iovs_len: usize, nwritten: *mut usize) -> u16;
     fn poll_oneoff(
         input: *const u8,
@@ -54,6 +62,17 @@ pub(crate) fn open_path(fd: u32, path: &[u8], rights_base: u64) -> Result<u32> {
     };
     errno_result(Syscall::PathOpen, errno)?;
     Ok(opened_fd)
+}
+
+pub(crate) fn read_once(fd: u32, out: &mut [u8]) -> Result<usize> {
+    let mut iov = [Iovec {
+        buf: out.as_mut_ptr(),
+        buf_len: out.len(),
+    }];
+    let mut read = 0usize;
+    let errno = unsafe { fd_read(fd, iov.as_mut_ptr(), iov.len(), &mut read) };
+    errno_result(Syscall::FdRead, errno)?;
+    Ok(read)
 }
 
 pub(crate) fn write_once_exact(fd: u32, bytes: &[u8]) -> Result<()> {

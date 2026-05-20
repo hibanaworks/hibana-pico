@@ -63,10 +63,16 @@ fn public_root_is_the_capsule_surface_only() {
 fn gate_scans_current_guest_layout_and_ignores_nested_targets() {
     let ignore = include_str!("../.gitignore");
     let gate = include_str!("../scripts/check_plan_pico_gates.sh");
+    let pico_nod_app_gate = include_str!("../scripts/check_pico_nod_app.sh");
+    let pico_nod_release_gate = include_str!("../scripts/check_pico_nod_release_readiness.sh");
     let wasip1_gate = include_str!("../scripts/check_wasip1_guest_builds.sh");
     let section_gate = include_str!("../scripts/check_baker_section_budgets.sh");
 
-    assert_present(".gitignore", ignore, &["target/"]);
+    assert_present(
+        ".gitignore",
+        ignore,
+        &["target/", "/examples/pico-nod/apple/PicoNodApp/.build/"],
+    );
     assert_absent(
         ".gitignore",
         ignore,
@@ -79,6 +85,11 @@ fn gate_scans_current_guest_layout_and_ignores_nested_targets() {
             "src examples guest Cargo.toml",
             "src tests examples guest",
             "bash ./scripts/check_baker_section_budgets.sh",
+            "bash ./scripts/check_pico_nod_app.sh",
+            "cargo check --workspace --exclude uno-q-heterogeneous --all-targets",
+            "--glob '!examples/uno-q-heterogeneous/**'",
+            "cargo test -p pico-nod-example",
+            "cargo test -p xbot-example",
             "git ls-files --others --exclude-standard | rg -n '/target/'",
             "cargo check -p heterogeneous-split-example --target thumbv6m-none-eabi --bin rp2040-io",
             "(^|[(,])\\s*_[A-Za-z0-9_]+\\s*:",
@@ -86,13 +97,48 @@ fn gate_scans_current_guest_layout_and_ignores_nested_targets() {
     );
     assert_absent("scripts/check_plan_pico_gates.sh", gate, &[" apps"]);
     assert_present(
+        "scripts/check_pico_nod_app.sh",
+        pico_nod_app_gate,
+        &[
+            "examples/pico-nod/apple/PicoNodApp",
+            "swift test",
+            "swift build -c release",
+            "xcodebuild",
+            "-destination 'generic/platform=iOS'",
+            "CODE_SIGNING_ALLOWED=NO",
+            "Metadata extraction skipped",
+            "warning:|error:",
+        ],
+    );
+    assert_present(
+        "scripts/check_pico_nod_release_readiness.sh",
+        pico_nod_release_gate,
+        &[
+            "PICO_NOD_APPLE_TEAM_ID",
+            "PICO_NOD_BUNDLE_ID",
+            "PICO_NOD_APNS_KEY_ID",
+            "PICO_NOD_APNS_PRIVATE_KEY_PATH",
+            "PICO_NOD_STORE_ISSUER_ID",
+            "PICO_NOD_STORE_PRIVATE_KEY_PATH",
+            "PICO_NOD_TLS_TERMINATION",
+            "PICO_NOD_EXTERNAL_ACTION_ENDPOINT",
+            "PICO_NOD_EXTERNAL_ACTION_CREDENTIAL_PATH",
+            "xcodebuild first launch setup",
+            "pico-nod release readiness: not ready",
+        ],
+    );
+    assert_present(
         "scripts/check_wasip1_guest_builds.sh",
         wasip1_gate,
         &[
             "expected_wasms=(",
             "wasip1-led-choreofs-traffic-cycle.wasm",
             "wasip1-led-choreofs-traffic-once.wasm",
-            "rm -rf \"$artifact_dir\"",
+            "rm -rf \"$target_dir\"",
+            "mkdir -p \"$target_dir\"",
+            "--initial-memory=65536",
+            "--max-memory=65536",
+            "-zstack-size=4096",
             "diff -u \"$expected_list\" \"$actual_list\"",
         ],
     );
@@ -115,6 +161,46 @@ fn gate_scans_current_guest_layout_and_ignores_nested_targets() {
             "flash(.text+.rodata+.data)",
             "section-budget bin=%s",
         ],
+    );
+}
+
+#[test]
+fn appkit_host_runs_deadline_clock_from_wall_time_not_poll_count() {
+    let appkit = include_str!("../src/appkit/internal.rs");
+
+    assert_present(
+        "src/appkit/internal.rs",
+        appkit,
+        &[
+            "struct HostMonotonicClock",
+            "start: std::time::Instant",
+            "self.start.elapsed().as_millis()",
+            "type AppkitAttachClock = HostMonotonicClock",
+            "type AppkitAttachClock = hibana::integration::runtime::CounterClock",
+            "fn new_appkit_attach_clock() -> AppkitAttachClock",
+            "let clock = new_appkit_attach_clock();",
+            "new_appkit_attach_clock(),",
+        ],
+    );
+}
+
+#[test]
+fn uno_q_uart_carrier_defaults_to_hardware_safe_byte_pacing() {
+    let uno_q = include_str!("../examples/uno-q-heterogeneous/src/lib.rs");
+
+    assert_present(
+        "examples/uno-q-heterogeneous/src/lib.rs",
+        uno_q,
+        &[
+            "UNO_Q_HIBANA_UART_BYTE_US",
+            ".unwrap_or(10_000)",
+            "UNO_Q_UART_OPERATIONAL_DEADLINE_TICKS",
+        ],
+    );
+    assert_absent(
+        "examples/uno-q-heterogeneous/src/lib.rs",
+        uno_q,
+        &[".unwrap_or(1_000)", ".unwrap_or(5_000)"],
     );
 }
 
@@ -311,6 +397,62 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
             "feature = \"platform-linux\"",
             "platform-linux",
             "platform-cortex-m",
+        ],
+    );
+}
+
+#[test]
+fn appkit_projection_caps_use_numeric_message_facts_for_wasi_validation() {
+    let appkit = appkit_sources();
+
+    assert_present(
+        "src/appkit",
+        &appkit,
+        &[
+            "let engine_req_import = wasi_import_for_engine_req_label(spec.label);",
+            "if is_engine_ret_label(spec.label)",
+            "self.has_loop_continue_head_eff(spec.eff_index)",
+            "self.has_loop_break_head_eff(spec.eff_index)",
+        ],
+    );
+    assert_absent(
+        "src/appkit",
+        &appkit,
+        &[
+            "ProjectionTypeFingerprint::of::<EngineReq>()",
+            "ProjectionTypeFingerprint::of::<EngineRet>()",
+            "spec.payload_type == engine_req",
+            "spec.payload_type == engine_ret",
+        ],
+    );
+}
+
+#[test]
+fn appkit_manifest_peer_attach_does_not_use_host_type_fingerprints_as_authority() {
+    let appkit = appkit_sources();
+    let can_attach = appkit
+        .split("pub fn can_attach_peer(&self, peer: &Self) -> bool {")
+        .nth(1)
+        .and_then(|tail| tail.split("pub const fn peer_images").next())
+        .expect("ImageManifest::can_attach_peer body");
+
+    assert_present(
+        "src/appkit",
+        can_attach,
+        &[
+            "self.choreography_fingerprint == peer.choreography_fingerprint",
+            "self.choreography_session_id == peer.choreography_session_id",
+            "self.projected_role_set == peer.projected_role_set",
+            "self.peer_images().contains(peer.logical_image_id)",
+        ],
+    );
+    assert_absent(
+        "src/appkit",
+        can_attach,
+        &[
+            "self.capsule_fingerprint == peer.capsule_fingerprint",
+            "self.placement_fingerprint == peer.placement_fingerprint",
+            "self.label_universe_fingerprint == peer.label_universe_fingerprint",
         ],
     );
 }
@@ -543,8 +685,14 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "if frame.session_id != rx.session_id || frame.lane != rx.lane",
             "store_demux_frame",
             "take_demux_frame(rx.local_role, rx.session_id, rx.lane)",
-            "rx.hint_frame_label.take()",
+            ".hint_frame_label",
+            ".take()",
+            "rx.delivered = true;",
+            "core::task::Poll::Ready(Ok(hibana::integration::wire::Payload::new(",
+            "delivered_sio_payload_emits_route_hint_once",
+            "staged_sio_payload_emits_route_hint_before_delivery",
             "pub trait BakerCapsuleFacts",
+            "pub fn baker_timer_route_resolver_ready(timeout_ms: u64) -> bool",
             "appkit::run::<DriverImage, C>",
             "appkit::run::<EngineImage, C>",
         ],
@@ -583,12 +731,17 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "fifo::pop_blocking",
             "pub fn push_blocking",
             "pub fn pop_blocking",
+            "stage_route_hint_from_fifo",
+            ".or_else(|| stage_route_hint_from_fifo(rx))",
             "static BAKER_WASI_GUEST_ARENA",
             "fn baker_wasi_guest_lease",
             "baker_control_engine_one_cycle",
             "baker_control_driver_one_cycle",
             "baker_many_reentry_engine",
             "baker_many_reentry_driver",
+            "pub fn baker_timer_route_arm",
+            "pub fn baker_timer_route_ready",
+            "pub fn baker_timer_route_finish",
         ],
     );
     assert_present(
@@ -772,14 +925,20 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         timer_route_bin,
         &[
             "impl appkit::Capsule for TimerRoute",
-            "TimerFiredFact",
             "fn timer_route_resolver",
+            "ResourceKind",
+            "signals::core::TAG",
+            "baker_firmware::baker_timer_route_resolver_ready(100)",
+            "Ok(RouteResolution::Defer)",
             "Ok(RouteResolution::Arm(1))",
             "registry.policy::<TIMER_ROUTE_POLICY, 0>",
             "registry.policy::<TIMER_ROUTE_POLICY, 1>",
+            "ctx.endpoint().flow::<TimerExpiredRoute>()?",
+            "route.send(()).await?",
             "ctx.endpoint().offer().await?",
             "branch.decode::<TimerExpired>().await?",
             "let done = ctx.endpoint().recv::<TimerRouteDone>().await?;",
+            "let ack = ctx.endpoint().recv::<TimerRouteAck>().await?;",
             "if done != 1",
             "baker_firmware::run::<TimerRoute>()",
         ],
@@ -791,6 +950,15 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "AtomicBool",
             "Ordering",
             "TIMER_FACT_READY",
+            "TimerFiredFact",
+            "baker_firmware::baker_timer_route_arm(100)",
+            "baker_firmware::baker_timer_route_ready()",
+            "baker_firmware::baker_timer_route_finish()",
+            "baker_firmware::baker_poll_delay(100)",
+            "fact.send(&1).await?",
+            "record_choreofs_driver_trace(0x5452_011",
+            "record_choreofs_engine_error_code(0x5452_4",
+            "record_choreofs_engine_error_code(0x5452_7",
             "compare_exchange",
             "fetch_",
             "load(Ordering",
@@ -842,6 +1010,413 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "implementation modules under `src/appkit/` remain",
             "bash ./scripts/check_baker_section_budgets.sh",
             "gates `.text`, `.rodata`, `.data`, `.bss`, and flash-size totals",
+        ],
+    );
+}
+
+#[test]
+fn pico_nod_example_keeps_public_ingress_and_external_commit_under_choreography() {
+    let manifest = include_str!("../examples/pico-nod/Cargo.toml");
+    let plan = include_str!("../examples/pico-nod/plan.md");
+    let app_manifest = include_str!("../examples/pico-nod/apple/PicoNodApp/Package.swift");
+    let app_project =
+        include_str!("../examples/pico-nod/apple/PicoNodApp/PicoNodApp.xcodeproj/project.pbxproj");
+    let app_scheme = include_str!(
+        "../examples/pico-nod/apple/PicoNodApp/PicoNodApp.xcodeproj/xcshareddata/xcschemes/PicoNodApp.xcscheme"
+    );
+    let app_core = include_str!(
+        "../examples/pico-nod/apple/PicoNodApp/Sources/PicoNodAppCore/PicoNodAppCore.swift"
+    );
+    let app_ui =
+        include_str!("../examples/pico-nod/apple/PicoNodApp/Sources/PicoNodApp/PicoNodApp.swift");
+    let app_tests = include_str!(
+        "../examples/pico-nod/apple/PicoNodApp/Tests/PicoNodAppCoreTests/PicoNodAppCoreTests.swift"
+    );
+    let release_gate = include_str!("../scripts/check_pico_nod_release_readiness.sh");
+    let archive_script = include_str!("../scripts/archive_pico_nod_app.sh");
+    let acceptor = include_str!("../examples/pico-nod/src/acceptor.rs");
+    let acceptor_bin = include_str!("../examples/pico-nod/src/bin/pico-nod-http-acceptor.rs");
+    let lib = include_str!("../examples/pico-nod/src/lib.rs");
+    let ingress = include_str!("../examples/pico-nod/src/ingress.rs");
+    let approval = include_str!("../examples/pico-nod/src/approval.rs");
+    let apns = include_str!("../examples/pico-nod/src/apns.rs");
+    let billing = include_str!("../examples/pico-nod/src/billing.rs");
+    let commit = include_str!("../examples/pico-nod/src/commit.rs");
+    let release = include_str!("../examples/pico-nod/src/release.rs");
+    let app_store_review = include_str!("../examples/pico-nod/release/app-store-review.md");
+    let privacy_labels = include_str!("../examples/pico-nod/release/privacy-labels.md");
+    let operations_runbook = include_str!("../examples/pico-nod/release/operations-runbook.md");
+    let support = include_str!("../examples/pico-nod/src/support.rs");
+    let security = include_str!("../examples/pico-nod/tests/security.rs");
+
+    assert_present(
+        "examples/pico-nod/Cargo.toml",
+        manifest,
+        &[
+            "name = \"pico-nod-example\"",
+            "hibana-pico",
+            "wasm-engine-core",
+            "wasip1-sys-fd-write",
+            "wasip1-sys-path-open",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/plan.md",
+        plan,
+        &[
+            "public bytes",
+            "-> WASI P1 ingress",
+            "CommitBoundary is the only external side-effect path",
+            "Pico Nod has no database.",
+            "shared mutable authority",
+            "The HTTP/TLS acceptor can:",
+            "Device compromise is a root-trust loss for that device",
+            "external_unknown_outcome_fences_without_idempotency_evidence",
+            "billing_entitlement_is_fact_not_approval_or_commit",
+            "support_actions_are_intents_not_admin_direct_paths",
+            "The repository is not App Store ready until",
+            "The repository is not production-server ready until",
+            "Minimal HTTP byte acceptor",
+            "scripts/check_pico_nod_release_readiness.sh",
+            "scripts/archive_pico_nod_app.sh",
+            "examples/pico-nod/release/app-store-review.md",
+            "examples/pico-nod/release/privacy-labels.md",
+            "examples/pico-nod/release/operations-runbook.md",
+            "PicoNodApp.xcodeproj",
+            "must fail closed when production identifiers",
+            "pico-nod-http-acceptor -- --preflight",
+            "production mode must not",
+        ],
+    );
+    assert_present(
+        "scripts/check_pico_nod_release_readiness.sh",
+        release_gate,
+        &[
+            "PICO_NOD_APPLE_TEAM_ID",
+            "PICO_NOD_BUNDLE_ID",
+            "PICO_NOD_APNS_KEY_ID",
+            "PICO_NOD_APNS_PRIVATE_KEY_PATH",
+            "PICO_NOD_STORE_ISSUER_ID",
+            "PICO_NOD_STORE_PRIVATE_KEY_PATH",
+            "PICO_NOD_TLS_TERMINATION",
+            "PICO_NOD_EXTERNAL_ACTION_ENDPOINT",
+            "PICO_NOD_EXTERNAL_ACTION_CREDENTIAL_PATH",
+            "xcodebuild first launch setup",
+            "PicoNodApp.xcodeproj/project.pbxproj",
+            "LaunchScreen.storyboard",
+            "release/app-store-review.md",
+            "release/privacy-labels.md",
+            "release/operations-runbook.md",
+            "archive_pico_nod_app.sh",
+            "pico-nod release readiness: not ready",
+        ],
+    );
+    assert_present(
+        "scripts/archive_pico_nod_app.sh",
+        archive_script,
+        &[
+            "PICO_NOD_APPLE_TEAM_ID",
+            "PICO_NOD_BUNDLE_ID",
+            "-project \"$PROJECT\"",
+            "-scheme PicoNodApp",
+            "-destination 'generic/platform=iOS'",
+            "-exportArchive",
+            "app-store-connect",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/apple/PicoNodApp/Package.swift",
+        app_manifest,
+        &[
+            "name: \"PicoNodApp\"",
+            ".iOS(.v17)",
+            ".macOS(.v14)",
+            "Assets.xcassets",
+            "PrivacyInfo.xcprivacy",
+            "PicoNod.entitlements",
+            "LaunchScreen.storyboard",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/apple/PicoNodApp/PicoNodApp.xcodeproj/project.pbxproj",
+        app_project,
+        &[
+            "PBXNativeTarget",
+            "PicoNodApp.app",
+            "XCLocalSwiftPackageReference",
+            "PicoNodAppCore",
+            "CODE_SIGN_ENTITLEMENTS = Sources/PicoNodApp/PicoNod.entitlements;",
+            "ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;",
+            "Assets.xcassets in Resources",
+            "GENERATE_INFOPLIST_FILE = YES;",
+            "INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;",
+            "INFOPLIST_KEY_UISupportedInterfaceOrientations",
+            "SUPPORTED_PLATFORMS = \"iphoneos iphonesimulator macosx\";",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/apple/PicoNodApp/PicoNodApp.xcodeproj/xcshareddata/xcschemes/PicoNodApp.xcscheme",
+        app_scheme,
+        &[
+            "BuildableName = \"PicoNodApp.app\"",
+            "BlueprintName = \"PicoNodApp\"",
+            "buildForArchiving = \"YES\"",
+            "ArchiveAction",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/apple/PicoNodApp/Sources/PicoNodAppCore/PicoNodAppCore.swift",
+        app_core,
+        &[
+            "import CryptoKit",
+            "Curve25519.Signing.PrivateKey",
+            "ApprovalAction",
+            "ApprovalEvidence",
+            "displayedHash",
+            "verify(_ evidence:",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/apple/PicoNodApp/Sources/PicoNodApp/PicoNodApp.swift",
+        app_ui,
+        &[
+            "import SwiftUI",
+            "Button(\"Nod\")",
+            "Button(\"Reject\")",
+            "Button(\"Fence\")",
+            "displayed.displayedHash",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/apple/PicoNodApp/Tests/PicoNodAppCoreTests/PicoNodAppCoreTests.swift",
+        app_tests,
+        &[
+            "nodEvidenceVerifiesForDisplayedIntent",
+            "tamperedActionDoesNotVerify",
+            "malformedEvidenceFailsClosed",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/src/acceptor.rs",
+        acceptor,
+        &[
+            "pub struct HttpTlsAcceptor",
+            "POST /intent",
+            "content-length:",
+            "ChunkedUnsupported",
+            "cannot_hold_credentials(&self) -> bool",
+            "cannot_select_routes(&self) -> bool",
+            "cannot_commit_external_actions(&self) -> bool",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/apple/PicoNodApp/Sources/PicoNodApp/Assets.xcassets/AppIcon.appiconset/Contents.json",
+        include_str!(
+            "../examples/pico-nod/apple/PicoNodApp/Sources/PicoNodApp/Assets.xcassets/AppIcon.appiconset/Contents.json"
+        ),
+        &["ios-marketing", "pico-nod-1024.png", "iphone", "ipad"],
+    );
+    assert_present(
+        "examples/pico-nod/src/bin/pico-nod-http-acceptor.rs",
+        acceptor_bin,
+        &[
+            "TcpListener::bind",
+            "HttpTlsAcceptor::new",
+            "WasiIngress::normalize_public_request",
+            "127.0.0.1:8787",
+            "--preflight",
+            "--production",
+            "release_preflight(&args)?",
+            "is_loopback_bind_address",
+            "production bind address must be loopback",
+            "production configuration is incomplete",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/src/lib.rs",
+        lib,
+        &[
+            "pub struct PicoNodCapsule;",
+            "pub struct PicoNodUniverse;",
+            "PICO_NOD_APPROVAL_POLICY",
+            "impl appkit::Capsule for PicoNodCapsule",
+            "g::route(",
+            "site::Local<image::WasiIngressProcess>",
+            "site::Local<image::CommitBoundaryProcess>",
+            "site::Local<image::HostProofProcess>",
+            "type Artifact = appkit::WasiImage<'static>;",
+            "type Artifact = appkit::NoWasi;",
+            "pub mod release;",
+        ],
+    );
+    assert_absent(
+        "examples/pico-nod/src/lib.rs",
+        lib,
+        &[
+            "macro_rules!",
+            "with_policy",
+            "project_role",
+            "InProcessCarrier",
+            "RefCell",
+            "Atomic",
+            "std::",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/src/ingress.rs",
+        ingress,
+        &[
+            "pub struct WasiIngress;",
+            "normalize_public_request",
+            "cannot_hold_credentials() -> bool",
+            "cannot_select_routes() -> bool",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/src/approval.rs",
+        approval,
+        &[
+            "pub struct ApprovalBoundary",
+            "ApprovalDecision::Nod",
+            "ApprovalDecision::Reject",
+            "ApprovalDecision::Fence",
+            "displayed_hash(request)",
+            "sign_approval(",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/src/apns.rs",
+        apns,
+        &[
+            "pub struct ApnsBoundary",
+            "pub trait ApnsProvider",
+            "DeviceDeliveryCap",
+            "cannot_approve(&self) -> bool",
+            "cannot_select_routes(&self) -> bool",
+            "cannot_commit_external_actions(&self) -> bool",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/src/billing.rs",
+        billing,
+        &[
+            "pub struct BillingBoundary",
+            "pub struct EntitlementFact",
+            "EntitlementState::Unknown",
+            "require_paid_feature",
+            "cannot_approve(&self) -> bool",
+            "cannot_commit_external_actions(&self) -> bool",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/src/commit.rs",
+        commit,
+        &[
+            "pub struct CommitBoundary",
+            "pub trait ExternalActionApi",
+            "CommitOutcome::DuplicateCommitted",
+            "UnknownWithoutIdempotencyEvidence",
+            "FailedClosed",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/src/release.rs",
+        release,
+        &[
+            "RELEASE_REQUIREMENTS",
+            "RELEASE_FILE_REQUIREMENTS",
+            "RELEASE_ARTIFACTS",
+            "PICO_NOD_APPLE_TEAM_ID",
+            "PICO_NOD_BUNDLE_ID",
+            "PICO_NOD_APNS_KEY_ID",
+            "PICO_NOD_STORE_ISSUER_ID",
+            "PICO_NOD_TLS_TERMINATION",
+            "PICO_NOD_EXTERNAL_ACTION_ENDPOINT",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/release/app-store-review.md",
+        app_store_review,
+        &[
+            "reviewer",
+            "Nod",
+            "Reject",
+            "Fence",
+            "The app is an approval device",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/release/privacy-labels.md",
+        privacy_labels,
+        &[
+            "No tracking.",
+            "No analytics SDK.",
+            "No external action API credentials in the app.",
+            "Audit output must not contain",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/release/operations-runbook.md",
+        operations_runbook,
+        &[
+            "PICO_NOD_TLS_TERMINATION=external-loopback",
+            "public TLS",
+            "loopback pico-nod-http-acceptor",
+            "UnknownWithoutIdempotencyEvidence",
+            "Choreography remains the authority.",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/deploy/env.example",
+        include_str!("../examples/pico-nod/deploy/env.example"),
+        &[
+            "PICO_NOD_TLS_TERMINATION=external-loopback",
+            "PICO_NOD_APNS_PRIVATE_KEY_PATH=",
+            "PICO_NOD_STORE_PRIVATE_KEY_PATH=",
+            "PICO_NOD_EXTERNAL_ACTION_CREDENTIAL_PATH=",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/deploy/launchd/com.hibana.pico-nod.plist",
+        include_str!("../examples/pico-nod/deploy/launchd/com.hibana.pico-nod.plist"),
+        &[
+            "com.hibana.pico-nod",
+            "--production",
+            "127.0.0.1:8787",
+            "KeepAlive",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/src/support.rs",
+        support,
+        &[
+            "pub enum SupportAction",
+            "pub struct SupportIntent",
+            "ActionKind::LocalCommand",
+            "WasiIngress::normalize_public_request",
+            "cannot_commit_without_approval(&self) -> bool",
+            "cannot_select_routes(&self) -> bool",
+        ],
+    );
+    assert_present(
+        "examples/pico-nod/tests/security.rs",
+        security,
+        &[
+            "pico_nod_capsule_projects_role_split_and_approval_route",
+            "wasi_ingress_output_is_candidate_evidence_not_authority",
+            "approval_display_hash_mismatch_rejected",
+            "external_failed_closed_records_terminal_fault_without_commit",
+            "http_tls_acceptor_forwards_bounded_body_to_wasi_ingress_only",
+            "http_tls_acceptor_rejects_unbounded_or_implicit_http_shapes",
+            "lost_commit_ack_does_not_commit_twice",
+            "no_database_contract_keeps_global_revoke_outside_protocol",
+            "apns_delivery_success_does_not_approve_or_commit",
+            "billing_entitlement_is_fact_not_approval_or_commit",
+            "support_actions_are_intents_not_admin_direct_paths",
+            "release_requirements_cover_app_store_and_server_operation",
+            "production_server_preflight_fails_closed_without_release_configuration",
+            "production_server_preflight_rejects_unreadable_credential_paths",
+            "production_server_rejects_public_clear_http_bind_even_when_configured",
         ],
     );
 }
@@ -956,19 +1531,26 @@ fn cargo_keeps_plan_private_and_no_demo_meaning_features() {
     let cargo = include_str!("../Cargo.toml");
     let ignore = include_str!("../.gitignore");
 
-    assert_present("Cargo.toml", cargo, &["exclude = [\"/plan.md\"]"]);
+    assert_present(
+        "Cargo.toml",
+        cargo,
+        &[
+            "exclude = [\"/plan.md\", \"/examples/**/plan.md\"]",
+            "\"examples/uno-q-heterogeneous\"",
+        ],
+    );
     assert_present(".gitignore", ignore, &["/plan.md"]);
     assert_present(
         "Cargo.toml",
         cargo,
-        &["hibana = { version = \"0.6.0\", default-features = false }"],
+        &["hibana = { version = \"0.6.1\", default-features = false }"],
     );
     assert_absent(
         "Cargo.toml",
         cargo,
         &[
             "[patch.crates-io]",
-            "hibana = { path",
+            "hibana = { path = \"../hibana\" }",
             "hibana = { git",
             "baker-choreofs-demo",
             "baker-choreofs-bad-path-demo",
@@ -1066,6 +1648,17 @@ fn readme_fixes_failure_deadline_cancellation_as_fail_closed_evidence() {
 fn embedded_runner_keeps_scheduler_and_role_future_poll_boundary_separate() {
     let appkit = appkit_sources();
 
+    let resolver_registration = appkit
+        .find("C::register_resolvers(&mut resolver_registry);")
+        .expect("appkit attach registers capsule resolvers");
+    let role_future_start = appkit
+        .find("visit_requested_projected_roles::<C, _>(program, I::REQUESTED_ROLES, &mut visitor);")
+        .expect("appkit attach starts projected role futures");
+    assert!(
+        resolver_registration < role_future_start,
+        "bare-metal resolver registration must happen before role futures can run forever"
+    );
+
     assert_present(
         "src/appkit",
         &appkit,
@@ -1074,6 +1667,7 @@ fn embedded_runner_keeps_scheduler_and_role_future_poll_boundary_separate() {
             "let task_waker = embedded_task_waker();",
             "let mut task_context = Context::from_waker(task_waker);",
             "poll_embedded_stored_task::<F, E>(future_arena, &mut task_context)",
+            "fn embedded_wait_for_event() {\n    core::hint::spin_loop();\n}",
             "future: EmbeddedFutureArena<APPKIT_EMBEDDED_ROLE_FUTURE_BYTES>",
             "embedded_storage: EmbeddedAttachStorageRef<'static>",
             "self.embedded_storage",
@@ -1103,6 +1697,9 @@ fn embedded_runner_keeps_scheduler_and_role_future_poll_boundary_separate() {
             "APPKIT_EMBEDDED_ROLE0_FUTURE_BYTES",
             "APPKIT_EMBEDDED_ROLE1_FUTURE_BYTES",
             "fn poll_localside_once",
+            "asm!(\"wfe\"",
+            "TestTimerFiredFact",
+            "TEST_TIMER_FIRED_FACT_LABEL",
         ],
     );
 }

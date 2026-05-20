@@ -1,5 +1,5 @@
 use crate::{
-    choreography::protocol::{BudgetExpired, BudgetRun},
+    choreography::protocol::{BudgetExpired, BudgetRun, WASIP1_STREAM_CHUNK_CAPACITY},
     kernel::features::{WASIP1_PREVIEW1_MODULE, Wasip1HandlerSet, Wasip1ImportName, Wasip1Syscall},
 };
 
@@ -1020,7 +1020,7 @@ struct ControlFrame {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct InlinePayload {
-    bytes: [u8; 8],
+    bytes: [u8; WASIP1_STREAM_CHUNK_CAPACITY],
     len: u8,
 }
 
@@ -4442,7 +4442,7 @@ impl<'a> Vm<'a> {
     }
 
     pub(super) fn fd_write_payload(&self, call: FdWriteCall) -> Result<InlinePayload, WasmError> {
-        let mut bytes = [0u8; 8];
+        let mut bytes = [0u8; WASIP1_STREAM_CHUNK_CAPACITY];
         let payload_len = self.copy_fd_write_payload(call, &mut bytes)?;
         Ok(InlinePayload {
             bytes,

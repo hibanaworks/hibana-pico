@@ -2283,7 +2283,7 @@ fn capsule_uses_projectable_raw_hibana_and_metadata() {
 }
 
 #[test]
-fn wasi_capacity_requires_typed_engine_request_metadata() {
+fn wasi_capacity_requires_numeric_request_completion_pair() {
     let caps = appkit::derive_projection_caps::<CustomLabelCapsule>();
 
     assert!(caps.labels[..caps.label_count as usize].contains(&LABEL_WASI_FD_WRITE));
@@ -2458,6 +2458,15 @@ fn image_manifest_peer_attach_requires_mutual_identity_and_matching_shape() {
     this.peer_image_count = 1;
     assert!(this.can_attach_peer(&peer));
 
+    let mut host_metadata_peer = peer;
+    host_metadata_peer.capsule_fingerprint = [0x11; 2];
+    host_metadata_peer.placement_fingerprint = [0x22; 2];
+    host_metadata_peer.label_universe_fingerprint = [0x33; 2];
+    assert!(
+        this.can_attach_peer(&host_metadata_peer),
+        "type-name fingerprints are host metadata, not peer attach authority"
+    );
+
     peer.carrier = TEST_TCP;
     assert!(!this.can_attach_peer(&peer));
     peer.carrier = TEST_LOCAL_QUEUE_CARRIER;
@@ -2485,7 +2494,7 @@ fn run_returns_logical_image_exit_type() {
 
 #[test]
 #[should_panic(
-    expected = "WASI P1 import request label must have a projected typed EngineRet completion"
+    expected = "WASI P1 import request label must have a projected numeric EngineRet completion"
 )]
 fn run_rejects_wasi_request_without_projected_completion() {
     let artifacts = RichArtifacts {

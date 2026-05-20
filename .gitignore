@@ -1,4 +1,6 @@
 target/
+/.build/
+/examples/pico-nod/apple/PicoNodApp/.build/
 /plan.md
 /integration/cross-repo/target
 /internal/pico_smoke/target

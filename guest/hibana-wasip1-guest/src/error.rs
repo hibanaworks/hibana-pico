@@ -11,6 +11,7 @@ pub type Result<T> = core::result::Result<T, Error>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Syscall {
+    FdRead,
     FdWrite,
     PathOpen,
     PollOneoff,
