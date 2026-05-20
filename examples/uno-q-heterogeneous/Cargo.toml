@@ -29,20 +29,12 @@ name = "uno-q-hardware-proof"
 path = "src/bin/uno_q_hardware_proof.rs"
 
 [[bin]]
-name = "uno-q-linux-kernel"
-path = "src/bin/uno_q_linux_kernel.rs"
+name = "uno-q-pseudo-llm"
+path = "src/bin/uno_q_pseudo_llm.rs"
 
 [[bin]]
 name = "uno-q-wasi-llm-cell"
 path = "src/bin/uno_q_wasi_llm_cell.rs"
-
-[[bin]]
-name = "uno-q-llm-sidecar"
-path = "src/bin/uno_q_llm_sidecar.rs"
-
-[[bin]]
-name = "ios-prompt-ingress"
-path = "src/bin/ios_prompt_ingress.rs"
 
 [[bin]]
 name = "uno-q-m33-led-kernel"
@@ -51,7 +43,3 @@ path = "src/bin/uno_q_m33_led_kernel.rs"
 [[bin]]
 name = "uno-q-m33-native-kernel"
 path = "src/bin/uno_q_m33_native_kernel.rs"
-
-[[bin]]
-name = "challenger-net-kernel"
-path = "src/bin/challenger_net_kernel.rs"

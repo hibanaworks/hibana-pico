@@ -1,0 +1,13 @@
+[target.wasm32-wasip1]
+rustflags = [
+    "-C",
+    "link-self-contained=no",
+    "-C",
+    "link-arg=--no-entry",
+    "-C",
+    "link-arg=-zstack-size=4096",
+    "-C",
+    "link-arg=--initial-memory=65536",
+    "-C",
+    "link-arg=--max-memory=65536",
+]

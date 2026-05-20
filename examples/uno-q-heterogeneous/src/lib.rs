@@ -10,26 +10,22 @@ use hibana::g;
 use hibana::integration::{
     program::Projectable,
     runtime::LabelUniverse,
-    wire::{CodecError, Payload},
+    wire::{CodecError, Payload, WirePayload},
 };
 use hibana_pico::{
     appkit,
     choreography::protocol::{
         EngineReq, EngineRet, FdReadDone, FdWriteDone, LABEL_WASI_FD_READ, LABEL_WASI_FD_READ_RET,
-        LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET, LABEL_WASI_PATH_OPEN,
-        LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF, LABEL_WASI_POLL_ONEOFF_RET,
-        LABEL_WASI_PROC_EXIT, PathOpened, PollReady,
+        LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET, LABEL_WASI_IMPORT_LOOP_BREAK_CONTROL,
+        LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF,
+        LABEL_WASI_POLL_ONEOFF_RET, LABEL_WASI_PROC_EXIT, PathOpened, PollReady,
+        WasiImportLoopBreak, WasiImportLoopContinue,
     },
     site,
 };
 use protocol::{
-    CommitMarker, FACE_SPEAKING, FaceCandidate, LABEL_CHALLENGER_PACKET, LABEL_CHALLENGER_READ,
-    LABEL_CHALLENGER_READ_RET, LABEL_CHALLENGER_RECEIPT, LABEL_FACE_ACK_COMMIT,
-    LABEL_FACE_CANDIDATE_TO_M33, LABEL_FINAL_COMMIT, LABEL_IOS_PROMPT_FACT,
-    LABEL_IOS_PROMPT_REQUEST, LABEL_LLM_PROMPT_TO_LINUX, LABEL_LLM_PROPOSAL_TO_LINUX,
-    LABEL_LLM_REQUEST_TO_SIDECAR, NetPacket, NetReceipt, ROLE_CHALLENGER_KERNEL,
-    ROLE_IOS_PROMPT_INGRESS, ROLE_LINUX_KERNEL, ROLE_LLM_SIDECAR, ROLE_M33_LED_KERNEL,
-    ROLE_WASI_LLM_CELL, SmallText,
+    FACE_ANGRY, FACE_HAPPY, FACE_MOUTH_CLOSED, FACE_MOUTH_ROUND, FACE_MOUTH_SMALL, FACE_MOUTH_WIDE,
+    FACE_SAD, FACE_SURPRISED, FaceFrame, ROLE_M33_LED_KERNEL, ROLE_PSEUDO_LLM, ROLE_WASI_LLM_CELL,
 };
 
 pub struct UnoQCapsule;
@@ -41,79 +37,130 @@ pub struct UnoQArtifacts;
 pub struct UnoQLabelUniverse;
 
 impl LabelUniverse for UnoQLabelUniverse {
-    const MAX_LABEL: u8 = LABEL_FINAL_COMMIT;
+    const MAX_LABEL: u8 = LABEL_WASI_IMPORT_LOOP_BREAK_CONTROL;
 }
 
 pub mod image {
     pub struct HostLoopbackProof;
     pub struct HardwarePeerProof;
-    pub struct LinuxKernelProcess;
+    pub struct PseudoLlmProcess;
     pub struct WasiLlmCellProcess;
-    pub struct LlmSidecarProcess;
-    pub struct IosPromptIngressProcess;
     pub struct M33LedKernelImage;
-    pub struct ChallengerNetKernelImage;
 }
 
 pub const UNO_Q_CARRIER: appkit::CarrierKind = appkit::CarrierKind::new(0x7101);
 pub const PREOPEN_FD: u8 = 9;
-pub const IOS_PROMPT_FD: u8 = 11;
-pub const LLM_PROMPT_FD: u8 = 12;
-pub const CHALLENGER_TX_FD: u8 = 13;
-pub const CHALLENGER_RX_FD: u8 = 14;
-pub const FACE_ACK_FD: u8 = 15;
+pub const LLM_FRAME_FD: u8 = 12;
+pub const FACE_FRAME_FD: u8 = 15;
 
 const FD_READ_RIGHT: u64 = 1 << 1;
 const FD_WRITE_RIGHT: u64 = 1 << 6;
-const PROOF_CARRIER_ROLES: usize = 6;
+const PROOF_CARRIER_ROLES: usize = 3;
 const PROOF_CARRIER_QUEUE_DEPTH: usize = 24;
 const PROOF_CARRIER_FRAME_BYTES: usize = 128;
 const UART_CARRIER_MAGIC: [u8; 4] = *b"HBU1";
 const UART_CARRIER_CHECK: u8 = 0xa7;
 const UART_CARRIER_HEADER_BYTES: usize = 13;
 const UART_CARRIER_FRAME_BYTES: usize = UART_CARRIER_HEADER_BYTES + PROOF_CARRIER_FRAME_BYTES + 1;
-const HARDWARE_PEER_ROLE_BITS: u128 = 0x3e;
-const UNO_Q_UART_OPERATIONAL_DEADLINE_TICKS: u32 = 50_000;
+#[cfg(any(test, target_os = "none"))]
+const UNO_Q_M33_HINT_DRAIN_TICKS: u32 = 2_000_000;
+const HARDWARE_PEER_ROLE_BITS: u128 = (1u128 << ROLE_WASI_LLM_CELL) | (1u128 << ROLE_PSEUDO_LLM);
+#[cfg(any(test, not(target_os = "none")))]
+const UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS: u32 = 50_000;
+#[cfg(any(test, target_os = "none"))]
+const UNO_Q_M33_UART_OPERATIONAL_DEADLINE_TICKS: u32 = 1_000_000_000;
+const UNO_Q_FACE_EMOTION_HOLD_US: u64 = 1_000_000;
+const UNO_Q_FACE_MOUTH_HOLD_US: u64 = 500_000;
+const UNO_Q_FACE_EMOTION_FRAMES: [u8; 12] = [
+    FACE_HAPPY,
+    FACE_ANGRY,
+    FACE_SAD,
+    FACE_SURPRISED,
+    FACE_HAPPY,
+    FACE_ANGRY,
+    FACE_SAD,
+    FACE_SURPRISED,
+    FACE_HAPPY,
+    FACE_ANGRY,
+    FACE_SAD,
+    FACE_SURPRISED,
+];
+const UNO_Q_FACE_MOUTH_FRAMES: [u8; 8] = [
+    FACE_MOUTH_CLOSED,
+    FACE_MOUTH_SMALL,
+    FACE_MOUTH_WIDE,
+    FACE_MOUTH_ROUND,
+    FACE_MOUTH_CLOSED,
+    FACE_MOUTH_SMALL,
+    FACE_MOUTH_WIDE,
+    FACE_MOUTH_ROUND,
+];
+const UNO_Q_FACE_CYCLE_FRAME_COUNT: usize =
+    UNO_Q_FACE_EMOTION_FRAMES.len() + UNO_Q_FACE_MOUTH_FRAMES.len();
 
-const IOS_PROMPT_PATH: &[u8] = b"ios/prompt/inbox";
-const LLM_PROMPT_PATH: &[u8] = b"llm/prompt";
-const CHALLENGER_TX_PATH: &[u8] = b"net/challenger/tx";
-const CHALLENGER_RX_PATH: &[u8] = b"net/challenger/rx";
-const FACE_ACK_PATH: &[u8] = b"face/ack";
+const LLM_FRAME_PATH: &[u8] = b"llm/frame";
+const FACE_FRAME_PATH: &[u8] = b"face/frame";
 
-pub const IOS_PROMPT_OBJECT: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
-    IOS_PROMPT_PATH,
-    appkit::ObjectId(71_001),
-    appkit::FdSpec::new(IOS_PROMPT_FD as u32, FD_READ_RIGHT, 1),
-);
-pub const LLM_PROMPT_OBJECT: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
-    LLM_PROMPT_PATH,
+#[cfg(all(not(target_os = "none"), target_os = "linux"))]
+pub fn configure_uno_q_uart_modem_ready(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    unsafe extern "C" {
+        fn ioctl(fd: i32, request: u64, argp: *const u32) -> i32;
+    }
+
+    const TIOCMBIS: u64 = 0x5416;
+    const TIOCM_DTR: u32 = 0x002;
+    const TIOCM_RTS: u32 = 0x004;
+
+    let bits = TIOCM_DTR | TIOCM_RTS;
+    let rc = unsafe { ioctl(file.as_raw_fd(), TIOCMBIS, &bits) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(not(target_os = "none"), target_os = "linux"))]
+fn drain_uno_q_uart_byte(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    unsafe extern "C" {
+        fn tcdrain(fd: i32) -> i32;
+    }
+
+    let rc = unsafe { tcdrain(file.as_raw_fd()) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(not(target_os = "none"), not(target_os = "linux")))]
+pub fn configure_uno_q_uart_modem_ready(_file: &std::fs::File) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(all(not(target_os = "none"), not(target_os = "linux")))]
+fn drain_uno_q_uart_byte(_file: &std::fs::File) -> std::io::Result<()> {
+    Ok(())
+}
+
+pub const LLM_FRAME_OBJECT: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
+    LLM_FRAME_PATH,
     appkit::ObjectId(71_002),
-    appkit::FdSpec::new(LLM_PROMPT_FD as u32, FD_WRITE_RIGHT, 1),
+    appkit::FdSpec::new(LLM_FRAME_FD as u32, FD_READ_RIGHT, 1),
 );
-pub const CHALLENGER_TX_OBJECT: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
-    CHALLENGER_TX_PATH,
-    appkit::ObjectId(71_003),
-    appkit::FdSpec::new(CHALLENGER_TX_FD as u32, FD_WRITE_RIGHT, 1),
-);
-pub const CHALLENGER_RX_OBJECT: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
-    CHALLENGER_RX_PATH,
-    appkit::ObjectId(71_004),
-    appkit::FdSpec::new(CHALLENGER_RX_FD as u32, FD_READ_RIGHT, 1),
-);
-pub const FACE_ACK_OBJECT: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
-    FACE_ACK_PATH,
+pub const FACE_FRAME_OBJECT: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
+    FACE_FRAME_PATH,
     appkit::ObjectId(71_005),
-    appkit::FdSpec::new(FACE_ACK_FD as u32, FD_WRITE_RIGHT, 1),
+    appkit::FdSpec::new(FACE_FRAME_FD as u32, FD_WRITE_RIGHT, 1),
 );
 
-static UNO_Q_DRIVER_FACTS: appkit::ChoreoFsObjectSet<5> = appkit::ChoreoFsObjectSet::new([
-    IOS_PROMPT_OBJECT,
-    LLM_PROMPT_OBJECT,
-    CHALLENGER_TX_OBJECT,
-    CHALLENGER_RX_OBJECT,
-    FACE_ACK_OBJECT,
-]);
+static UNO_Q_DRIVER_FACTS: appkit::ChoreoFsObjectSet<1> =
+    appkit::ChoreoFsObjectSet::new([FACE_FRAME_OBJECT]);
 
 #[cfg(feature = "embed-wasip1-artifacts")]
 const WASM_UNO_Q_LLM_FACE_CELL: &[u8] = include_bytes!(concat!(
@@ -141,22 +188,13 @@ static HOST_PROOF_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLA
 static HARDWARE_PEER_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLAB_BYTES> =
     appkit::EmbeddedAttachStorage::empty();
 #[cfg(all(not(test), target_os = "none"))]
-static LINUX_KERNEL_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLAB_BYTES> =
+static PSEUDO_LLM_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLAB_BYTES> =
     appkit::EmbeddedAttachStorage::empty();
 #[cfg(all(not(test), target_os = "none"))]
 static WASI_CELL_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLAB_BYTES> =
     appkit::EmbeddedAttachStorage::empty();
 #[cfg(all(not(test), target_os = "none"))]
-static LLM_SIDECAR_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLAB_BYTES> =
-    appkit::EmbeddedAttachStorage::empty();
-#[cfg(all(not(test), target_os = "none"))]
-static IOS_INGRESS_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLAB_BYTES> =
-    appkit::EmbeddedAttachStorage::empty();
-#[cfg(all(not(test), target_os = "none"))]
 static M33_LED_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLAB_BYTES> =
-    appkit::EmbeddedAttachStorage::empty();
-#[cfg(all(not(test), target_os = "none"))]
-static CHALLENGER_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLAB_BYTES> =
     appkit::EmbeddedAttachStorage::empty();
 
 type WasiPathOpenReqMsg = g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>;
@@ -168,19 +206,6 @@ type WasiFdWriteRetMsg = g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>;
 type WasiPollReqMsg = g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>;
 type WasiPollRetMsg = g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>;
 type WasiProcExitReqMsg = g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>;
-
-type IosPromptRequestMsg = g::Msg<LABEL_IOS_PROMPT_REQUEST, SmallText>;
-type IosPromptFactMsg = g::Msg<LABEL_IOS_PROMPT_FACT, SmallText>;
-type LlmPromptToLinuxMsg = g::Msg<LABEL_LLM_PROMPT_TO_LINUX, SmallText>;
-type LlmRequestToSidecarMsg = g::Msg<LABEL_LLM_REQUEST_TO_SIDECAR, SmallText>;
-type LlmProposalToLinuxMsg = g::Msg<LABEL_LLM_PROPOSAL_TO_LINUX, protocol::LlmProposal>;
-type FaceCandidateToM33Msg = g::Msg<LABEL_FACE_CANDIDATE_TO_M33, FaceCandidate>;
-type ChallengerPacketMsg = g::Msg<LABEL_CHALLENGER_PACKET, NetPacket>;
-type ChallengerReceiptMsg = g::Msg<LABEL_CHALLENGER_RECEIPT, NetReceipt>;
-type ChallengerReadMsg = g::Msg<LABEL_CHALLENGER_READ, NetPacket>;
-type ChallengerReadRetMsg = g::Msg<LABEL_CHALLENGER_READ_RET, NetReceipt>;
-type FaceAckCommitMsg = g::Msg<LABEL_FACE_ACK_COMMIT, CommitMarker>;
-type FinalCommitMsg = g::Msg<LABEL_FINAL_COMMIT, CommitMarker>;
 
 #[derive(Debug)]
 pub enum UnoQRuntimeError {
@@ -215,223 +240,98 @@ impl appkit::Capsule for UnoQCapsule {
     type Report = Infallible;
 
     fn choreography() -> impl Projectable<Self::Universe> {
-        let ios_prompt_read = g::seq(
-            g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_M33_LED_KERNEL>, WasiFdReadReqMsg, 0>(
-            ),
+        let frame_cycle = g::seq(
+            g::send::<
+                g::Role<ROLE_WASI_LLM_CELL>,
+                g::Role<ROLE_WASI_LLM_CELL>,
+                WasiImportLoopContinue,
+                0,
+            >(),
             g::seq(
-                g::send::<
-                    g::Role<ROLE_M33_LED_KERNEL>,
-                    g::Role<ROLE_LINUX_KERNEL>,
-                    IosPromptRequestMsg,
-                    0,
-                >(),
+                g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_PSEUDO_LLM>, WasiFdReadReqMsg, 0>(
+                ),
                 g::seq(
                     g::send::<
-                        g::Role<ROLE_LINUX_KERNEL>,
-                        g::Role<ROLE_IOS_PROMPT_INGRESS>,
-                        IosPromptRequestMsg,
+                        g::Role<ROLE_PSEUDO_LLM>,
+                        g::Role<ROLE_WASI_LLM_CELL>,
+                        WasiFdReadRetMsg,
                         0,
                     >(),
                     g::seq(
                         g::send::<
-                            g::Role<ROLE_IOS_PROMPT_INGRESS>,
-                            g::Role<ROLE_LINUX_KERNEL>,
-                            IosPromptFactMsg,
-                            0,
-                        >(),
-                        g::seq(
-                            g::send::<
-                                g::Role<ROLE_LINUX_KERNEL>,
-                                g::Role<ROLE_M33_LED_KERNEL>,
-                                IosPromptFactMsg,
-                                0,
-                            >(),
-                            g::send::<
-                                g::Role<ROLE_M33_LED_KERNEL>,
-                                g::Role<ROLE_WASI_LLM_CELL>,
-                                WasiFdReadRetMsg,
-                                0,
-                            >(),
-                        ),
-                    ),
-                ),
-            ),
-        );
-        let llm_prompt_write = g::seq(
-            g::send::<
-                g::Role<ROLE_WASI_LLM_CELL>,
-                g::Role<ROLE_M33_LED_KERNEL>,
-                WasiFdWriteReqMsg,
-                1,
-            >(),
-            g::seq(
-                g::send::<
-                    g::Role<ROLE_M33_LED_KERNEL>,
-                    g::Role<ROLE_LINUX_KERNEL>,
-                    LlmPromptToLinuxMsg,
-                    1,
-                >(),
-                g::seq(
-                    g::send::<
-                        g::Role<ROLE_LINUX_KERNEL>,
-                        g::Role<ROLE_LLM_SIDECAR>,
-                        LlmRequestToSidecarMsg,
-                        1,
-                    >(),
-                    g::seq(
-                        g::send::<
-                            g::Role<ROLE_LLM_SIDECAR>,
-                            g::Role<ROLE_LINUX_KERNEL>,
-                            LlmProposalToLinuxMsg,
+                            g::Role<ROLE_WASI_LLM_CELL>,
+                            g::Role<ROLE_M33_LED_KERNEL>,
+                            WasiFdWriteReqMsg,
                             1,
                         >(),
                         g::seq(
-                            g::send::<
-                                g::Role<ROLE_LINUX_KERNEL>,
-                                g::Role<ROLE_M33_LED_KERNEL>,
-                                FaceCandidateToM33Msg,
-                                1,
-                            >(),
                             g::send::<
                                 g::Role<ROLE_M33_LED_KERNEL>,
                                 g::Role<ROLE_WASI_LLM_CELL>,
                                 WasiFdWriteRetMsg,
                                 1,
                             >(),
+                            g::seq(
+                                g::send::<
+                                    g::Role<ROLE_WASI_LLM_CELL>,
+                                    g::Role<ROLE_M33_LED_KERNEL>,
+                                    WasiPollReqMsg,
+                                    1,
+                                >(),
+                                g::send::<
+                                    g::Role<ROLE_M33_LED_KERNEL>,
+                                    g::Role<ROLE_WASI_LLM_CELL>,
+                                    WasiPollRetMsg,
+                                    1,
+                                >(),
+                            ),
                         ),
                     ),
                 ),
             ),
         );
-        let challenger_write = g::seq(
-            g::send::<
-                g::Role<ROLE_WASI_LLM_CELL>,
-                g::Role<ROLE_M33_LED_KERNEL>,
-                WasiFdWriteReqMsg,
-                2,
-            >(),
+        let face_frame_loop = g::route(
+            frame_cycle,
             g::seq(
                 g::send::<
-                    g::Role<ROLE_M33_LED_KERNEL>,
-                    g::Role<ROLE_CHALLENGER_KERNEL>,
-                    ChallengerPacketMsg,
-                    2,
-                >(),
-                g::seq(
-                    g::send::<
-                        g::Role<ROLE_CHALLENGER_KERNEL>,
-                        g::Role<ROLE_M33_LED_KERNEL>,
-                        ChallengerReceiptMsg,
-                        2,
-                    >(),
-                    g::send::<
-                        g::Role<ROLE_M33_LED_KERNEL>,
-                        g::Role<ROLE_WASI_LLM_CELL>,
-                        WasiFdWriteRetMsg,
-                        2,
-                    >(),
-                ),
-            ),
-        );
-        let challenger_read = g::seq(
-            g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_M33_LED_KERNEL>, WasiFdReadReqMsg, 3>(
-            ),
-            g::seq(
-                g::send::<
-                    g::Role<ROLE_M33_LED_KERNEL>,
-                    g::Role<ROLE_CHALLENGER_KERNEL>,
-                    ChallengerReadMsg,
-                    3,
-                >(),
-                g::seq(
-                    g::send::<
-                        g::Role<ROLE_CHALLENGER_KERNEL>,
-                        g::Role<ROLE_M33_LED_KERNEL>,
-                        ChallengerReadRetMsg,
-                        3,
-                    >(),
-                    g::send::<
-                        g::Role<ROLE_M33_LED_KERNEL>,
-                        g::Role<ROLE_WASI_LLM_CELL>,
-                        WasiFdReadRetMsg,
-                        3,
-                    >(),
-                ),
-            ),
-        );
-        let face_ack_write = g::seq(
-            g::send::<
-                g::Role<ROLE_WASI_LLM_CELL>,
-                g::Role<ROLE_M33_LED_KERNEL>,
-                WasiFdWriteReqMsg,
-                4,
-            >(),
-            g::seq(
-                g::send::<
-                    g::Role<ROLE_M33_LED_KERNEL>,
-                    g::Role<ROLE_LINUX_KERNEL>,
-                    FaceAckCommitMsg,
-                    4,
-                >(),
-                g::send::<
-                    g::Role<ROLE_M33_LED_KERNEL>,
                     g::Role<ROLE_WASI_LLM_CELL>,
-                    WasiFdWriteRetMsg,
-                    4,
+                    g::Role<ROLE_WASI_LLM_CELL>,
+                    WasiImportLoopBreak,
+                    0,
+                >(),
+                g::send::<
+                    g::Role<ROLE_WASI_LLM_CELL>,
+                    g::Role<ROLE_M33_LED_KERNEL>,
+                    WasiProcExitReqMsg,
+                    1,
                 >(),
             ),
         );
         g::seq(
-            g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_M33_LED_KERNEL>, WasiPathOpenReqMsg, 0>(),
+            g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_PSEUDO_LLM>, WasiPathOpenReqMsg, 0>(
+            ),
             g::seq(
-                g::send::<g::Role<ROLE_M33_LED_KERNEL>, g::Role<ROLE_WASI_LLM_CELL>, WasiPathOpenRetMsg, 0>(),
+                g::send::<
+                    g::Role<ROLE_PSEUDO_LLM>,
+                    g::Role<ROLE_WASI_LLM_CELL>,
+                    WasiPathOpenRetMsg,
+                    0,
+                >(),
                 g::seq(
-                    ios_prompt_read,
+                    g::send::<
+                        g::Role<ROLE_WASI_LLM_CELL>,
+                        g::Role<ROLE_M33_LED_KERNEL>,
+                        WasiPathOpenReqMsg,
+                        1,
+                    >(),
                     g::seq(
-                        g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_M33_LED_KERNEL>, WasiPathOpenReqMsg, 1>(),
-                        g::seq(
-                            g::send::<g::Role<ROLE_M33_LED_KERNEL>, g::Role<ROLE_WASI_LLM_CELL>, WasiPathOpenRetMsg, 1>(),
-                            g::seq(
-                                llm_prompt_write,
-                                g::seq(
-                                    g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_M33_LED_KERNEL>, WasiPollReqMsg, 1>(),
-                                    g::seq(
-                                        g::send::<g::Role<ROLE_M33_LED_KERNEL>, g::Role<ROLE_WASI_LLM_CELL>, WasiPollRetMsg, 1>(),
-                                        g::seq(
-                                            g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_M33_LED_KERNEL>, WasiPathOpenReqMsg, 2>(),
-                                            g::seq(
-                                                g::send::<g::Role<ROLE_M33_LED_KERNEL>, g::Role<ROLE_WASI_LLM_CELL>, WasiPathOpenRetMsg, 2>(),
-                                                g::seq(
-                                                    challenger_write,
-                                                    g::seq(
-                                                        g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_M33_LED_KERNEL>, WasiPathOpenReqMsg, 3>(),
-                                                        g::seq(
-                                                            g::send::<g::Role<ROLE_M33_LED_KERNEL>, g::Role<ROLE_WASI_LLM_CELL>, WasiPathOpenRetMsg, 3>(),
-                                                            g::seq(
-                                                                challenger_read,
-                                                                g::seq(
-                                                                    g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_M33_LED_KERNEL>, WasiPathOpenReqMsg, 4>(),
-                                                                    g::seq(
-                                                                        g::send::<g::Role<ROLE_M33_LED_KERNEL>, g::Role<ROLE_WASI_LLM_CELL>, WasiPathOpenRetMsg, 4>(),
-                                                                        g::seq(
-                                                                            face_ack_write,
-                                                                            g::seq(
-                                                                                g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_M33_LED_KERNEL>, WasiProcExitReqMsg, 4>(),
-                                                                                g::send::<g::Role<ROLE_M33_LED_KERNEL>, g::Role<ROLE_LINUX_KERNEL>, FinalCommitMsg, 4>(),
-                                                                            ),
-                                                                        ),
-                                                                    ),
-                                                                ),
-                                                            ),
-                                                        ),
-                                                    ),
-                                                ),
-                                            ),
-                                        ),
-                                    ),
-                                ),
-                            ),
-                        ),
+                        g::send::<
+                            g::Role<ROLE_M33_LED_KERNEL>,
+                            g::Role<ROLE_WASI_LLM_CELL>,
+                            WasiPathOpenRetMsg,
+                            1,
+                        >(),
+                        face_frame_loop,
                     ),
                 ),
             ),
@@ -444,10 +344,7 @@ impl appkit::Placement<UnoQCapsule> for UnoQPlacement {
         match role {
             ROLE_WASI_LLM_CELL => appkit::RoleKind::Engine,
             ROLE_M33_LED_KERNEL => appkit::RoleKind::Driver,
-            ROLE_LINUX_KERNEL
-            | ROLE_LLM_SIDECAR
-            | ROLE_CHALLENGER_KERNEL
-            | ROLE_IOS_PROMPT_INGRESS => appkit::RoleKind::Boundary,
+            ROLE_PSEUDO_LLM => appkit::RoleKind::Boundary,
             _ => appkit::RoleKind::Supervisor,
         }
     }
@@ -456,8 +353,8 @@ impl appkit::Placement<UnoQCapsule> for UnoQPlacement {
 #[cfg(target_os = "none")]
 unsafe extern "C" {
     fn uno_q_m33_board_ready();
-    fn uno_q_m33_board_accept_candidate(face: u8, mouth_frames: u8);
-    fn uno_q_m33_board_commit_face(face: u8);
+    fn uno_q_m33_board_show_face(face: u8);
+    fn uno_q_m33_role_step(step: u32);
 }
 
 fn m33_board_ready() {
@@ -467,22 +364,22 @@ fn m33_board_ready() {
     }
 }
 
-fn m33_board_accept_candidate(face: u8, mouth_frames: u8) {
+fn m33_board_show_face(face: u8) {
     #[cfg(target_os = "none")]
     unsafe {
-        uno_q_m33_board_accept_candidate(face, mouth_frames);
-    }
-    #[cfg(not(target_os = "none"))]
-    core::hint::black_box((face, mouth_frames));
-}
-
-fn m33_board_commit_face(face: u8) {
-    #[cfg(target_os = "none")]
-    unsafe {
-        uno_q_m33_board_commit_face(face);
+        uno_q_m33_board_show_face(face);
     }
     #[cfg(not(target_os = "none"))]
     core::hint::black_box(face);
+}
+
+fn m33_role_step(step: u32) {
+    #[cfg(target_os = "none")]
+    unsafe {
+        uno_q_m33_role_step(step);
+    }
+    #[cfg(not(target_os = "none"))]
+    core::hint::black_box(step);
 }
 
 async fn run_m33_driver<const ROLE: u8>(
@@ -492,141 +389,17 @@ async fn run_m33_driver<const ROLE: u8>(
         return ctx.pending().await;
     }
 
+    m33_role_step(0x0100);
     m33_board_ready();
 
-    let selected_face: u8;
-    let challenger_status: u8;
-
+    m33_role_step(0x0200);
     let request = expect_path_open(ctx.endpoint().recv::<WasiPathOpenReqMsg>().await?)?;
-    complete_path_open(&mut ctx, request, IOS_PROMPT_PATH, FD_READ_RIGHT).await?;
+    m33_role_step(0x0201);
+    complete_path_open(&mut ctx, request, FACE_FRAME_PATH, FD_WRITE_RIGHT).await?;
 
-    let read = expect_fd_read(ctx.endpoint().recv::<WasiFdReadReqMsg>().await?)?;
-    expect_fd_object(&ctx, read.fd(), IOS_PROMPT_OBJECT.object(), FD_READ_RIGHT)?;
-    let prompt_request = SmallText::new(b"ios prompt")?;
-    ctx.endpoint()
-        .flow::<IosPromptRequestMsg>()?
-        .send(&prompt_request)
-        .await?;
-    let prompt = ctx.endpoint().recv::<IosPromptFactMsg>().await?;
-    let reply = EngineRet::FdReadDone(FdReadDone::new_with_lease(
-        read.fd(),
-        read.lease_id(),
-        bounded(prompt.as_bytes(), read.max_len() as usize),
-    )?);
-    ctx.endpoint()
-        .flow::<WasiFdReadRetMsg>()?
-        .send(&reply)
-        .await?;
-
-    let request = expect_path_open(ctx.endpoint().recv::<WasiPathOpenReqMsg>().await?)?;
-    complete_path_open(&mut ctx, request, LLM_PROMPT_PATH, FD_WRITE_RIGHT).await?;
-
-    let write = expect_fd_write(ctx.endpoint().recv::<WasiFdWriteReqMsg>().await?)?;
-    expect_fd_object(&ctx, write.fd(), LLM_PROMPT_OBJECT.object(), FD_WRITE_RIGHT)?;
-    let prompt = SmallText::new(write.as_bytes())?;
-    ctx.endpoint()
-        .flow::<LlmPromptToLinuxMsg>()?
-        .send(&prompt)
-        .await?;
-    let candidate = ctx.endpoint().recv::<FaceCandidateToM33Msg>().await?;
-    if candidate.face() != FACE_SPEAKING || candidate.mouth_frames() < 3 {
-        return Err(UnoQRuntimeError::RuntimeViolation);
-    }
-    m33_board_accept_candidate(candidate.face(), candidate.mouth_frames());
-    selected_face = candidate.face();
-    send_fd_write_done(&mut ctx, write.fd(), write.len()).await?;
-
-    let poll = ctx.endpoint().recv::<WasiPollReqMsg>().await?;
-    let EngineReq::PollOneoff(poll) = poll else {
-        return Err(UnoQRuntimeError::RuntimeViolation);
-    };
-    if poll.timeout_tick() != 10 {
-        return Err(UnoQRuntimeError::RuntimeViolation);
-    }
-    ctx.endpoint()
-        .flow::<WasiPollRetMsg>()?
-        .send(&EngineRet::PollReady(PollReady::new(1)))
-        .await?;
-
-    let request = expect_path_open(ctx.endpoint().recv::<WasiPathOpenReqMsg>().await?)?;
-    complete_path_open(&mut ctx, request, CHALLENGER_TX_PATH, FD_WRITE_RIGHT).await?;
-
-    let write = expect_fd_write(ctx.endpoint().recv::<WasiFdWriteReqMsg>().await?)?;
-    expect_fd_object(
-        &ctx,
-        write.fd(),
-        CHALLENGER_TX_OBJECT.object(),
-        FD_WRITE_RIGHT,
-    )?;
-    let packet = NetPacket::new(1, write.as_bytes())?;
-    ctx.endpoint()
-        .flow::<ChallengerPacketMsg>()?
-        .send(&packet)
-        .await?;
-    let receipt = ctx.endpoint().recv::<ChallengerReceiptMsg>().await?;
-    if receipt.packet_id() != 1 || receipt.status() != 1 {
-        return Err(UnoQRuntimeError::RuntimeViolation);
-    }
-    challenger_status = receipt.status();
-    send_fd_write_done(&mut ctx, write.fd(), write.len()).await?;
-
-    let request = expect_path_open(ctx.endpoint().recv::<WasiPathOpenReqMsg>().await?)?;
-    complete_path_open(&mut ctx, request, CHALLENGER_RX_PATH, FD_READ_RIGHT).await?;
-
-    let read = expect_fd_read(ctx.endpoint().recv::<WasiFdReadReqMsg>().await?)?;
-    expect_fd_object(
-        &ctx,
-        read.fd(),
-        CHALLENGER_RX_OBJECT.object(),
-        FD_READ_RIGHT,
-    )?;
-    let read_packet = NetPacket::new(2, b"read receipt")?;
-    ctx.endpoint()
-        .flow::<ChallengerReadMsg>()?
-        .send(&read_packet)
-        .await?;
-    let read_receipt = ctx.endpoint().recv::<ChallengerReadRetMsg>().await?;
-    if read_receipt.packet_id() != 2 || read_receipt.status() != 1 {
-        return Err(UnoQRuntimeError::RuntimeViolation);
-    }
-    let reply = EngineRet::FdReadDone(FdReadDone::new_with_lease(
-        read.fd(),
-        read.lease_id(),
-        bounded(read_receipt.body().as_bytes(), read.max_len() as usize),
-    )?);
-    ctx.endpoint()
-        .flow::<WasiFdReadRetMsg>()?
-        .send(&reply)
-        .await?;
-
-    let request = expect_path_open(ctx.endpoint().recv::<WasiPathOpenReqMsg>().await?)?;
-    complete_path_open(&mut ctx, request, FACE_ACK_PATH, FD_WRITE_RIGHT).await?;
-
-    let write = expect_fd_write(ctx.endpoint().recv::<WasiFdWriteReqMsg>().await?)?;
-    expect_fd_object(&ctx, write.fd(), FACE_ACK_OBJECT.object(), FD_WRITE_RIGHT)?;
-    if write.as_bytes() != b"face committed" {
-        return Err(UnoQRuntimeError::RuntimeViolation);
-    }
-    let commit = CommitMarker::new(selected_face, challenger_status)?;
-    ctx.endpoint()
-        .flow::<FaceAckCommitMsg>()?
-        .send(&commit)
-        .await?;
-    send_fd_write_done(&mut ctx, write.fd(), write.len()).await?;
-
-    let proc_exit = ctx.endpoint().recv::<WasiProcExitReqMsg>().await?;
-    let EngineReq::ProcExit(status) = proc_exit else {
-        return Err(UnoQRuntimeError::RuntimeViolation);
-    };
-    if status.code() != 0 {
-        return Err(UnoQRuntimeError::RuntimeViolation);
-    }
-    let final_commit = CommitMarker::new(selected_face, challenger_status)?;
-    m33_board_commit_face(final_commit.face());
-    ctx.endpoint()
-        .flow::<FinalCommitMsg>()?
-        .send(&final_commit)
-        .await?;
+    m33_role_step(0x0500);
+    drive_face_frame_loop(&mut ctx).await?;
+    m33_role_step(0x0501);
     ctx.pending().await
 }
 
@@ -634,165 +407,168 @@ async fn run_boundary<const ROLE: u8>(
     mut ctx: appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
 ) -> appkit::RoleResult<UnoQRuntimeError> {
     match ROLE {
-        ROLE_LINUX_KERNEL => {
-            let prompt_request = ctx.endpoint().recv::<IosPromptRequestMsg>().await?;
-            ctx.endpoint()
-                .flow::<IosPromptRequestMsg>()?
-                .send(&prompt_request)
-                .await?;
-            let prompt = ctx.endpoint().recv::<IosPromptFactMsg>().await?;
-            ctx.endpoint()
-                .flow::<IosPromptFactMsg>()?
-                .send(&prompt)
-                .await?;
-
-            let prompt = ctx.endpoint().recv::<LlmPromptToLinuxMsg>().await?;
-            ctx.endpoint()
-                .flow::<LlmRequestToSidecarMsg>()?
-                .send(&prompt)
-                .await?;
-            let proposal = ctx.endpoint().recv::<LlmProposalToLinuxMsg>().await?;
-            let candidate = FaceCandidate::new(proposal.emotion(), 3)?;
-            ctx.endpoint()
-                .flow::<FaceCandidateToM33Msg>()?
-                .send(&candidate)
-                .await?;
-
-            let ack = ctx.endpoint().recv::<FaceAckCommitMsg>().await?;
-            if ack.face() != FACE_SPEAKING || ack.challenger_status() != 1 {
-                return Err(UnoQRuntimeError::RuntimeViolation);
+        ROLE_PSEUDO_LLM => {
+            let request = expect_path_open(ctx.endpoint().recv::<WasiPathOpenReqMsg>().await?)?;
+            complete_boundary_path_open(&mut ctx, request, LLM_FRAME_PATH, FD_READ_RIGHT).await?;
+            for ordinal in 0..UNO_Q_FACE_CYCLE_FRAME_COUNT {
+                let branch = ctx.endpoint().offer().await?;
+                match branch.label() {
+                    LABEL_WASI_FD_READ => {
+                        let read = expect_fd_read(branch.decode::<WasiFdReadReqMsg>().await?)?;
+                        if read.fd() != LLM_FRAME_FD || read.max_len() < 2 {
+                            return Err(UnoQRuntimeError::RuntimeViolation);
+                        }
+                        let frame = pseudo_llm_frame(ordinal as u8)?;
+                        ctx.endpoint()
+                            .flow::<WasiFdReadRetMsg>()?
+                            .send(&EngineRet::FdReadDone(FdReadDone::new_with_lease(
+                                read.fd(),
+                                read.lease_id(),
+                                &[frame.face(), frame.ordinal()],
+                            )?))
+                            .await?;
+                    }
+                    _ => return Err(UnoQRuntimeError::RuntimeViolation),
+                }
             }
-            let final_commit = ctx.endpoint().recv::<FinalCommitMsg>().await?;
-            if final_commit.face() != ack.face()
-                || final_commit.challenger_status() != ack.challenger_status()
-            {
-                return Err(UnoQRuntimeError::RuntimeViolation);
-            }
-        }
-        ROLE_IOS_PROMPT_INGRESS => {
-            let request = ctx.endpoint().recv::<IosPromptRequestMsg>().await?;
-            if request.as_bytes() != b"ios prompt" {
-                return Err(UnoQRuntimeError::RuntimeViolation);
-            }
-            let prompt = ios_prompt_fact()?;
-            ctx.endpoint()
-                .flow::<IosPromptFactMsg>()?
-                .send(&prompt)
-                .await?;
-        }
-        ROLE_LLM_SIDECAR => {
-            let prompt = ctx.endpoint().recv::<LlmRequestToSidecarMsg>().await?;
-            if prompt.as_bytes().is_empty() {
-                return Err(UnoQRuntimeError::RuntimeViolation);
-            }
-            let proposal =
-                protocol::LlmProposal::new(FACE_SPEAKING, b"hibana choreography speaks")?;
-            ctx.endpoint()
-                .flow::<LlmProposalToLinuxMsg>()?
-                .send(&proposal)
-                .await?;
-        }
-        ROLE_CHALLENGER_KERNEL => {
-            let packet = ctx.endpoint().recv::<ChallengerPacketMsg>().await?;
-            if packet.packet_id() != 1 || packet.body().as_bytes() != b"challenger ping" {
-                return Err(UnoQRuntimeError::RuntimeViolation);
-            }
-            let receipt = NetReceipt::new(1, 1, b"packet accepted")?;
-            ctx.endpoint()
-                .flow::<ChallengerReceiptMsg>()?
-                .send(&receipt)
-                .await?;
-
-            let read = ctx.endpoint().recv::<ChallengerReadMsg>().await?;
-            if read.packet_id() != 2 {
-                return Err(UnoQRuntimeError::RuntimeViolation);
-            }
-            let read_reply = NetReceipt::new(2, 1, b"challenger ok happy")?;
-            ctx.endpoint()
-                .flow::<ChallengerReadRetMsg>()?
-                .send(&read_reply)
-                .await?;
         }
         _ => {}
     }
     ctx.pending().await
 }
 
-#[cfg(not(target_os = "none"))]
-fn ios_prompt_fact() -> Result<SmallText, UnoQRuntimeError> {
-    if std::env::var_os("UNO_Q_IOS_PROMPT_TCP").is_none() {
-        return Ok(SmallText::new(b"face happy say hibana")?);
-    }
-
-    use std::io::{Read, Write};
-
-    let addr = std::env::var("UNO_Q_IOS_PROMPT_ADDR").unwrap_or_else(|_| "0.0.0.0:7105".into());
-    let listener =
-        std::net::TcpListener::bind(addr).map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
-    let (mut stream, peer) = listener
-        .accept()
-        .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
-    core::hint::black_box(peer);
-
-    let mut input = [0u8; 512];
-    let len = stream
-        .read(&mut input)
-        .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
-    let prompt = ios_prompt_from_wire(&input[..len]);
-    let response =
-        b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 16\r\n\r\nhibana accepted\n";
-    let response_sent = stream.write_all(response).is_ok();
-    core::hint::black_box(response_sent);
-    SmallText::new(prompt).map_err(Into::into)
-}
-
-#[cfg(target_os = "none")]
-fn ios_prompt_fact() -> Result<SmallText, UnoQRuntimeError> {
-    SmallText::new(b"face happy say hibana").map_err(Into::into)
-}
-
-#[cfg(not(target_os = "none"))]
-fn ios_prompt_from_wire(input: &[u8]) -> &[u8] {
-    let body = match find_subslice(input, b"\r\n\r\n") {
-        Some(index) => &input[index + 4..],
-        None => input,
-    };
-    let body = body.strip_prefix(b"prompt=").unwrap_or(body);
-    let trimmed = trim_ascii(body);
-    if trimmed.is_empty() {
-        b"face happy say hibana"
-    } else {
-        bounded(trimmed, protocol::MAX_TEXT_BYTES)
-    }
-}
-
-#[cfg(not(target_os = "none"))]
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || needle.len() > haystack.len() {
-        return None;
-    }
-    let last_start = haystack.len() - needle.len();
-    let mut index = 0usize;
-    while index <= last_start {
-        if &haystack[index..index + needle.len()] == needle {
-            return Some(index);
+async fn drive_face_frame_loop<const ROLE: u8>(
+    ctx: &mut appkit::DriverCtx<'_, UnoQCapsule, ROLE>,
+) -> Result<(), UnoQRuntimeError> {
+    let mut ordinal = 0u8;
+    loop {
+        m33_role_step(0x0d20_0000 | u32::from(ordinal));
+        #[cfg(not(target_os = "none"))]
+        if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+            eprintln!("uno-q-face passive offer ordinal={ordinal}");
         }
-        index += 1;
+        let branch = match ctx.endpoint().offer().await {
+            Ok(branch) => branch,
+            Err(error) => {
+                m33_role_step(0xed20_0000 | u32::from(ordinal));
+                return Err(error.into());
+            }
+        };
+        m33_role_step(0x0d21_0000 | (u32::from(ordinal) << 8) | u32::from(branch.label()));
+        #[cfg(not(target_os = "none"))]
+        if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+            eprintln!(
+                "uno-q-face passive branch ordinal={ordinal} label={}",
+                branch.label()
+            );
+        }
+        match branch.label() {
+            LABEL_WASI_FD_WRITE => {
+                m33_role_step(0x0d22_0000 | u32::from(ordinal));
+                let write = match branch.decode::<WasiFdWriteReqMsg>().await {
+                    Ok(request) => expect_fd_write(request)?,
+                    Err(error) => {
+                        m33_role_step(0xed22_0000 | u32::from(ordinal));
+                        return Err(error.into());
+                    }
+                };
+                expect_fd_object(
+                    &*ctx,
+                    write.fd(),
+                    FACE_FRAME_OBJECT.object(),
+                    FD_WRITE_RIGHT,
+                )?;
+                let frame = FaceFrame::decode_payload(Payload::new(write.as_bytes()))?;
+                m33_role_step(
+                    0x0d23_0000 | (u32::from(frame.face()) << 8) | u32::from(frame.ordinal()),
+                );
+                if frame.ordinal() != ordinal {
+                    m33_role_step(
+                        0xed23_0000 | (u32::from(frame.ordinal()) << 8) | u32::from(ordinal),
+                    );
+                    return Err(UnoQRuntimeError::RuntimeViolation);
+                }
+                m33_role_step(0x0d24_0000 | u32::from(frame.face()));
+                m33_board_show_face(frame.face());
+                m33_role_step(
+                    0x0d25_0000 | (u32::from(frame.face()) << 8) | u32::from(frame.ordinal()),
+                );
+                send_fd_write_done(ctx, write.fd(), write.len()).await?;
+                recv_face_frame_poll(ctx, frame.face()).await?;
+                ordinal = ordinal.wrapping_add(1);
+            }
+            LABEL_WASI_PROC_EXIT => {
+                m33_role_step(0x0d26_0000 | u32::from(ordinal));
+                let proc_exit = match branch.decode::<WasiProcExitReqMsg>().await {
+                    Ok(request) => request,
+                    Err(error) => {
+                        m33_role_step(0xed26_0000 | u32::from(ordinal));
+                        return Err(error.into());
+                    }
+                };
+                let EngineReq::ProcExit(status) = proc_exit else {
+                    m33_role_step(0xed26_1000 | u32::from(ordinal));
+                    return Err(UnoQRuntimeError::RuntimeViolation);
+                };
+                if status.code() != 0 {
+                    m33_role_step(0xed26_2000 | u32::from(status.code() as u8));
+                    return Err(UnoQRuntimeError::RuntimeViolation);
+                }
+                if usize::from(ordinal) != UNO_Q_FACE_CYCLE_FRAME_COUNT {
+                    m33_role_step(
+                        0xed27_0000
+                            | ((UNO_Q_FACE_CYCLE_FRAME_COUNT as u32) << 8)
+                            | u32::from(ordinal),
+                    );
+                    return Err(UnoQRuntimeError::RuntimeViolation);
+                }
+                m33_role_step(0x0d27_0000 | u32::from(ordinal));
+                break;
+            }
+            label => {
+                m33_role_step(0xed21_0000 | (u32::from(ordinal) << 8) | u32::from(label));
+                return Err(UnoQRuntimeError::RuntimeViolation);
+            }
+        }
     }
-    None
+    Ok(())
 }
 
-#[cfg(not(target_os = "none"))]
-fn trim_ascii(bytes: &[u8]) -> &[u8] {
-    let mut start = 0usize;
-    let mut end = bytes.len();
-    while start < end && bytes[start].is_ascii_whitespace() {
-        start += 1;
+async fn recv_face_frame_poll<const ROLE: u8>(
+    ctx: &mut appkit::DriverCtx<'_, UnoQCapsule, ROLE>,
+    face: u8,
+) -> Result<(), UnoQRuntimeError> {
+    let poll = ctx.endpoint().recv::<WasiPollReqMsg>().await?;
+    let EngineReq::PollOneoff(poll) = poll else {
+        return Err(UnoQRuntimeError::RuntimeViolation);
+    };
+    if poll.timeout_tick() != face_hold_tick(face) {
+        return Err(UnoQRuntimeError::RuntimeViolation);
     }
-    while end > start && bytes[end - 1].is_ascii_whitespace() {
-        end -= 1;
+    ctx.endpoint()
+        .flow::<WasiPollRetMsg>()?
+        .send(&EngineRet::PollReady(PollReady::new(1)))
+        .await?;
+    Ok(())
+}
+
+fn face_hold_tick(face: u8) -> u64 {
+    match face {
+        FACE_MOUTH_CLOSED | FACE_MOUTH_SMALL | FACE_MOUTH_WIDE | FACE_MOUTH_ROUND => {
+            UNO_Q_FACE_MOUTH_HOLD_US / 1_000
+        }
+        _ => UNO_Q_FACE_EMOTION_HOLD_US / 1_000,
     }
-    &bytes[start..end]
+}
+
+fn pseudo_llm_frame(ordinal: u8) -> Result<FaceFrame, UnoQRuntimeError> {
+    let index = usize::from(ordinal) % UNO_Q_FACE_CYCLE_FRAME_COUNT;
+    let face = if index < UNO_Q_FACE_EMOTION_FRAMES.len() {
+        UNO_Q_FACE_EMOTION_FRAMES[index]
+    } else {
+        UNO_Q_FACE_MOUTH_FRAMES[index - UNO_Q_FACE_EMOTION_FRAMES.len()]
+    };
+    FaceFrame::new(face, ordinal).map_err(Into::into)
 }
 
 impl appkit::Localside<UnoQCapsule> for UnoQLocal {
@@ -838,20 +614,20 @@ fn expect_path_open(
     }
 }
 
-fn expect_fd_read(
-    request: EngineReq,
-) -> Result<hibana_pico::choreography::protocol::FdRead, UnoQRuntimeError> {
-    match request {
-        EngineReq::FdRead(request) => Ok(request),
-        _ => Err(UnoQRuntimeError::RuntimeViolation),
-    }
-}
-
 fn expect_fd_write(
     request: EngineReq,
 ) -> Result<hibana_pico::choreography::protocol::FdWrite, UnoQRuntimeError> {
     match request {
         EngineReq::FdWrite(request) => Ok(request),
+        _ => Err(UnoQRuntimeError::RuntimeViolation),
+    }
+}
+
+fn expect_fd_read(
+    request: EngineReq,
+) -> Result<hibana_pico::choreography::protocol::FdRead, UnoQRuntimeError> {
+    match request {
+        EngineReq::FdRead(request) => Ok(request),
         _ => Err(UnoQRuntimeError::RuntimeViolation),
     }
 }
@@ -888,6 +664,26 @@ async fn complete_path_open<const ROLE: u8>(
     Ok(())
 }
 
+async fn complete_boundary_path_open<const ROLE: u8>(
+    ctx: &mut appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
+    request: hibana_pico::choreography::protocol::PathOpen,
+    expected_path: &[u8],
+    expected_rights: u64,
+) -> Result<(), UnoQRuntimeError> {
+    if request.preopen_fd() != PREOPEN_FD || request.rights_base() != expected_rights {
+        return Err(UnoQRuntimeError::RuntimeViolation);
+    }
+    if request.path() != expected_path {
+        return Err(UnoQRuntimeError::RuntimeViolation);
+    }
+    let reply = EngineRet::PathOpened(PathOpened::new(LLM_FRAME_FD, 0));
+    ctx.endpoint()
+        .flow::<WasiPathOpenRetMsg>()?
+        .send(&reply)
+        .await?;
+    Ok(())
+}
+
 fn expect_fd_object<const ROLE: u8>(
     ctx: &appkit::DriverCtx<'_, UnoQCapsule, ROLE>,
     fd: u8,
@@ -914,10 +710,6 @@ async fn send_fd_write_done<const ROLE: u8>(
         .send(&reply)
         .await?;
     Ok(())
-}
-
-fn bounded(bytes: &[u8], max_len: usize) -> &[u8] {
-    &bytes[..bytes.len().min(max_len)]
 }
 
 impl appkit::ArtifactForImage<UnoQCapsule, site::Local<image::HostLoopbackProof>>
@@ -1232,8 +1024,11 @@ unsafe extern "C" {
     fn uno_q_m33_carrier_write(byte: u8);
     fn uno_q_m33_carrier_read() -> i16;
     fn uno_q_m33_carrier_observe_frame(source: u8, peer: u8, label: u8, len: u8);
+    fn uno_q_m33_carrier_observe_payload(label: u8, len: u8, byte0: u8, byte1: u8);
     fn uno_q_m33_carrier_observe_tx(peer: u8, label: u8, len: u8);
+    fn uno_q_m33_carrier_observe_hint(lane: u8);
     fn uno_q_m33_board_poll();
+    fn uno_q_m33_timer_ticks() -> u32;
 }
 
 #[cfg(target_os = "none")]
@@ -1415,6 +1210,16 @@ impl hibana::integration::Transport for UnoQUartCarrier {
         rx.hint_frame_label.set(Some(frame.frame_label));
         rx.len = frame.len;
         rx.bytes[..frame.len].copy_from_slice(&frame.bytes[..frame.len]);
+        unsafe {
+            let byte0 = if rx.len > 0 { rx.bytes[0] } else { 0 };
+            let byte1 = if rx.len > 1 { rx.bytes[1] } else { 0 };
+            uno_q_m33_carrier_observe_payload(
+                frame.frame_label.raw(),
+                frame.len as u8,
+                byte0,
+                byte1,
+            );
+        }
         task_context.waker().wake_by_ref();
         Poll::Ready(Ok(Payload::new(&rx.bytes[..rx.len])))
     }
@@ -1452,17 +1257,34 @@ impl hibana::integration::Transport for UnoQUartCarrier {
         if let Some(frame_label) = rx.hint_frame_label.take() {
             return Some(frame_label);
         }
+        unsafe {
+            uno_q_m33_carrier_observe_hint(rx.lane);
+        }
         let local_role = rx.local_role as usize;
         if local_role >= PROOF_CARRIER_ROLES {
             return None;
         }
-        self.edit(|queues| queues.by_role[local_role].front_label(rx.lane))
+        let start_ticks = unsafe { uno_q_m33_timer_ticks() };
+        loop {
+            self.drain_uart(rx.session_id);
+            if let Some(frame_label) =
+                self.edit(|queues| queues.by_role[local_role].front_label(rx.lane))
+            {
+                return Some(frame_label);
+            }
+            let elapsed = unsafe { uno_q_m33_timer_ticks() }.wrapping_sub(start_ticks);
+            if elapsed >= UNO_Q_M33_HINT_DRAIN_TICKS {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        None
     }
 
     fn metrics(&self) -> Self::Metrics {}
 
     fn operational_deadline_ticks(&self) -> Option<u32> {
-        Some(UNO_Q_UART_OPERATIONAL_DEADLINE_TICKS)
+        Some(UNO_Q_M33_UART_OPERATIONAL_DEADLINE_TICKS)
     }
 
     fn apply_pacing_update(&self, interval_us: u32, burst_bytes: u16) {
@@ -1473,6 +1295,7 @@ impl hibana::integration::Transport for UnoQUartCarrier {
 #[cfg(not(target_os = "none"))]
 pub struct HardwarePeerCarrier {
     local: ProofCarrier,
+    serial_path: std::string::String,
     serial: std::sync::Mutex<std::fs::File>,
     parser: std::sync::Mutex<UartFrameParser>,
 }
@@ -1505,8 +1328,12 @@ impl HardwarePeerCarrier {
             .write(true)
             .open(&path)
             .unwrap_or_else(|error| panic!("failed to open hibana UART carrier {path}: {error}"));
+        configure_uno_q_uart_modem_ready(&serial).unwrap_or_else(|error| {
+            panic!("failed to assert DTR/RTS for hibana UART carrier {path}: {error}")
+        });
         Self {
             local: ProofCarrier::new(),
+            serial_path: path,
             serial: std::sync::Mutex::new(serial),
             parser: std::sync::Mutex::new(UartFrameParser::new()),
         }
@@ -1640,6 +1467,13 @@ impl hibana::integration::Transport for HardwarePeerCarrier {
                     outgoing.payload().as_bytes().len()
                 );
             }
+            let turnaround_us = std::env::var("UNO_Q_HIBANA_UART_TURNAROUND_US")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(50_000);
+            if turnaround_us != 0 {
+                std::thread::sleep(std::time::Duration::from_micros(turnaround_us));
+            }
             let mut frame = [0u8; UART_CARRIER_FRAME_BYTES];
             let len = encode_uart_frame(
                 &mut frame,
@@ -1650,9 +1484,12 @@ impl hibana::integration::Transport for HardwarePeerCarrier {
                 outgoing.frame_label(),
                 outgoing.payload(),
             )?;
-            let mut serial = self
-                .serial
-                .lock()
+            let mut serial = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.serial_path)
+                .map_err(|_| hibana::integration::transport::TransportError::Failed)?;
+            configure_uno_q_uart_modem_ready(&serial)
                 .map_err(|_| hibana::integration::transport::TransportError::Failed)?;
             let byte_delay_us = std::env::var("UNO_Q_HIBANA_UART_BYTE_US")
                 .ok()
@@ -1664,6 +1501,8 @@ impl hibana::integration::Transport for HardwarePeerCarrier {
                     .map_err(|_| hibana::integration::transport::TransportError::Failed)?;
                 serial
                     .flush()
+                    .map_err(|_| hibana::integration::transport::TransportError::Failed)?;
+                drain_uno_q_uart_byte(&serial)
                     .map_err(|_| hibana::integration::transport::TransportError::Failed)?;
                 if byte_delay_us != 0 {
                     std::thread::sleep(std::time::Duration::from_micros(byte_delay_us));
@@ -1759,6 +1598,7 @@ impl hibana::integration::Transport for HardwarePeerCarrier {
         if let Some(frame_label) = rx.hint_frame_label.take() {
             return Some(frame_label);
         }
+        let _ = self.drain_serial(rx.session_id);
         let local_role = rx.local_role as usize;
         if local_role >= PROOF_CARRIER_ROLES {
             return None;
@@ -1774,8 +1614,8 @@ impl hibana::integration::Transport for HardwarePeerCarrier {
             Ok(value) => value
                 .parse::<u32>()
                 .ok()
-                .or(Some(UNO_Q_UART_OPERATIONAL_DEADLINE_TICKS)),
-            Err(_) => Some(UNO_Q_UART_OPERATIONAL_DEADLINE_TICKS),
+                .or(Some(UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS)),
+            Err(_) => Some(UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS),
         }
     }
 
@@ -1974,7 +1814,7 @@ impl appkit::LogicalImage<UnoQCapsule> for site::Local<image::HostLoopbackProof>
 
     const IMAGE_ID: appkit::ImageId = appkit::ImageId(710);
     const SITE_ID: appkit::SiteId = appkit::SiteId(7100);
-    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::from_bits(0x3f);
+    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::from_bits(0x7);
     const CARRIER: appkit::CarrierKind = UNO_Q_CARRIER;
 
     fn init() -> Self {
@@ -2068,7 +1908,7 @@ impl appkit::LogicalImage<UnoQCapsule> for site::Local<image::WasiLlmCellProcess
     const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(ROLE_WASI_LLM_CELL);
     const CARRIER: appkit::CarrierKind = UNO_Q_CARRIER;
     const PEER_IMAGES: appkit::PeerImageSet =
-        appkit::PeerImageSet::pair(appkit::ImageId(712), appkit::ImageId(713));
+        appkit::PeerImageSet::pair(appkit::ImageId(712), appkit::ImageId(715));
 
     fn init() -> Self {
         site::Local::new()
@@ -2090,28 +1930,12 @@ impl appkit::LogicalImage<UnoQCapsule> for site::Local<image::WasiLlmCellProcess
 }
 
 impl_nowasi_image!(
-    image::LinuxKernelProcess,
+    image::PseudoLlmProcess,
     712,
     7102,
-    appkit::RoleSet::single(ROLE_LINUX_KERNEL),
-    appkit::PeerImageSet::pair(appkit::ImageId(711), appkit::ImageId(713)),
-    LINUX_KERNEL_ATTACH_STORAGE
-);
-impl_nowasi_image!(
-    image::LlmSidecarProcess,
-    713,
-    7103,
-    appkit::RoleSet::single(ROLE_LLM_SIDECAR),
-    appkit::PeerImageSet::single(appkit::ImageId(712)),
-    LLM_SIDECAR_ATTACH_STORAGE
-);
-impl_nowasi_image!(
-    image::IosPromptIngressProcess,
-    714,
-    7104,
-    appkit::RoleSet::single(ROLE_IOS_PROMPT_INGRESS),
-    appkit::PeerImageSet::single(appkit::ImageId(712)),
-    IOS_INGRESS_ATTACH_STORAGE
+    appkit::RoleSet::single(ROLE_PSEUDO_LLM),
+    appkit::PeerImageSet::pair(appkit::ImageId(711), appkit::ImageId(715)),
+    PSEUDO_LLM_ATTACH_STORAGE
 );
 
 impl appkit::LogicalImage<UnoQCapsule> for site::Local<image::M33LedKernelImage> {
@@ -2169,15 +1993,6 @@ impl appkit::LogicalImage<UnoQCapsule> for site::Local<image::M33LedKernelImage>
     }
 }
 
-impl_nowasi_image!(
-    image::ChallengerNetKernelImage,
-    716,
-    7106,
-    appkit::RoleSet::single(ROLE_CHALLENGER_KERNEL),
-    appkit::PeerImageSet::pair(appkit::ImageId(715), appkit::ImageId(712)),
-    CHALLENGER_ATTACH_STORAGE
-);
-
 #[cfg(feature = "runtime-wasip1")]
 impl appkit::WasiGuestImage<UnoQCapsule> for site::Local<image::HostLoopbackProof> {
     fn wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
@@ -2203,4 +2018,173 @@ pub static ARTIFACTS: UnoQArtifacts = UnoQArtifacts;
 
 pub fn projection_caps() -> appkit::ProjectionCaps {
     appkit::derive_projection_caps::<UnoQCapsule>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_uart_deadline_covers_paced_physical_frames() {
+        let full_frame_bytes = UART_CARRIER_FRAME_BYTES as u32;
+        assert!(
+            UNO_Q_M33_UART_OPERATIONAL_DEADLINE_TICKS
+                > UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS * 10
+        );
+        assert!(UNO_Q_M33_HINT_DRAIN_TICKS > UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS * 20);
+        assert!(UNO_Q_M33_UART_OPERATIONAL_DEADLINE_TICKS > full_frame_bytes * 10_000);
+    }
+
+    #[test]
+    fn face_animation_is_typed_choreography_cadence() {
+        assert_eq!(UNO_Q_FACE_EMOTION_FRAMES.len(), 12);
+        assert_eq!(UNO_Q_FACE_MOUTH_FRAMES.len(), 8);
+        assert_eq!(UNO_Q_FACE_CYCLE_FRAME_COUNT, 20);
+        assert_eq!(UNO_Q_FACE_EMOTION_HOLD_US, 1_000_000);
+        assert_eq!(UNO_Q_FACE_MOUTH_HOLD_US, 500_000);
+        assert_eq!(
+            &UNO_Q_FACE_EMOTION_FRAMES[..4],
+            &[FACE_HAPPY, FACE_ANGRY, FACE_SAD, FACE_SURPRISED]
+        );
+        assert_eq!(
+            &UNO_Q_FACE_MOUTH_FRAMES[..4],
+            &[
+                FACE_MOUTH_CLOSED,
+                FACE_MOUTH_SMALL,
+                FACE_MOUTH_WIDE,
+                FACE_MOUTH_ROUND
+            ]
+        );
+    }
+
+    #[test]
+    fn face_animation_uses_route_loop_and_passive_offer_decode() {
+        fn text(chars: &[char]) -> String {
+            chars.iter().collect()
+        }
+
+        let source = include_str!("lib.rs");
+        for required in [
+            text(&[
+                'l', 'e', 't', ' ', 'f', 'a', 'c', 'e', '_', 'f', 'r', 'a', 'm', 'e', '_', 'l',
+                'o', 'o', 'p', ' ', '=', ' ', 'g', ':', ':', 'r', 'o', 'u', 't', 'e',
+            ]),
+            text(&[
+                'W', 'a', 's', 'i', 'I', 'm', 'p', 'o', 'r', 't', 'L', 'o', 'o', 'p', 'C', 'o',
+                'n', 't', 'i', 'n', 'u', 'e',
+            ]),
+            text(&[
+                'W', 'a', 's', 'i', 'I', 'm', 'p', 'o', 'r', 't', 'L', 'o', 'o', 'p', 'B', 'r',
+                'e', 'a', 'k',
+            ]),
+            text(&[
+                'F', 'A', 'C', 'E', '_', 'F', 'R', 'A', 'M', 'E', '_', 'P', 'A', 'T', 'H',
+            ]),
+            text(&[
+                'L', 'L', 'M', '_', 'F', 'R', 'A', 'M', 'E', '_', 'P', 'A', 'T', 'H',
+            ]),
+            text(&[
+                'P', 's', 'e', 'u', 'd', 'o', 'L', 'l', 'm', 'P', 'r', 'o', 'c', 'e', 's', 's',
+            ]),
+            text(&[
+                'W', 'a', 's', 'i', 'F', 'd', 'R', 'e', 'a', 'd', 'R', 'e', 'q', 'M', 's', 'g',
+            ]),
+            text(&[
+                'W', 'a', 's', 'i', 'F', 'd', 'R', 'e', 'a', 'd', 'R', 'e', 't', 'M', 's', 'g',
+            ]),
+            text(&[
+                'o', 'f', 'f', 'e', 'r', '(', ')', '.', 'a', 'w', 'a', 'i', 't',
+            ]),
+            text(&[
+                'b', 'r', 'a', 'n', 'c', 'h', '.', 'd', 'e', 'c', 'o', 'd', 'e',
+            ]),
+        ] {
+            assert!(
+                source.contains(&required),
+                "face animation passive offer path must stay route-loop/transport-drained: missing {required}"
+            );
+        }
+
+        let compact: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+        let wasi = text(&[
+            'R', 'O', 'L', 'E', '_', 'W', 'A', 'S', 'I', '_', 'L', 'L', 'M', '_', 'C', 'E', 'L',
+            'L',
+        ]);
+        let m33 = text(&[
+            'R', 'O', 'L', 'E', '_', 'M', '3', '3', '_', 'L', 'E', 'D', '_', 'K', 'E', 'R', 'N',
+            'E', 'L',
+        ]);
+        let pseudo = text(&[
+            'R', 'O', 'L', 'E', '_', 'P', 'S', 'E', 'U', 'D', 'O', '_', 'L', 'L', 'M',
+        ]);
+        let read_req = text(&[
+            'W', 'a', 's', 'i', 'F', 'd', 'R', 'e', 'a', 'd', 'R', 'e', 'q', 'M', 's', 'g',
+        ]);
+        let read_ret = text(&[
+            'W', 'a', 's', 'i', 'F', 'd', 'R', 'e', 'a', 'd', 'R', 'e', 't', 'M', 's', 'g',
+        ]);
+        assert!(
+            compact.contains(&format!("g::Role<{wasi}>,g::Role<{pseudo}>,{read_req}")),
+            "WASI must read /llm/frame from the pseudo LLM role through ChoreoFS"
+        );
+        assert!(
+            compact.contains(&format!("g::Role<{pseudo}>,g::Role<{wasi}>,{read_ret}")),
+            "pseudo LLM must answer only the WASI fd_read reply"
+        );
+        for forbidden in [
+            format!("g::Role<{m33}>,g::Role<{pseudo}>"),
+            format!("g::Role<{pseudo}>,g::Role<{m33}>"),
+        ] {
+            assert!(
+                !compact.contains(&forbidden),
+                "M33 and pseudo LLM must not be directly wired; found {forbidden}"
+            );
+        }
+
+        for forbidden in [
+            text(&['F', 'r', 'a', 'm', 'e', 'R', 'e', 'q', 'u', 'e', 's', 't']),
+            text(&[
+                'L', 'l', 'm', 'F', 'r', 'a', 'm', 'e', 'R', 'e', 'q', 'u', 'e', 's', 't', 'M',
+                's', 'g',
+            ]),
+            text(&[
+                'L', 'l', 'm', 'F', 'r', 'a', 'm', 'e', 'R', 'e', 's', 'p', 'o', 'n', 's', 'e',
+                'M', 's', 'g',
+            ]),
+            text(&[
+                'F', 'a', 'c', 'e', 'F', 'r', 'a', 'm', 'e', 's', 'A', 'p', 'p', 'l', 'i', 'e', 'd',
+            ]),
+            text(&[
+                'L', 'A', 'B', 'E', 'L', '_', 'L', 'L', 'M', '_', 'F', 'R', 'A', 'M', 'E',
+            ]),
+            text(&[
+                'L', 'A', 'B', 'E', 'L', '_', 'F', 'A', 'C', 'E', '_', 'F', 'R', 'A', 'M', 'E',
+                'S', '_', 'A', 'P', 'P', 'L', 'I', 'E', 'D',
+            ]),
+            text(&[
+                'F', 'A', 'C', 'E', '_', 'F', 'R', 'A', 'M', 'E', '_', 'L', 'O', 'O', 'P', '_',
+                'P', 'O', 'L', 'I', 'C', 'Y',
+            ]),
+            text(&[
+                'f', 'a', 'c', 'e', '_', 'f', 'r', 'a', 'm', 'e', '_', 'l', 'o', 'o', 'p', '_',
+                'r', 'e', 's', 'o', 'l', 'v', 'e', 'r',
+            ]),
+            text(&[
+                'p', 'o', 'l', 'i', 'c', 'y', ':', ':', 'R', 'e', 's', 'o', 'l', 'v', 'e', 'r',
+                'R', 'e', 'f',
+            ]),
+            text(&['R', 'O', 'L', 'E', '_', 'I', 'O', 'S']),
+            text(&[
+                'R', 'O', 'L', 'E', '_', 'C', 'H', 'A', 'L', 'L', 'E', 'N', 'G', 'E', 'R',
+            ]),
+            text(&[
+                'R', 'O', 'L', 'E', '_', 'L', 'L', 'M', '_', 'S', 'I', 'D', 'E', 'C', 'A', 'R',
+            ]),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "face animation is a static route-loop; remove {forbidden}"
+            );
+        }
+    }
 }

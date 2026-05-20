@@ -6,17 +6,73 @@ fn main() {
     println!("uno-q-m33-native-kernel is a bare-metal STM32U585 image");
 }
 
+#[cfg(any(target_os = "none", test))]
+#[path = "uno_q_m33_native_kernel/matrix.rs"]
+mod matrix;
+
+#[cfg(target_os = "none")]
+const UNO_Q_M33_SYSTICK_RELOAD: u32 = 800 - 1;
+
+#[cfg(test)]
+mod animation_timing_tests {
+    #[test]
+    fn uno_q_native_kernel_keeps_face_output_below_endpoint_authority() {
+        fn text(chars: &[char]) -> String {
+            chars.iter().collect()
+        }
+
+        let source = include_str!("uno_q_m33_native_kernel.rs");
+        for forbidden in [
+            text(&['A', 't', 'o', 'm', 'i', 'c']),
+            text(&['O', 'r', 'd', 'e', 'r', 'i', 'n', 'g']),
+            text(&[
+                'B', 'o', 'a', 'r', 'd', 'C', 'h', 'o', 'r', 'e', 'o', 'g', 'r', 'a', 'p', 'h',
+                'i', 'c', 'K', 'e', 'r', 'n', 'e', 'l',
+            ]),
+            text(&[
+                'F', 'a', 'c', 'e', 'C', 'a', 'n', 'd', 'i', 'd', 'a', 't', 'e', 'F', 'a', 'c', 't',
+            ]),
+            text(&[
+                'F', 'A', 'C', 'E', '_', 'A', 'N', 'I', 'M', 'A', 'T', 'I', 'O', 'N',
+            ]),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "M33 face output must stay below Endpoint authority; remove {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn normal_and_speaking_eyes_are_two_by_three_rectangles() {
+        let source = include_str!("uno_q_m33_native_kernel.rs");
+        assert!(source.contains(
+            "const FACE_NEUTRAL: [&[u8; 13]; 8] = [\n        b\".............\",\n        b\"..##.....##..\",\n        b\"..##.....##..\",\n        b\"..##.....##..\","
+        ));
+        for forbidden in [
+            "const FACE_NEUTRAL: [&[u8; 13]; 8] = [\n        b\".............\",\n        b\"..###...###..\"",
+            "const FACE_NEUTRAL: [&[u8; 13]; 8] = [\n        b\".............\",\n        b\".####...####.\"",
+            "const FACE_SPEAK_1: [&[u8; 13]; 8] = [\n        b\".............\",\n        b\"..###...###..\"",
+            "const FACE_SPEAK_2: [&[u8; 13]; 8] = [\n        b\".............\",\n        b\"..###...###..\"",
+            "const FACE_SPEAK_3: [&[u8; 13]; 8] = [\n        b\".............\",\n        b\"..###...###..\"",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "normal/speaking eyes must stay 2x3 rectangles"
+            );
+        }
+    }
+}
+
 #[cfg(target_os = "none")]
 mod firmware {
-    use core::{
-        hint::spin_loop,
-        ptr,
-        sync::atomic::{AtomicU32, Ordering},
-    };
+    use core::{arch::asm, hint::spin_loop, ptr};
 
     use hibana_pico::{appkit, appkit::ArtifactBundle, site};
     use uno_q_heterogeneous::protocol;
     use uno_q_heterogeneous::{UnoQCapsule, image};
+
+    use crate::matrix::{CHARLIE_PAIRS, MATRIX_BYTES, NUM_MATRIX_LEDS};
 
     const STACK_TOP: usize = 0x200c0000;
 
@@ -51,72 +107,76 @@ mod firmware {
     const USART_CR3: usize = 0x08;
     const USART_BRR: usize = 0x0c;
     const USART_ISR: usize = 0x1c;
+    const USART_ICR: usize = 0x20;
     const USART_RDR: usize = 0x24;
     const USART_TDR: usize = 0x28;
     const USART_CR1_UE: u32 = 1 << 0;
     const USART_CR1_RE: u32 = 1 << 2;
     const USART_CR1_TE: u32 = 1 << 3;
     const USART_CR3_RTSE: u32 = 1 << 8;
+    const USART_ISR_FE: u32 = 1 << 1;
+    const USART_ISR_NE: u32 = 1 << 2;
+    const USART_ISR_ORE: u32 = 1 << 3;
     const USART_ISR_RXNE: u32 = 1 << 5;
     const USART_ISR_TXE: u32 = 1 << 7;
+    const USART_ERROR_FLAGS: u32 = USART_ISR_FE | USART_ISR_NE | USART_ISR_ORE;
+    const USART_ICR_CLEAR_ERRORS: u32 = USART_ERROR_FLAGS;
+
+    const RX_RING_CAP: usize = 256;
 
     const SYST_CSR: usize = 0xe000_e010;
     const SYST_RVR: usize = 0xe000_e014;
     const SYST_CVR: usize = 0xe000_e018;
-    const SYSTICK_RELOAD_100US: u32 = 1_600 - 1;
-
-    const HEARTBEAT_TICKS: u32 = 10_000;
-    const MOUTH_TICKS: u32 = 5_000;
 
     const FACE_NEUTRAL: [&[u8; 13]; 8] = [
         b".............",
         b"..##.....##..",
         b"..##.....##..",
+        b"..##.....##..",
         b".............",
-        b"....#####....",
-        b".............",
+        b"...#######...",
         b".............",
         b".............",
     ];
     const FACE_HAPPY: [&[u8; 13]; 8] = [
+        b".###.....###.",
+        b"..###...###..",
+        b"...##...##...",
         b".............",
-        b"..##.....##..",
-        b"..##.....##..",
-        b".............",
+        b"..#.......#..",
         b"...#.....#...",
-        b"....#...#....",
         b".....###.....",
         b".............",
     ];
     const FACE_SAD: [&[u8; 13]; 8] = [
+        b"...##...##...",
+        b"..###...###..",
+        b".###.....###.",
         b".............",
-        b"..##.....##..",
-        b"..##.....##..",
-        b".............",
-        b".....###.....",
+        b"....#####....",
         b"....#...#....",
         b"...#.....#...",
         b".............",
     ];
     const FACE_ANGRY: [&[u8; 13]; 8] = [
         b".###.....###.",
+        b"..###...###..",
         b"...##...##...",
-        b"..##.....##..",
         b".............",
-        b"...#######...",
+        b"..#########..",
         b".............",
         b".............",
         b".............",
     ];
     const FACE_SURPRISED: [&[u8; 13]; 8] = [
-        b".............",
-        b"..##.....##..",
-        b"..##.....##..",
+        b"..###...###..",
+        b".#...#.#...#.",
+        b".#...#.#...#.",
+        b"..###...###..",
         b".............",
         b".....###.....",
         b"....#...#....",
         b".....###.....",
-        b".............",
     ];
     const FACE_THINKING: [&[u8; 13]; 8] = [
         b".............",
@@ -133,9 +193,9 @@ mod firmware {
         b".............",
         b"..##.....##..",
         b"..##.....##..",
+        b"..##.....##..",
         b".............",
         b"....#####....",
-        b"....#...#....",
         b"....#####....",
         b".............",
     ];
@@ -143,16 +203,80 @@ mod firmware {
         b".............",
         b"..##.....##..",
         b"..##.....##..",
-        b".............",
+        b"..##.....##..",
         b"...#######...",
         b"...#.....#...",
         b"...#######...",
         b".............",
     ];
+    const FACE_SPEAK_3: [&[u8; 13]; 8] = [
+        b".............",
+        b"..##.....##..",
+        b"..##.....##..",
+        b"..##.....##..",
+        b"....#####....",
+        b"...#.....#...",
+        b"....#####....",
+        b".............",
+    ];
 
-    const CHARLIE_PAIRS: [(u8, u8); 104] = build_charlie_pairs();
-    static TIMER_TICKS: AtomicU32 = AtomicU32::new(0);
-    static mut BOARD: BoardChoreographicKernel = BoardChoreographicKernel::new();
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_BOOT_STAGE: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_TIMER_TICKS: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_SCAN_TICKS: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_SCAN_INDEX: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_LIT_TICKS: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_LAST_LIT_LED: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_MATRIX_WORD0: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_MATRIX_BITS: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_FACE_UPDATES: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_LAST_FACE: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_BOARD_POLLS: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_ROLE_STEP: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_PANIC_LINE: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_PANIC_COLUMN: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_USART1_RX_BYTES: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_LPUART1_RX_BYTES: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_USART1_TX_BYTES: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_LPUART1_TX_BYTES: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_LAST_RX_UART: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_TX_READY_MASK: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_USART1_ISR: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_LPUART1_ISR: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_USART1_ORE: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_LPUART1_ORE: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_RX_RING_PUMPED: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_RX_RING_DROPS: u32 = 0;
+    static mut RENDERER: LedRendererState = LedRendererState::new();
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_HINT_POLLS: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_LAST_HINT_LANE: u32 = 0;
     #[unsafe(no_mangle)]
     pub static mut HIBANA_M33_RX_BYTES: u32 = 0;
     #[unsafe(no_mangle)]
@@ -162,7 +286,13 @@ mod firmware {
     #[unsafe(no_mangle)]
     pub static mut HIBANA_M33_LAST_RX: u32 = 0;
     #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_LAST_RX_PAYLOAD01: u32 = 0;
+    #[unsafe(no_mangle)]
     pub static mut HIBANA_M33_LAST_TX: u32 = 0;
+
+    static mut RX_RING: [u16; RX_RING_CAP] = [0; RX_RING_CAP];
+    static mut RX_RING_HEAD: usize = 0;
+    static mut RX_RING_TAIL: usize = 0;
 
     #[repr(C)]
     struct VectorTable {
@@ -187,9 +317,65 @@ mod firmware {
         static mut _ebss: u32;
     }
 
+    #[inline(always)]
+    fn marker_load(slot: *const u32) -> u32 {
+        unsafe { ptr::read_volatile(slot) }
+    }
+
+    #[inline(always)]
+    fn marker_store(slot: *mut u32, value: u32) {
+        unsafe {
+            ptr::write_volatile(slot, value);
+        }
+    }
+
+    #[inline(always)]
+    fn marker_add(slot: *mut u32, value: u32) -> u32 {
+        let next = marker_load(slot).wrapping_add(value);
+        marker_store(slot, next);
+        next
+    }
+
+    #[inline(always)]
+    fn disable_irq() -> u32 {
+        let primask: u32;
+        unsafe {
+            asm!(
+                "mrs {primask}, PRIMASK",
+                "cpsid i",
+                primask = out(reg) primask,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+        primask
+    }
+
+    #[inline(always)]
+    fn restore_irq(primask: u32) {
+        if primask & 1 == 0 {
+            unsafe {
+                asm!("cpsie i", options(nomem, nostack, preserves_flags));
+            }
+        }
+    }
+
+    fn with_renderer<R>(f: impl FnOnce(&mut LedRendererState) -> R) -> R {
+        let primask = disable_irq();
+        let out = unsafe { f(&mut *ptr::addr_of_mut!(RENDERER)) };
+        restore_irq(primask);
+        out
+    }
+
     #[panic_handler]
     fn panic_handler(info: &core::panic::PanicInfo<'_>) -> ! {
-        let _ = info;
+        if let Some(location) = info.location() {
+            marker_store(ptr::addr_of_mut!(HIBANA_M33_PANIC_LINE), location.line());
+            marker_store(
+                ptr::addr_of_mut!(HIBANA_M33_PANIC_COLUMN),
+                location.column(),
+            );
+        }
+        mark_stage(0xffff_0001);
         write_all(b"HIBANA_M33:PANIC\r\n");
         loop {
             spin_loop();
@@ -209,299 +395,235 @@ mod firmware {
     }
 
     unsafe extern "C" fn systick_handler() {
-        TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+        marker_add(ptr::addr_of_mut!(HIBANA_M33_TIMER_TICKS), 1);
+        let renderer = unsafe { &mut *ptr::addr_of_mut!(RENDERER) };
+        renderer.refresh_matrix();
     }
 
     unsafe extern "C" fn reset_handler() -> ! {
         unsafe {
             init_memory();
         }
+        mark_stage(1);
         main()
     }
 
     fn main() -> ! {
+        mark_stage(2);
         init_clocks_and_pins();
+        mark_stage(3);
         init_uarts();
+        mark_stage(4);
         init_matrix();
+        mark_stage(5);
         init_systick();
+        mark_stage(6);
 
-        unsafe {
-            (&mut *core::ptr::addr_of_mut!(BOARD)).resolve_boot();
-        }
+        renderer_show_face(protocol::FACE_NEUTRAL);
+        mark_stage(7);
 
         type Image = site::Local<image::M33LedKernelImage>;
+        mark_stage(8);
         let report =
             appkit::run::<Image, UnoQCapsule>(uno_q_heterogeneous::ARTIFACTS.for_image::<Image>());
+        mark_stage(9);
         core::hint::black_box(report);
         loop {
-            unsafe {
-                (&mut *core::ptr::addr_of_mut!(BOARD)).resolve_timer_interrupt();
-            }
             spin_loop();
         }
     }
 
     #[unsafe(no_mangle)]
     pub extern "C" fn uno_q_m33_carrier_write(byte: u8) {
-        write_usart(USART1, byte);
-        write_usart(LPUART1, byte);
+        mark_stage(0x200);
+        let mut ready = 0u32;
+        if write_usart(USART1, byte) {
+            marker_add(ptr::addr_of_mut!(HIBANA_M33_USART1_TX_BYTES), 1);
+            ready |= 1;
+        }
+        if write_usart(LPUART1, byte) {
+            marker_add(ptr::addr_of_mut!(HIBANA_M33_LPUART1_TX_BYTES), 1);
+            ready |= 2;
+        }
+        marker_store(ptr::addr_of_mut!(HIBANA_M33_TX_READY_MASK), ready);
     }
 
     #[unsafe(no_mangle)]
     pub extern "C" fn uno_q_m33_carrier_read() -> i16 {
-        read_carrier_byte().map_or(-1, |byte| {
-            unsafe {
-                HIBANA_M33_RX_BYTES = HIBANA_M33_RX_BYTES.wrapping_add(1);
-            }
+        read_carrier_byte().map_or(-1, |(byte, source)| {
+            marker_add(ptr::addr_of_mut!(HIBANA_M33_RX_BYTES), 1);
+            marker_store(ptr::addr_of_mut!(HIBANA_M33_LAST_RX_UART), source);
+            mark_stage(0x201 | (source << 8));
             i16::from(byte)
         })
     }
 
     #[unsafe(no_mangle)]
     pub extern "C" fn uno_q_m33_carrier_observe_frame(source: u8, peer: u8, label: u8, len: u8) {
-        unsafe {
-            HIBANA_M33_RX_FRAMES = HIBANA_M33_RX_FRAMES.wrapping_add(1);
-            HIBANA_M33_LAST_RX = ((source as u32) << 24)
-                | ((peer as u32) << 16)
-                | ((label as u32) << 8)
-                | len as u32;
-        }
+        marker_add(ptr::addr_of_mut!(HIBANA_M33_RX_FRAMES), 1);
+        marker_store(
+            ptr::addr_of_mut!(HIBANA_M33_LAST_RX),
+            ((source as u32) << 24) | ((peer as u32) << 16) | ((label as u32) << 8) | len as u32,
+        );
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn uno_q_m33_carrier_observe_payload(label: u8, len: u8, byte0: u8, byte1: u8) {
+        marker_store(
+            ptr::addr_of_mut!(HIBANA_M33_LAST_RX_PAYLOAD01),
+            ((label as u32) << 24) | ((len as u32) << 16) | ((byte0 as u32) << 8) | byte1 as u32,
+        );
     }
 
     #[unsafe(no_mangle)]
     pub extern "C" fn uno_q_m33_carrier_observe_tx(peer: u8, label: u8, len: u8) {
-        unsafe {
-            HIBANA_M33_TX_FRAMES = HIBANA_M33_TX_FRAMES.wrapping_add(1);
-            HIBANA_M33_LAST_TX = ((peer as u32) << 16) | ((label as u32) << 8) | len as u32;
-        }
+        marker_add(ptr::addr_of_mut!(HIBANA_M33_TX_FRAMES), 1);
+        marker_store(
+            ptr::addr_of_mut!(HIBANA_M33_LAST_TX),
+            ((peer as u32) << 16) | ((label as u32) << 8) | len as u32,
+        );
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn uno_q_m33_carrier_observe_hint(lane: u8) {
+        marker_add(ptr::addr_of_mut!(HIBANA_M33_HINT_POLLS), 1);
+        marker_store(
+            ptr::addr_of_mut!(HIBANA_M33_LAST_HINT_LANE),
+            u32::from(lane),
+        );
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn uno_q_m33_timer_ticks() -> u32 {
+        unsafe { ptr::read_volatile(ptr::addr_of!(HIBANA_M33_TIMER_TICKS)) }
     }
 
     #[unsafe(no_mangle)]
     pub extern "C" fn uno_q_m33_board_ready() {
+        mark_stage(0x100);
         write_all(b"HIBANA_M33:APPKIT_READY\r\n");
     }
 
     #[unsafe(no_mangle)]
     pub extern "C" fn uno_q_m33_board_poll() {
-        unsafe {
-            (&mut *core::ptr::addr_of_mut!(BOARD)).resolve_timer_interrupt();
-        }
+        marker_add(ptr::addr_of_mut!(HIBANA_M33_BOARD_POLLS), 1);
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn uno_q_m33_board_accept_candidate(face: u8, mouth_frames: u8) {
-        unsafe {
-            (&mut *core::ptr::addr_of_mut!(BOARD)).accept_projected_candidate(face, mouth_frames);
-        }
+    pub extern "C" fn uno_q_m33_role_step(step: u32) {
+        marker_store(ptr::addr_of_mut!(HIBANA_M33_ROLE_STEP), step);
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn uno_q_m33_board_commit_face(face: u8) {
-        unsafe {
-            (&mut *core::ptr::addr_of_mut!(BOARD)).commit_projected_face(face);
-        }
+    pub extern "C" fn uno_q_m33_board_show_face(face: u8) {
+        marker_store(ptr::addr_of_mut!(HIBANA_M33_LAST_FACE), u32::from(face));
+        marker_add(ptr::addr_of_mut!(HIBANA_M33_FACE_UPDATES), 1);
+        mark_stage(0x500 | u32::from(face));
+        renderer_show_face(face);
     }
 
     #[derive(Clone, Copy)]
-    enum FaceMode {
-        Idle,
-        Speaking,
+    struct LedRendererState {
+        packed: [u8; MATRIX_BYTES],
+        scan_index: u8,
     }
 
-    #[derive(Clone, Copy)]
-    struct FaceCandidateFact {
-        face: u8,
-        mouth_frames: u8,
-    }
-
-    struct BoardChoreographicKernel {
-        candidate: Option<FaceCandidateFact>,
-        face: FaceMode,
-        scan: usize,
-        observed_ticks: u32,
-        heartbeat_tick: u32,
-        mouth_tick: u32,
-        speech_frame: u8,
-    }
-
-    impl BoardChoreographicKernel {
+    impl LedRendererState {
         const fn new() -> Self {
             Self {
-                candidate: None,
-                face: FaceMode::Idle,
-                scan: 0,
-                observed_ticks: 0,
-                heartbeat_tick: 0,
-                mouth_tick: 0,
-                speech_frame: 0,
+                packed: [0; MATRIX_BYTES],
+                scan_index: 0,
             }
         }
 
-        fn resolve_boot(&mut self) {
-            draw_face(FACE_NEUTRAL);
+        fn show_face(&mut self, face: u8) {
+            self.write_face(face_rows(face));
         }
 
-        fn resolve_timer_interrupt(&mut self) {
-            let ticks = TIMER_TICKS.load(Ordering::Relaxed);
-            while self.observed_ticks != ticks {
-                self.observed_ticks = self.observed_ticks.wrapping_add(1);
-                self.resolve_timer_tick();
-            }
-        }
-
-        fn resolve_timer_tick(&mut self) {
-            refresh_one(self.scan);
-            self.scan = (self.scan + 1) % 104;
-
-            if self.observed_ticks.wrapping_sub(self.heartbeat_tick) >= HEARTBEAT_TICKS {
-                self.heartbeat_tick = self.observed_ticks;
-            }
-
-            if let FaceMode::Speaking = self.face {
-                if self.observed_ticks.wrapping_sub(self.mouth_tick) >= MOUTH_TICKS {
-                    self.mouth_tick = self.observed_ticks;
-                    self.speech_frame = (self.speech_frame + 1) % 4;
-                    self.resolve_mouth_frame();
+        fn write_face(&mut self, rows: [&'static [u8; 13]; 8]) {
+            self.packed = [0; MATRIX_BYTES];
+            let mut bits = 0u32;
+            let mut row = 0usize;
+            while row < 8 {
+                let mut col = 0usize;
+                while col < 13 {
+                    if rows[row][col] == b'#' {
+                        let bit = row * 13 + col;
+                        self.packed[bit / 8] |= 1 << (bit % 8);
+                        bits += 1;
+                    }
+                    col += 1;
                 }
+                row += 1;
             }
+            self.publish_matrix_markers(bits);
         }
 
-        fn accept_projected_candidate(&mut self, face: u8, mouth_frames: u8) {
-            self.resolve_face_candidate([face, mouth_frames]);
+        fn publish_matrix_markers(&self, bits: u32) {
+            let word0 = unsafe {
+                u32::from(*self.packed.as_ptr())
+                    | (u32::from(*self.packed.as_ptr().add(1)) << 8)
+                    | (u32::from(*self.packed.as_ptr().add(2)) << 16)
+                    | (u32::from(*self.packed.as_ptr().add(3)) << 24)
+            };
+            marker_store(ptr::addr_of_mut!(HIBANA_M33_MATRIX_WORD0), word0);
+            marker_store(ptr::addr_of_mut!(HIBANA_M33_MATRIX_BITS), bits);
         }
 
-        fn commit_projected_face(&mut self, face: u8) {
-            let Some(candidate) = self.candidate else {
-                self.reject_to_safe_state();
+        fn refresh_matrix(&mut self) {
+            marker_add(ptr::addr_of_mut!(HIBANA_M33_SCAN_TICKS), 1);
+
+            let start = usize::from(self.scan_index);
+            let start = if start < NUM_MATRIX_LEDS { start } else { 0 };
+            let Some(index) = crate::matrix::next_lit_index(&self.packed, start) else {
+                gpiof_all_input();
+                self.scan_index = 0;
+                marker_store(ptr::addr_of_mut!(HIBANA_M33_SCAN_INDEX), 0);
                 return;
             };
-            if face != candidate.face || !valid_face(face) {
-                self.reject_to_safe_state();
-                return;
-            }
-            self.apply_committed_face(face);
-        }
-
-        fn resolve_face_candidate(&mut self, payload: [u8; 2]) {
-            let candidate = FaceCandidateFact {
-                face: payload[0],
-                mouth_frames: payload[1],
-            };
-            if !valid_face(candidate.face)
-                || candidate.face == protocol::FACE_SPEAKING && candidate.mouth_frames < 3
-            {
-                self.reject_to_safe_state();
-                return;
-            }
-            self.candidate = Some(candidate);
-        }
-
-        fn apply_committed_face(&mut self, face: u8) {
-            self.speech_frame = 0;
-            self.mouth_tick = self.observed_ticks;
-            match face {
-                protocol::FACE_NEUTRAL => {
-                    draw_face(FACE_NEUTRAL);
-                    self.face = FaceMode::Idle;
-                }
-                protocol::FACE_HAPPY => {
-                    draw_face(FACE_HAPPY);
-                    self.face = FaceMode::Idle;
-                }
-                protocol::FACE_SAD => {
-                    draw_face(FACE_SAD);
-                    self.face = FaceMode::Idle;
-                }
-                protocol::FACE_ANGRY => {
-                    draw_face(FACE_ANGRY);
-                    self.face = FaceMode::Idle;
-                }
-                protocol::FACE_SURPRISED => {
-                    draw_face(FACE_SURPRISED);
-                    self.face = FaceMode::Idle;
-                }
-                protocol::FACE_THINKING => {
-                    draw_face(FACE_THINKING);
-                    self.face = FaceMode::Idle;
-                }
-                protocol::FACE_SPEAKING => {
-                    draw_face(FACE_SPEAK_0);
-                    self.face = FaceMode::Speaking;
-                }
-                _ => self.reject_to_safe_state(),
-            }
-        }
-
-        fn resolve_mouth_frame(&mut self) {
-            match self.speech_frame {
-                0 => draw_face(FACE_SPEAK_0),
-                1 => draw_face(FACE_SPEAK_1),
-                2 => draw_face(FACE_SPEAK_2),
-                _ => draw_face(FACE_SPEAK_1),
-            }
-        }
-
-        fn reject_to_safe_state(&mut self) {
-            self.candidate = None;
-            self.face = FaceMode::Idle;
-            draw_face(FACE_NEUTRAL);
+            turn_led(index);
+            let next = (index + 1) % NUM_MATRIX_LEDS;
+            self.scan_index = next as u8;
+            marker_store(ptr::addr_of_mut!(HIBANA_M33_SCAN_INDEX), next as u32);
         }
     }
 
-    fn valid_face(face: u8) -> bool {
-        matches!(
-            face,
-            protocol::FACE_NEUTRAL
-                | protocol::FACE_HAPPY
-                | protocol::FACE_SAD
-                | protocol::FACE_ANGRY
-                | protocol::FACE_SURPRISED
-                | protocol::FACE_THINKING
-                | protocol::FACE_SPEAKING
-        )
+    fn renderer_show_face(face: u8) {
+        with_renderer(|renderer| renderer.show_face(face));
     }
 
-    static mut MATRIX: [u8; 13] = [0; 13];
-
-    fn draw_face(rows: [&'static [u8; 13]; 8]) {
-        let mut packed = [0u8; 13];
-        let mut row = 0usize;
-        while row < 8 {
-            let mut col = 0usize;
-            while col < 13 {
-                if rows[row][col] == b'#' {
-                    let bit = row * 13 + col;
-                    packed[bit / 8] |= 1 << (bit % 8);
-                }
-                col += 1;
-            }
-            row += 1;
+    fn face_rows(face: u8) -> [&'static [u8; 13]; 8] {
+        match face {
+            protocol::FACE_HAPPY => FACE_HAPPY,
+            protocol::FACE_SAD => FACE_SAD,
+            protocol::FACE_ANGRY => FACE_ANGRY,
+            protocol::FACE_SURPRISED => FACE_SURPRISED,
+            protocol::FACE_THINKING => FACE_THINKING,
+            protocol::FACE_MOUTH_CLOSED => FACE_SPEAK_0,
+            protocol::FACE_MOUTH_SMALL => FACE_SPEAK_1,
+            protocol::FACE_MOUTH_WIDE => FACE_SPEAK_2,
+            protocol::FACE_MOUTH_ROUND => FACE_SPEAK_3,
+            _ => FACE_NEUTRAL,
         }
-        unsafe {
-            MATRIX = packed;
-        }
-    }
-
-    fn refresh_one(index: usize) {
-        let byte = unsafe { MATRIX[index / 8] };
-        let on = ((byte >> (index % 8)) & 1) != 0;
-        turn_led(index, on);
-        delay(30);
-        gpiof_all_input();
     }
 
     fn init_matrix() {
         modify_reg(RCC_AHB2ENR1, |value| value | (1 << 5));
         delay(1000);
+        modify_reg(GPIOF + GPIO_OTYPER, |value| value & !0x07ff);
+        modify_reg(GPIOF + GPIO_OSPEEDR, |value| value | 0x003f_ffff);
+        modify_reg(GPIOF + GPIO_PUPDR, |value| value & !0x003f_ffff);
         gpiof_all_input();
     }
 
-    fn turn_led(index: usize, on: bool) {
+    fn turn_led(index: usize) {
         gpiof_all_input();
-        if !on {
-            return;
-        }
         let (high, low) = CHARLIE_PAIRS[index];
+        marker_add(ptr::addr_of_mut!(HIBANA_M33_LIT_TICKS), 1);
+        marker_store(
+            ptr::addr_of_mut!(HIBANA_M33_LAST_LIT_LED),
+            ((index as u32) << 16) | ((high as u32) << 8) | ((low as u32) << 1) | 1,
+        );
         write_reg(GPIOF + GPIO_BSRR, (1 << high) | (1 << (low + 16)));
         modify_reg(GPIOF + GPIO_MODER, |value| {
             value | (1 << (high * 2)) | (1 << (low * 2))
@@ -510,24 +632,6 @@ mod firmware {
 
     fn gpiof_all_input() {
         modify_reg(GPIOF + GPIO_MODER, |value| value & 0xff00_0000);
-    }
-
-    const fn build_charlie_pairs() -> [(u8, u8); 104] {
-        let mut pairs = [(0u8, 1u8); 104];
-        let mut out = 0usize;
-        let mut high = 0u8;
-        while high < 11 {
-            let mut low = 0u8;
-            while low < 11 {
-                if high != low && out < 104 {
-                    pairs[out] = (high, low);
-                    out += 1;
-                }
-                low += 1;
-            }
-            high += 1;
-        }
-        pairs
     }
 
     fn init_clocks_and_pins() {
@@ -607,36 +711,127 @@ mod firmware {
     }
 
     fn init_systick() {
-        write_reg(SYST_RVR, SYSTICK_RELOAD_100US);
+        write_reg(SYST_RVR, crate::UNO_Q_M33_SYSTICK_RELOAD);
         write_reg(SYST_CVR, 0);
         write_reg(SYST_CSR, 0b111);
     }
 
-    fn read_carrier_byte() -> Option<u8> {
-        read_usart(USART1).or_else(|| read_usart(LPUART1))
+    fn read_carrier_byte() -> Option<(u8, u32)> {
+        unsafe { pop_rx_ring() }.or_else(|| {
+            pump_rx_ring();
+            unsafe { pop_rx_ring() }
+        })
     }
 
-    fn read_usart(base: usize) -> Option<u8> {
-        if read_reg(base + USART_ISR) & USART_ISR_RXNE == 0 {
+    fn pump_rx_ring() {
+        let mut guard = 0u32;
+        while guard < 64 && pump_rx_ring_once() {
+            guard += 1;
+        }
+    }
+
+    fn pump_rx_ring_once() -> bool {
+        let mut moved = false;
+        if let Some((byte, source)) = read_usart_direct(USART1, 1) {
+            unsafe {
+                push_rx_ring(byte, source);
+            }
+            moved = true;
+        }
+        if let Some((byte, source)) = read_usart_direct(LPUART1, 2) {
+            unsafe {
+                push_rx_ring(byte, source);
+            }
+            moved = true;
+        }
+        moved
+    }
+
+    unsafe fn push_rx_ring(byte: u8, source: u32) {
+        let head = unsafe { ptr::read_volatile(ptr::addr_of!(RX_RING_HEAD)) };
+        let tail = unsafe { ptr::read_volatile(ptr::addr_of!(RX_RING_TAIL)) };
+        let next = (head + 1) % RX_RING_CAP;
+        if next == tail {
+            marker_add(ptr::addr_of_mut!(HIBANA_M33_RX_RING_DROPS), 1);
+            return;
+        }
+        let word = ((source as u16) << 8) | u16::from(byte);
+        unsafe {
+            ptr::write_volatile(ptr::addr_of_mut!(RX_RING).cast::<u16>().add(head), word);
+            ptr::write_volatile(ptr::addr_of_mut!(RX_RING_HEAD), next);
+        }
+        marker_add(ptr::addr_of_mut!(HIBANA_M33_RX_RING_PUMPED), 1);
+    }
+
+    unsafe fn pop_rx_ring() -> Option<(u8, u32)> {
+        let head = unsafe { ptr::read_volatile(ptr::addr_of!(RX_RING_HEAD)) };
+        let tail = unsafe { ptr::read_volatile(ptr::addr_of!(RX_RING_TAIL)) };
+        if tail == head {
             return None;
         }
-        Some(read_reg(base + USART_RDR) as u8)
+        let word = unsafe { ptr::read_volatile(ptr::addr_of!(RX_RING).cast::<u16>().add(tail)) };
+        unsafe {
+            ptr::write_volatile(ptr::addr_of_mut!(RX_RING_TAIL), (tail + 1) % RX_RING_CAP);
+        }
+        Some(((word & 0xff) as u8, u32::from(word >> 8)))
+    }
+
+    fn read_usart_direct(base: usize, source: u32) -> Option<(u8, u32)> {
+        let isr = read_reg(base + USART_ISR);
+        if source == 1 {
+            marker_store(ptr::addr_of_mut!(HIBANA_M33_USART1_ISR), isr);
+        } else {
+            marker_store(ptr::addr_of_mut!(HIBANA_M33_LPUART1_ISR), isr);
+        }
+        if isr & USART_ISR_ORE != 0 {
+            if source == 1 {
+                marker_add(ptr::addr_of_mut!(HIBANA_M33_USART1_ORE), 1);
+            } else {
+                marker_add(ptr::addr_of_mut!(HIBANA_M33_LPUART1_ORE), 1);
+            }
+        }
+        let byte = if isr & USART_ISR_RXNE == 0 {
+            None
+        } else {
+            Some(read_reg(base + USART_RDR) as u8)
+        };
+        if isr & USART_ERROR_FLAGS != 0 {
+            write_reg(base + USART_ICR, USART_ICR_CLEAR_ERRORS);
+        }
+        let byte = byte?;
+        if source == 1 {
+            marker_add(ptr::addr_of_mut!(HIBANA_M33_USART1_RX_BYTES), 1);
+        } else {
+            marker_add(ptr::addr_of_mut!(HIBANA_M33_LPUART1_RX_BYTES), 1);
+        }
+        Some((byte, source))
     }
 
     fn write_all(bytes: &[u8]) {
         for &byte in bytes {
-            write_usart(USART1, byte);
-            write_usart(LPUART1, byte);
+            pump_rx_ring();
+            if write_usart(USART1, byte) {
+                marker_add(ptr::addr_of_mut!(HIBANA_M33_USART1_TX_BYTES), 1);
+            }
+            if write_usart(LPUART1, byte) {
+                marker_add(ptr::addr_of_mut!(HIBANA_M33_LPUART1_TX_BYTES), 1);
+            }
         }
     }
 
-    fn write_usart(base: usize, byte: u8) {
+    fn write_usart(base: usize, byte: u8) -> bool {
         let mut guard = 0u32;
         while read_reg(base + USART_ISR) & USART_ISR_TXE == 0 && guard < 1_000_000 {
+            pump_rx_ring();
             guard += 1;
             spin_loop();
         }
+        if read_reg(base + USART_ISR) & USART_ISR_TXE == 0 {
+            return false;
+        }
         write_reg(base + USART_TDR, byte as u32);
+        pump_rx_ring();
+        true
     }
 
     unsafe fn init_memory() {
@@ -682,5 +877,9 @@ mod firmware {
             spin_loop();
             remaining -= 1;
         }
+    }
+
+    fn mark_stage(stage: u32) {
+        marker_store(ptr::addr_of_mut!(HIBANA_M33_BOOT_STAGE), stage);
     }
 }
