@@ -214,9 +214,9 @@ const WASM_MAX_DATA_SEGMENTS: usize = 8;
 #[cfg(test)]
 const TEST_RESUME_FUEL: u32 = 1024;
 const WASM_BLOCKTYPE_EMPTY: u8 = 0x40;
-const CORE_WASM_MAX_TYPES: usize = 16;
+const CORE_WASM_MAX_TYPES: usize = 24;
 const CORE_WASM_MAX_IMPORTS: usize = 16;
-const CORE_WASM_MAX_FUNCTIONS: usize = 112;
+const CORE_WASM_MAX_FUNCTIONS: usize = 128;
 const CORE_WASM_MAX_GLOBALS: usize = 16;
 const CORE_WASM_MAX_PARAMS: usize = if cfg!(any(
     feature = "wasip1-sys-path-open",
@@ -234,7 +234,7 @@ const CORE_WASM_CONTROL_STACK_CAPACITY: usize = 16;
 const CORE_WASM_CONTROL_TARGET_CAPACITY: usize = 56;
 const CORE_WASM_BR_TABLE_CAPACITY: usize = 8;
 const CORE_WASIP1_PATH_CAPACITY: usize = 64;
-const CORE_WASM_TABLE_CAPACITY: usize = 40;
+const CORE_WASM_TABLE_CAPACITY: usize = 48;
 const CORE_WASM_MAX_ELEMENT_SEGMENTS: usize = 8;
 const CORE_WASM_PAGE_SIZE: usize = 64 * 1024;
 const CORE_WASM_MAX_MEMORY_PAGES: u32 = 1;
@@ -1502,15 +1502,15 @@ impl<'a> Module<'a> {
             let name = section.read_name()?;
             let kind = section.read_u8()?;
             let index = section.read_var_u32()?;
-            if name == b"__main_void" {
+            if name == b"_start" {
                 if kind != EXTERNAL_KIND_FUNC {
-                    return Err(WasmError::Invalid("__main_void must export a function"));
+                    return Err(WasmError::Invalid("_start must export a function"));
                 }
                 self.core_func_type_index(index)?;
                 self.start_function_index = index;
-            } else if name == b"_start" && self.start_function_index == u32::MAX {
+            } else if name == b"__main_void" && self.start_function_index == u32::MAX {
                 if kind != EXTERNAL_KIND_FUNC {
-                    return Err(WasmError::Invalid("_start must export a function"));
+                    return Err(WasmError::Invalid("__main_void must export a function"));
                 }
                 self.core_func_type_index(index)?;
                 self.start_function_index = index;
@@ -4681,10 +4681,10 @@ impl<'a> Vm<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EXTERNAL_KIND_FUNC, ExecutionEvent, Interpreter, OPCODE_CALL, OPCODE_DROP, OPCODE_END,
-        OPCODE_I32_CONST, OPCODE_I64_CONST, SECTION_CODE, SECTION_EXPORT, SECTION_FUNCTION,
-        SECTION_IMPORT, SECTION_MEMORY, SECTION_TYPE, TEST_RESUME_FUEL, VALTYPE_I32, VALTYPE_I64,
-        Vm, VmEvent, WASIP1_FILETYPE_REGULAR_FILE, WasmError,
+        EXTERNAL_KIND_FUNC, ExecutionEvent, Interpreter, Module, OPCODE_CALL, OPCODE_DROP,
+        OPCODE_END, OPCODE_I32_CONST, OPCODE_I64_CONST, SECTION_CODE, SECTION_EXPORT,
+        SECTION_FUNCTION, SECTION_IMPORT, SECTION_MEMORY, SECTION_TYPE, TEST_RESUME_FUEL,
+        VALTYPE_I32, VALTYPE_I64, Vm, VmEvent, WASIP1_FILETYPE_REGULAR_FILE, WasmError,
     };
     #[cfg(feature = "wasm-engine-core")]
     use super::{FdStat, WASIP1_FDSTAT_RIGHTS_BASE_OFFSET};
@@ -4950,6 +4950,51 @@ mod tests {
         }
 
         module
+    }
+
+    #[test]
+    fn core_wasm_prefers_wasi_start_over_rust_main_export() {
+        let mut module = Vec::new();
+        module.extend_from_slice(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+
+        let mut types = Vec::new();
+        push_test_u32(&mut types, 1);
+        types.push(0x60);
+        push_test_u32(&mut types, 0);
+        push_test_u32(&mut types, 0);
+        push_test_section(&mut module, SECTION_TYPE, &types);
+
+        let mut functions = Vec::new();
+        push_test_u32(&mut functions, 2);
+        push_test_u32(&mut functions, 0);
+        push_test_u32(&mut functions, 0);
+        push_test_section(&mut module, SECTION_FUNCTION, &functions);
+
+        let mut exports = Vec::new();
+        push_test_u32(&mut exports, 2);
+        push_test_name(&mut exports, b"__main_void");
+        exports.push(EXTERNAL_KIND_FUNC);
+        push_test_u32(&mut exports, 0);
+        push_test_name(&mut exports, b"_start");
+        exports.push(EXTERNAL_KIND_FUNC);
+        push_test_u32(&mut exports, 1);
+        push_test_section(&mut module, SECTION_EXPORT, &exports);
+
+        let mut code = Vec::new();
+        push_test_u32(&mut code, 2);
+        for _ in 0..2 {
+            push_test_u32(&mut code, 2);
+            code.push(0);
+            code.push(OPCODE_END);
+        }
+        push_test_section(&mut module, SECTION_CODE, &code);
+
+        let mut storage = MaybeUninit::<Module<'_>>::uninit();
+        unsafe {
+            Module::parse_in_place(storage.as_mut_ptr(), &module)
+                .expect("module with both std _start and rust main export parses");
+            assert_eq!(storage.assume_init_ref().start_function_index, 1);
+        }
     }
 
     #[test]

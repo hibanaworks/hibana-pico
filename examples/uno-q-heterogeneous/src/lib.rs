@@ -17,8 +17,7 @@ use hibana_pico::{
     choreography::protocol::{
         EngineReq, EngineRet, FdReadDone, FdWriteDone, LABEL_WASI_FD_READ, LABEL_WASI_FD_READ_RET,
         LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET, LABEL_WASI_IMPORT_LOOP_BREAK_CONTROL,
-        LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF,
-        LABEL_WASI_POLL_ONEOFF_RET, LABEL_WASI_PROC_EXIT, PathOpened, PollReady,
+        LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_PROC_EXIT, PathOpened,
         WasiImportLoopBreak, WasiImportLoopContinue,
     },
     site,
@@ -69,8 +68,10 @@ const HARDWARE_PEER_ROLE_BITS: u128 = (1u128 << ROLE_WASI_LLM_CELL) | (1u128 << 
 const UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS: u32 = 50_000;
 #[cfg(any(test, target_os = "none"))]
 const UNO_Q_M33_UART_OPERATIONAL_DEADLINE_TICKS: u32 = 1_000_000_000;
-const UNO_Q_FACE_EMOTION_HOLD_US: u64 = 1_000_000;
-const UNO_Q_FACE_MOUTH_HOLD_US: u64 = 500_000;
+#[cfg_attr(target_os = "none", allow(dead_code))]
+const UNO_Q_FACE_EMOTION_HOLD_US: u64 = 500_000;
+#[cfg_attr(target_os = "none", allow(dead_code))]
+const UNO_Q_FACE_MOUTH_HOLD_US: u64 = 250_000;
 const UNO_Q_FACE_EMOTION_FRAMES: [u8; 12] = [
     FACE_HAPPY,
     FACE_ANGRY,
@@ -167,8 +168,16 @@ const WASM_UNO_Q_LLM_FACE_CELL: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../target/wasip1-apps/wasm32-wasip1/release/uno-q-llm-face-cell.wasm"
 ));
+#[cfg(feature = "embed-wasip1-artifacts")]
+const WASM_UNO_Q_LLM_FACE_ROUTER: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../target/wasip1-apps/wasm32-wasip1/release/uno-q-llm-face-router.wasm"
+));
 #[cfg(not(feature = "embed-wasip1-artifacts"))]
 const WASM_UNO_Q_LLM_FACE_CELL: &[u8] = &[];
+#[cfg(not(feature = "embed-wasip1-artifacts"))]
+#[cfg_attr(target_os = "none", allow(dead_code))]
+const WASM_UNO_Q_LLM_FACE_ROUTER: &[u8] = &[];
 
 #[cfg(feature = "runtime-wasip1")]
 static mut UNO_Q_WASI_GUEST_ARENA: appkit::WasiGuestArena = appkit::WasiGuestArena::empty();
@@ -203,8 +212,6 @@ type WasiFdReadReqMsg = g::Msg<LABEL_WASI_FD_READ, EngineReq>;
 type WasiFdReadRetMsg = g::Msg<LABEL_WASI_FD_READ_RET, EngineRet>;
 type WasiFdWriteReqMsg = g::Msg<LABEL_WASI_FD_WRITE, EngineReq>;
 type WasiFdWriteRetMsg = g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>;
-type WasiPollReqMsg = g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>;
-type WasiPollRetMsg = g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>;
 type WasiProcExitReqMsg = g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>;
 
 #[derive(Debug)]
@@ -264,28 +271,12 @@ impl appkit::Capsule for UnoQCapsule {
                             WasiFdWriteReqMsg,
                             1,
                         >(),
-                        g::seq(
-                            g::send::<
-                                g::Role<ROLE_M33_LED_KERNEL>,
-                                g::Role<ROLE_WASI_LLM_CELL>,
-                                WasiFdWriteRetMsg,
-                                1,
-                            >(),
-                            g::seq(
-                                g::send::<
-                                    g::Role<ROLE_WASI_LLM_CELL>,
-                                    g::Role<ROLE_M33_LED_KERNEL>,
-                                    WasiPollReqMsg,
-                                    1,
-                                >(),
-                                g::send::<
-                                    g::Role<ROLE_M33_LED_KERNEL>,
-                                    g::Role<ROLE_WASI_LLM_CELL>,
-                                    WasiPollRetMsg,
-                                    1,
-                                >(),
-                            ),
-                        ),
+                        g::send::<
+                            g::Role<ROLE_M33_LED_KERNEL>,
+                            g::Role<ROLE_WASI_LLM_CELL>,
+                            WasiFdWriteRetMsg,
+                            1,
+                        >(),
                     ),
                 ),
             ),
@@ -299,12 +290,20 @@ impl appkit::Capsule for UnoQCapsule {
                     WasiImportLoopBreak,
                     0,
                 >(),
-                g::send::<
-                    g::Role<ROLE_WASI_LLM_CELL>,
-                    g::Role<ROLE_M33_LED_KERNEL>,
-                    WasiProcExitReqMsg,
-                    1,
-                >(),
+                g::seq(
+                    g::send::<
+                        g::Role<ROLE_WASI_LLM_CELL>,
+                        g::Role<ROLE_PSEUDO_LLM>,
+                        WasiProcExitReqMsg,
+                        0,
+                    >(),
+                    g::send::<
+                        g::Role<ROLE_WASI_LLM_CELL>,
+                        g::Role<ROLE_M33_LED_KERNEL>,
+                        WasiProcExitReqMsg,
+                        1,
+                    >(),
+                ),
             ),
         );
         g::seq(
@@ -410,7 +409,9 @@ async fn run_boundary<const ROLE: u8>(
         ROLE_PSEUDO_LLM => {
             let request = expect_path_open(ctx.endpoint().recv::<WasiPathOpenReqMsg>().await?)?;
             complete_boundary_path_open(&mut ctx, request, LLM_FRAME_PATH, FD_READ_RIGHT).await?;
-            for ordinal in 0..UNO_Q_FACE_CYCLE_FRAME_COUNT {
+            let mut ordinal = 0u8;
+            loop {
+                pseudo_llm_wait_before_frame(ordinal);
                 let branch = ctx.endpoint().offer().await?;
                 match branch.label() {
                     LABEL_WASI_FD_READ => {
@@ -427,6 +428,17 @@ async fn run_boundary<const ROLE: u8>(
                                 &[frame.face(), frame.ordinal()],
                             )?))
                             .await?;
+                        ordinal = ordinal.wrapping_add(1);
+                    }
+                    LABEL_WASI_PROC_EXIT => {
+                        let proc_exit = branch.decode::<WasiProcExitReqMsg>().await?;
+                        let EngineReq::ProcExit(status) = proc_exit else {
+                            return Err(UnoQRuntimeError::RuntimeViolation);
+                        };
+                        if status.code() != 0 {
+                            return Err(UnoQRuntimeError::RuntimeViolation);
+                        }
+                        break;
                     }
                     _ => return Err(UnoQRuntimeError::RuntimeViolation),
                 }
@@ -494,7 +506,6 @@ async fn drive_face_frame_loop<const ROLE: u8>(
                     0x0d25_0000 | (u32::from(frame.face()) << 8) | u32::from(frame.ordinal()),
                 );
                 send_fd_write_done(ctx, write.fd(), write.len()).await?;
-                recv_face_frame_poll(ctx, frame.face()).await?;
                 ordinal = ordinal.wrapping_add(1);
             }
             LABEL_WASI_PROC_EXIT => {
@@ -514,14 +525,6 @@ async fn drive_face_frame_loop<const ROLE: u8>(
                     m33_role_step(0xed26_2000 | u32::from(status.code() as u8));
                     return Err(UnoQRuntimeError::RuntimeViolation);
                 }
-                if usize::from(ordinal) != UNO_Q_FACE_CYCLE_FRAME_COUNT {
-                    m33_role_step(
-                        0xed27_0000
-                            | ((UNO_Q_FACE_CYCLE_FRAME_COUNT as u32) << 8)
-                            | u32::from(ordinal),
-                    );
-                    return Err(UnoQRuntimeError::RuntimeViolation);
-                }
                 m33_role_step(0x0d27_0000 | u32::from(ordinal));
                 break;
             }
@@ -534,30 +537,48 @@ async fn drive_face_frame_loop<const ROLE: u8>(
     Ok(())
 }
 
-async fn recv_face_frame_poll<const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, UnoQCapsule, ROLE>,
-    face: u8,
-) -> Result<(), UnoQRuntimeError> {
-    let poll = ctx.endpoint().recv::<WasiPollReqMsg>().await?;
-    let EngineReq::PollOneoff(poll) = poll else {
-        return Err(UnoQRuntimeError::RuntimeViolation);
-    };
-    if poll.timeout_tick() != face_hold_tick(face) {
-        return Err(UnoQRuntimeError::RuntimeViolation);
+fn pseudo_llm_wait_before_frame(ordinal: u8) {
+    if ordinal == 0 {
+        return;
     }
-    ctx.endpoint()
-        .flow::<WasiPollRetMsg>()?
-        .send(&EngineRet::PollReady(PollReady::new(1)))
-        .await?;
-    Ok(())
+    if !face_loop_forever_enabled() {
+        return;
+    }
+    #[cfg(not(target_os = "none"))]
+    std::thread::sleep(std::time::Duration::from_micros(face_hold_us_for_ordinal(
+        ordinal.wrapping_sub(1),
+    )));
 }
 
-fn face_hold_tick(face: u8) -> u64 {
+fn face_loop_forever_enabled() -> bool {
+    #[cfg(not(target_os = "none"))]
+    {
+        std::env::var_os("UNO_Q_FACE_LOOP_FOREVER").is_some()
+    }
+    #[cfg(target_os = "none")]
+    {
+        false
+    }
+}
+
+#[cfg_attr(target_os = "none", allow(dead_code))]
+fn face_hold_us_for_ordinal(ordinal: u8) -> u64 {
+    let index = usize::from(ordinal) % UNO_Q_FACE_CYCLE_FRAME_COUNT;
+    let face = if index < UNO_Q_FACE_EMOTION_FRAMES.len() {
+        UNO_Q_FACE_EMOTION_FRAMES[index]
+    } else {
+        UNO_Q_FACE_MOUTH_FRAMES[index - UNO_Q_FACE_EMOTION_FRAMES.len()]
+    };
+    face_hold_us(face)
+}
+
+#[cfg_attr(target_os = "none", allow(dead_code))]
+fn face_hold_us(face: u8) -> u64 {
     match face {
         FACE_MOUTH_CLOSED | FACE_MOUTH_SMALL | FACE_MOUTH_WIDE | FACE_MOUTH_ROUND => {
-            UNO_Q_FACE_MOUTH_HOLD_US / 1_000
+            UNO_Q_FACE_MOUTH_HOLD_US
         }
-        _ => UNO_Q_FACE_EMOTION_HOLD_US / 1_000,
+        _ => UNO_Q_FACE_EMOTION_HOLD_US,
     }
 }
 
@@ -724,7 +745,7 @@ impl appkit::ArtifactForImage<UnoQCapsule, site::Local<image::HardwarePeerProof>
     for UnoQArtifacts
 {
     fn artifact_for_image(&self) -> appkit::WasiImage<'static> {
-        appkit::WasiImage::from_static(WASM_UNO_Q_LLM_FACE_CELL)
+        appkit::WasiImage::from_static(uno_q_hardware_wasi_guest())
     }
 }
 
@@ -732,8 +753,15 @@ impl appkit::ArtifactForImage<UnoQCapsule, site::Local<image::WasiLlmCellProcess
     for UnoQArtifacts
 {
     fn artifact_for_image(&self) -> appkit::WasiImage<'static> {
-        appkit::WasiImage::from_static(WASM_UNO_Q_LLM_FACE_CELL)
+        appkit::WasiImage::from_static(uno_q_hardware_wasi_guest())
     }
+}
+
+fn uno_q_hardware_wasi_guest() -> &'static [u8] {
+    if face_loop_forever_enabled() {
+        return WASM_UNO_Q_LLM_FACE_ROUTER;
+    }
+    WASM_UNO_Q_LLM_FACE_CELL
 }
 
 impl<I> appkit::ArtifactForImage<UnoQCapsule, I> for UnoQArtifacts
@@ -1610,13 +1638,7 @@ impl hibana::integration::Transport for HardwarePeerCarrier {
     fn metrics(&self) -> Self::Metrics {}
 
     fn operational_deadline_ticks(&self) -> Option<u32> {
-        match std::env::var("UNO_Q_HIBANA_DEADLINE_TICKS") {
-            Ok(value) => value
-                .parse::<u32>()
-                .ok()
-                .or(Some(UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS)),
-            Err(_) => Some(UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS),
-        }
+        Some(UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS)
     }
 
     fn apply_pacing_update(&self, interval_us: u32, burst_bytes: u16) {
@@ -2040,8 +2062,8 @@ mod tests {
         assert_eq!(UNO_Q_FACE_EMOTION_FRAMES.len(), 12);
         assert_eq!(UNO_Q_FACE_MOUTH_FRAMES.len(), 8);
         assert_eq!(UNO_Q_FACE_CYCLE_FRAME_COUNT, 20);
-        assert_eq!(UNO_Q_FACE_EMOTION_HOLD_US, 1_000_000);
-        assert_eq!(UNO_Q_FACE_MOUTH_HOLD_US, 500_000);
+        assert_eq!(UNO_Q_FACE_EMOTION_HOLD_US, 500_000);
+        assert_eq!(UNO_Q_FACE_MOUTH_HOLD_US, 250_000);
         assert_eq!(
             &UNO_Q_FACE_EMOTION_FRAMES[..4],
             &[FACE_HAPPY, FACE_ANGRY, FACE_SAD, FACE_SURPRISED]
@@ -2098,6 +2120,10 @@ mod tests {
             text(&[
                 'b', 'r', 'a', 'n', 'c', 'h', '.', 'd', 'e', 'c', 'o', 'd', 'e',
             ]),
+            text(&[
+                'p', 's', 'e', 'u', 'd', 'o', '_', 'l', 'l', 'm', '_', 'w', 'a', 'i', 't', '_',
+                'b', 'e', 'f', 'o', 'r', 'e', '_', 'f', 'r', 'a', 'm', 'e',
+            ]),
         ] {
             assert!(
                 source.contains(&required),
@@ -2123,6 +2149,10 @@ mod tests {
         let read_ret = text(&[
             'W', 'a', 's', 'i', 'F', 'd', 'R', 'e', 'a', 'd', 'R', 'e', 't', 'M', 's', 'g',
         ]);
+        let proc_exit = text(&[
+            'W', 'a', 's', 'i', 'P', 'r', 'o', 'c', 'E', 'x', 'i', 't', 'R', 'e', 'q', 'M', 's',
+            'g',
+        ]);
         assert!(
             compact.contains(&format!("g::Role<{wasi}>,g::Role<{pseudo}>,{read_req}")),
             "WASI must read /llm/frame from the pseudo LLM role through ChoreoFS"
@@ -2130,6 +2160,14 @@ mod tests {
         assert!(
             compact.contains(&format!("g::Role<{pseudo}>,g::Role<{wasi}>,{read_ret}")),
             "pseudo LLM must answer only the WASI fd_read reply"
+        );
+        assert!(
+            compact.contains(&format!("g::Role<{wasi}>,g::Role<{pseudo}>,{proc_exit}")),
+            "bounded WASI proc_exit must be visible to the pseudo LLM role"
+        );
+        assert!(
+            compact.contains(&format!("g::Role<{wasi}>,g::Role<{m33}>,{proc_exit}")),
+            "bounded WASI proc_exit must be visible to the M33 role"
         );
         for forbidden in [
             format!("g::Role<{m33}>,g::Role<{pseudo}>"),
@@ -2162,6 +2200,12 @@ mod tests {
                 'S', '_', 'A', 'P', 'P', 'L', 'I', 'E', 'D',
             ]),
             text(&[
+                'W', 'a', 's', 'i', 'P', 'o', 'l', 'l', 'R', 'e', 'q', 'M', 's', 'g',
+            ]),
+            text(&[
+                'W', 'a', 's', 'i', 'P', 'o', 'l', 'l', 'R', 'e', 't', 'M', 's', 'g',
+            ]),
+            text(&[
                 'F', 'A', 'C', 'E', '_', 'F', 'R', 'A', 'M', 'E', '_', 'L', 'O', 'O', 'P', '_',
                 'P', 'O', 'L', 'I', 'C', 'Y',
             ]),
@@ -2184,6 +2228,78 @@ mod tests {
             assert!(
                 !source.contains(&forbidden),
                 "face animation is a static route-loop; remove {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn wasi_guest_stays_router_not_face_controller() {
+        let proof_guest = include_str!("../wasip1/guest/src/bin/uno-q-llm-face-cell.rs");
+        let router_guest = include_str!("../wasip1/guest/src/bin/uno-q-llm-face-router.rs");
+        for source in [proof_guest, router_guest] {
+            assert!(source.contains("fn main()"));
+            assert!(source.contains("choreofs::open_read"));
+            assert!(source.contains("choreofs::open_write"));
+            assert!(source.contains("read_once"));
+            assert!(source.contains("write_once_exact"));
+            for forbidden in [
+                "#![no_std]",
+                "#![no_main]",
+                "__main_void",
+                "panic_handler",
+                "time::sleep",
+                "sleep_ms",
+                "face_hold",
+                "FACE_HAPPY",
+                "FACE_ANGRY",
+                "FACE_SAD",
+                "FACE_SURPRISED",
+                "FACE_MOUTH_",
+                "EMOTION_FRAMES",
+                "MOUTH_FRAMES",
+            ] {
+                assert!(
+                    !source.contains(forbidden),
+                    "WASI guest is only the LLM-to-face router; remove {forbidden}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_break_is_choreography_visible_and_deadline_is_not_caller_knobbed() {
+        fn text(chars: &[char]) -> String {
+            chars.iter().collect()
+        }
+
+        let compact: String = include_str!("lib.rs")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let pseudo_proc_exit_decode = text(&[
+            'b', 'r', 'a', 'n', 'c', 'h', '.', 'd', 'e', 'c', 'o', 'd', 'e', ':', ':', '<', 'W',
+            'a', 's', 'i', 'P', 'r', 'o', 'c', 'E', 'x', 'i', 't', 'R', 'e', 'q', 'M', 's', 'g',
+            '>', '(', ')',
+        ]);
+        assert!(
+            compact.contains(&pseudo_proc_exit_decode),
+            "finite pseudo LLM role must observe the projected proc_exit break arm"
+        );
+        let source = include_str!("lib.rs");
+        let hardware_proof = include_str!("bin/uno_q_hardware_proof.rs");
+        for forbidden in [
+            text(&[
+                'U', 'N', 'O', '_', 'Q', '_', 'P', 'R', 'O', 'O', 'F', '_', 'F', 'R', 'A', 'M',
+                'E', '_', 'C', 'O', 'U', 'N', 'T',
+            ]),
+            text(&[
+                'U', 'N', 'O', '_', 'Q', '_', 'H', 'I', 'B', 'A', 'N', 'A', '_', 'D', 'E', 'A',
+                'D', 'L', 'I', 'N', 'E', '_', 'T', 'I', 'C', 'K', 'S',
+            ]),
+        ] {
+            assert!(
+                !source.contains(&forbidden) && !hardware_proof.contains(&forbidden),
+                "README forbids local stop/deadline authority: remove {forbidden}"
             );
         }
     }

@@ -12,7 +12,19 @@ use uno_q_heterogeneous::{UnoQCapsule, image};
 fn main() {
     set_env_default("UNO_Q_HIBANA_UART_TURNAROUND_US", "50000");
     set_env_default("UNO_Q_HIBANA_UART_BYTE_US", "10000");
+    let face_loop_forever = env::var_os("UNO_Q_FACE_LOOP_FOREVER").is_some();
+    if face_loop_forever {
+        unsafe {
+            env::remove_var("UNO_Q_FACE_LOOP_FOREVER");
+        }
+    }
     run_choreography_proof();
+    if face_loop_forever {
+        unsafe {
+            env::set_var("UNO_Q_FACE_LOOP_FOREVER", "1");
+        }
+        eprintln!("uno-q face loop mode: WASI guest routes /llm/frame to /face/frame forever");
+    }
 
     let serial = env::var("UNO_Q_HIBANA_SERIAL")
         .or_else(|_| env::var("UNO_Q_FACE_SERIAL"))

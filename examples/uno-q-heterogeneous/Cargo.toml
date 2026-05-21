@@ -12,10 +12,10 @@ hibana-pico = { path = "../.." }
 default = []
 runtime-wasip1 = [
     "hibana-pico/wasm-engine-core",
+    "hibana-pico/wasip1-sys-args-env",
     "hibana-pico/wasip1-sys-fd-read",
     "hibana-pico/wasip1-sys-fd-write",
     "hibana-pico/wasip1-sys-path-open",
-    "hibana-pico/wasip1-sys-poll-oneoff",
     "hibana-pico/wasip1-sys-proc-exit",
 ]
 embed-wasip1-artifacts = []

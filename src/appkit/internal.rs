@@ -74,6 +74,8 @@ const APPKIT_WASI_GUEST_ARENA_ALIGN: usize = 16;
 const APPKIT_WASI_GUEST_BYTES: usize = size_of::<crate::kernel::engine::wasm::Guest<'static>>();
 #[cfg(feature = "wasm-engine-core")]
 const APPKIT_DEFAULT_WASI_FUEL_PER_ACTIVATION: u32 = 1_000_000;
+#[cfg(feature = "wasm-engine-core")]
+const APPKIT_PROC_EXIT_FANOUT_CAP: u8 = HIBANA_TYPED_ROLE_DOMAIN_SIZE;
 
 // A logical image owns one carrier rendezvous. Larger rendezvous sets are a
 // different site/artifact composition, not implicit appkit capacity.
@@ -3251,6 +3253,32 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         }
     }
 
+    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
+    async fn endpoint_send_consecutive<const LABEL: u8>(
+        &mut self,
+        request: EngineReq,
+    ) -> Result<(), WasiGuestError> {
+        let mut sent = 0u8;
+        loop {
+            let flow = match self.endpoint().flow::<hibana::g::Msg<LABEL, EngineReq>>() {
+                Ok(flow) => flow,
+                Err(error) => {
+                    if sent > 0 {
+                        return Ok(());
+                    }
+                    return Err(WasiGuestError::endpoint(0x5745_1000 | LABEL as u32, error));
+                }
+            };
+            if let Err(error) = flow.send(&request).await {
+                return Err(WasiGuestError::endpoint(0x5745_2000 | LABEL as u32, error));
+            }
+            sent = sent.saturating_add(1);
+            if sent == APPKIT_PROC_EXIT_FANOUT_CAP {
+                return Err(WasiGuestError::EndpointRejected(0x5745_64ff));
+            }
+        }
+    }
+
     #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
     #[inline(never)]
     fn endpoint_send_blocking<const LABEL: u8>(
@@ -3266,6 +3294,33 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         match poll_embedded_endpoint_unit(flow.send(&request)) {
             Ok(()) => Ok(()),
             Err(error) => Err(WasiGuestError::endpoint(0x5745_2000 | LABEL as u32, error)),
+        }
+    }
+
+    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+    #[inline(never)]
+    fn endpoint_send_consecutive_blocking<const LABEL: u8>(
+        &mut self,
+        request: EngineReq,
+    ) -> Result<(), WasiGuestError> {
+        let mut sent = 0u8;
+        loop {
+            let flow = match self.endpoint().flow::<hibana::g::Msg<LABEL, EngineReq>>() {
+                Ok(flow) => flow,
+                Err(error) => {
+                    if sent > 0 {
+                        return Ok(());
+                    }
+                    return Err(WasiGuestError::endpoint(0x5745_1000 | LABEL as u32, error));
+                }
+            };
+            if let Err(error) = poll_embedded_endpoint_unit(flow.send(&request)) {
+                return Err(WasiGuestError::endpoint(0x5745_2000 | LABEL as u32, error));
+            }
+            sent = sent.saturating_add(1);
+            if sent == APPKIT_PROC_EXIT_FANOUT_CAP {
+                return Err(WasiGuestError::EndpointRejected(0x5745_64ff));
+            }
         }
     }
 
@@ -3399,7 +3454,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
     async fn endpoint_proc_exit(&mut self, status: ProcExitStatus) -> Result<(), WasiGuestError> {
         self.admit_wasi_import_loop_break_for_label(LABEL_WASI_PROC_EXIT)
             .await?;
-        self.endpoint_send::<LABEL_WASI_PROC_EXIT>(EngineReq::ProcExit(status))
+        self.endpoint_send_consecutive::<LABEL_WASI_PROC_EXIT>(EngineReq::ProcExit(status))
             .await
     }
 
@@ -3410,7 +3465,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         status: ProcExitStatus,
     ) -> Result<(), WasiGuestError> {
         self.admit_wasi_import_loop_break_for_label_blocking(LABEL_WASI_PROC_EXIT)?;
-        self.endpoint_send_blocking::<LABEL_WASI_PROC_EXIT>(EngineReq::ProcExit(status))
+        self.endpoint_send_consecutive_blocking::<LABEL_WASI_PROC_EXIT>(EngineReq::ProcExit(status))
     }
 
     #[cfg(feature = "wasm-engine-core")]
@@ -5211,7 +5266,12 @@ mod tests {
                 g::seq(
                     g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 0>(
                     ),
-                    g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 0>(),
+                    g::seq(
+                        g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 0>(
+                        ),
+                        g::send::<g::Role<0>, g::Role<2>, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 0>(
+                        ),
+                    ),
                 ),
             )
         }
@@ -5221,7 +5281,7 @@ mod tests {
         fn role_kind(role: u8) -> RoleKind {
             match role {
                 0 => RoleKind::Engine,
-                1 => RoleKind::Driver,
+                1 | 2 => RoleKind::Driver,
                 _ => RoleKind::Boundary,
             }
         }
@@ -6629,6 +6689,7 @@ mod tests {
         let program = <NoLoopProcExitCapsule as Capsule>::choreography();
         let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
         let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
+        let role2 = Projectable::<DefaultLabelUniverse>::project::<2>(&program);
         let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let clock = CounterClock::new();
@@ -6637,7 +6698,7 @@ mod tests {
             AttachedQueueTestCarrier,
             DefaultLabelUniverse,
             CounterClock,
-            2,
+            3,
         >::new(&clock);
         let rendezvous = kit
             .add_rendezvous_from_config(
@@ -6652,12 +6713,15 @@ mod tests {
         let driver_endpoint = kit
             .enter::<1, _>(rendezvous, session, &role1, NoBinding)
             .expect("enter proc_exit driver role");
+        let observer_endpoint = kit
+            .enter::<2, _>(rendezvous, session, &role2, NoBinding)
+            .expect("enter proc_exit observer role");
         let projection = derive_projection_caps_from_program::<NoLoopProcExitCapsule>(&program);
         assert!(projection.wasi_imports.contains(WasiImports::PROC_EXIT));
         let endpoint_carrier = EndpointCarrierFacts::new(
             ImageId(9),
             SiteId(1),
-            RoleSet::from_bits(0b11),
+            RoleSet::from_bits(0b111),
             TEST_ATTACHED_QUEUE_CARRIER,
             projection,
         );
@@ -6669,6 +6733,11 @@ mod tests {
         );
         let mut driver_ctx: DriverCtx<'_, NoLoopProcExitCapsule, 1> = DriverCtx::new(
             RoleEndpointCtx::new(driver_endpoint),
+            endpoint_carrier,
+            DriverFacts::EMPTY,
+        );
+        let mut observer_ctx: DriverCtx<'_, NoLoopProcExitCapsule, 2> = DriverCtx::new(
+            RoleEndpointCtx::new(observer_endpoint),
             endpoint_carrier,
             DriverFacts::EMPTY,
         );
@@ -6700,12 +6769,25 @@ mod tests {
             };
             assert_eq!(status.code(), 0);
         };
+        let observer = async move {
+            let exit = observer_ctx
+                .endpoint()
+                .recv::<g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>>()
+                .await
+                .expect("proc_exit observer receives terminal command event");
+            let EngineReq::ProcExit(status) = exit else {
+                panic!("expected command return to fan out as proc_exit status");
+            };
+            assert_eq!(status.code(), 0);
+        };
         let waker = noop_waker();
         let mut task_context = Context::from_waker(&waker);
         let mut engine = core::pin::pin!(engine);
         let mut driver = core::pin::pin!(driver);
+        let mut observer = core::pin::pin!(observer);
         let mut engine_result = None;
         let mut driver_done = false;
+        let mut observer_done = false;
         let mut poll_round = 0u8;
         while poll_round < 32 {
             if engine_result.is_none() {
@@ -6718,7 +6800,12 @@ mod tests {
                     driver_done = true;
                 }
             }
-            if engine_result.is_some() && driver_done {
+            if !observer_done {
+                if let Poll::Ready(()) = observer.as_mut().poll(&mut task_context) {
+                    observer_done = true;
+                }
+            }
+            if engine_result.is_some() && driver_done && observer_done {
                 break;
             }
             poll_round += 1;
@@ -6726,6 +6813,10 @@ mod tests {
         assert!(
             driver_done,
             "driver did not receive projected proc_exit; engine_result={engine_result:?}"
+        );
+        assert!(
+            observer_done,
+            "observer did not receive projected proc_exit fanout; engine_result={engine_result:?}"
         );
         assert!(matches!(
             engine_result,
