@@ -584,6 +584,14 @@ async fn complete_local_llm_stdin_read<const ROLE: u8>(
         return Err(UnoQRuntimeError::RuntimeViolation);
     }
     let (command, len) = source.next_command(read.max_len() as usize)?;
+    #[cfg(not(target_os = "none"))]
+    if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+        eprintln!(
+            "uno-q local LLM stdin reply len={} text={:?}",
+            len,
+            core::str::from_utf8(&command[..len]).unwrap_or("<binary>")
+        );
+    }
     ctx.endpoint()
         .flow::<WasiFdReadRetMsg>()?
         .send(&EngineRet::FdReadDone(FdReadDone::new_with_lease(
@@ -707,6 +715,25 @@ async fn drive_face_frame_loop<const ROLE: u8>(
 
 const LOCAL_LLM_TRANSCRIPT_BYTES: usize = 768;
 const LOCAL_LLM_COMMAND_BYTES: usize = 96;
+#[cfg(not(target_os = "none"))]
+const LOCAL_LLM_USER_PROMPT_BYTES: usize = 512;
+#[cfg(not(target_os = "none"))]
+const DEFAULT_UNO_Q_LOCAL_LLM_BIN_DIR: &str = "/data/local/tmp/uno-q-local-llm/bin";
+#[cfg(not(target_os = "none"))]
+const DEFAULT_UNO_Q_LOCAL_LLM_LIB_DIR: &str = "/data/local/tmp/uno-q-local-llm/lib";
+#[cfg(not(target_os = "none"))]
+const DEFAULT_UNO_Q_LOCAL_LLM_COMPLETION: &str =
+    "/data/local/tmp/uno-q-local-llm/bin/llama-completion";
+#[cfg(not(target_os = "none"))]
+const DEFAULT_UNO_Q_LOCAL_LLM_SERVER: &str = "/data/local/tmp/uno-q-local-llm/bin/llama-server";
+#[cfg(not(target_os = "none"))]
+const DEFAULT_UNO_Q_LOCAL_LLM_MODEL: &str =
+    "/data/local/tmp/uno-q-local-llm/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf";
+#[cfg(not(target_os = "none"))]
+const DEFAULT_UNO_Q_LOCAL_LLM_USER_PROMPT_FILE: &str =
+    "/data/local/tmp/uno-q-local-llm/user-prompt.txt";
+#[cfg(not(target_os = "none"))]
+const DEFAULT_UNO_Q_LOCAL_LLM_SERVER_PORT: u16 = 18080;
 
 struct LocalLlmShellSource {
     transcript: [u8; LOCAL_LLM_TRANSCRIPT_BYTES],
@@ -714,7 +741,7 @@ struct LocalLlmShellSource {
     read_phase: u8,
     ordinal: u8,
     #[cfg(not(target_os = "none"))]
-    command: Option<LocalLlmCommandSource>,
+    command: LocalLlmCommandSource,
 }
 
 impl LocalLlmShellSource {
@@ -751,14 +778,13 @@ impl LocalLlmShellSource {
         let mut command = [0u8; LOCAL_LLM_COMMAND_BYTES];
         let len = {
             #[cfg(not(target_os = "none"))]
-            if let Some(source) = &mut self.command {
-                source.next_command(
+            {
+                self.command.next_command(
                     &self.transcript[..self.transcript_len],
                     self.read_phase,
+                    self.ordinal,
                     &mut command,
                 )?
-            } else {
-                scripted_local_llm_shell_command(self.read_phase, self.ordinal, &mut command)?
             }
             #[cfg(target_os = "none")]
             {
@@ -793,62 +819,105 @@ impl LocalLlmShellSource {
 }
 
 #[cfg(not(target_os = "none"))]
-struct LocalLlmCommandSource {
+enum LocalLlmCommandSource {
+    Server(LocalLlmServer),
+    External(LocalLlmExternalCommand),
+    Scripted,
+    Missing,
+}
+
+#[cfg(not(target_os = "none"))]
+struct LocalLlmServer {
+    endpoint: String,
+    child: Option<std::process::Child>,
+}
+
+#[cfg(not(target_os = "none"))]
+struct LocalLlmExternalCommand {
     executable: String,
     args: Vec<String>,
     prompt: Option<String>,
+    add_transcript_affixes: bool,
+    current_dir: Option<String>,
+    ld_library_path: Option<String>,
 }
 
 #[cfg(not(target_os = "none"))]
 impl LocalLlmCommandSource {
-    fn from_env() -> Option<Self> {
-        let explicit = std::env::var("UNO_Q_LOCAL_LLM_CMD").ok();
-        let model = std::env::var("UNO_Q_LOCAL_LLM_MODEL").ok();
-        let cli = std::env::var("UNO_Q_LOCAL_LLM_CLI").ok();
-        if explicit.is_none() && model.is_none() && cli.is_none() {
-            return None;
+    fn from_env() -> Self {
+        if std::env::var_os("UNO_Q_LOCAL_LLM_SCRIPTED").is_some() {
+            return Self::Scripted;
         }
-        let explicit_mode = explicit.is_some();
 
-        let (executable, args) = if let Some(command) = explicit {
+        let explicit = std::env::var("UNO_Q_LOCAL_LLM_CMD").ok();
+        if let Some(command) = explicit {
             let mut parts = split_local_llm_args(&command);
             if parts.is_empty() {
-                return None;
+                return Self::Missing;
             }
             let executable = parts.remove(0);
-            (executable, parts)
-        } else {
-            let executable = cli.unwrap_or_else(|| "llama-cli".to_owned());
-            let mut args = Vec::new();
-            if let Some(model) = model {
-                args.push("-m".to_owned());
-                args.push(model);
-            }
-            if let Ok(extra) = std::env::var("UNO_Q_LOCAL_LLM_ARGS") {
-                args.extend(split_local_llm_args(&extra));
-            } else {
-                args.push("--no-display-prompt".to_owned());
-                args.push("-n".to_owned());
-                args.push("48".to_owned());
-                args.push("--temp".to_owned());
-                args.push("0.2".to_owned());
-            }
-            (executable, args)
+            return Self::External(LocalLlmExternalCommand {
+                executable,
+                args: parts,
+                prompt: None,
+                add_transcript_affixes: false,
+                current_dir: std::env::var("UNO_Q_LOCAL_LLM_WORK_DIR").ok(),
+                ld_library_path: local_llm_library_path_from_env(),
+            });
+        }
+
+        let explicit_cli = std::env::var("UNO_Q_LOCAL_LLM_CLI").ok();
+        let cli = explicit_cli
+            .clone()
+            .or_else(|| local_llm_existing_path(DEFAULT_UNO_Q_LOCAL_LLM_COMPLETION));
+        let model = std::env::var("UNO_Q_LOCAL_LLM_MODEL")
+            .ok()
+            .or_else(|| local_llm_existing_path(DEFAULT_UNO_Q_LOCAL_LLM_MODEL));
+        let Some(model) = model else {
+            return Self::Missing;
         };
 
-        let prompt = if explicit_mode {
-            None
+        if explicit_cli.is_none()
+            && let Some(server) = LocalLlmServer::from_env(&model)
+        {
+            return Self::Server(server);
+        }
+
+        let executable = cli.unwrap_or_else(|| "llama-completion".to_owned());
+
+        let mut args = Vec::new();
+        args.push("-m".to_owned());
+        args.push(model);
+        let add_transcript_affixes = if let Ok(extra) = std::env::var("UNO_Q_LOCAL_LLM_ARGS") {
+            args.extend(split_local_llm_args(&extra));
+            false
         } else {
-            Some(
-                std::env::var("UNO_Q_LOCAL_LLM_PROMPT")
-                    .unwrap_or_else(|_| default_local_llm_shell_prompt().to_owned()),
-            )
+            args.extend([
+                "--no-display-prompt".to_owned(),
+                "--simple-io".to_owned(),
+                "--no-warmup".to_owned(),
+                "-t".to_owned(),
+                "4".to_owned(),
+                "-n".to_owned(),
+                "8".to_owned(),
+                "--temp".to_owned(),
+                "0".to_owned(),
+            ]);
+            true
         };
 
-        Some(Self {
+        let prompt = Some(
+            std::env::var("UNO_Q_LOCAL_LLM_PROMPT")
+                .unwrap_or_else(|_| default_local_llm_shell_prompt().to_owned()),
+        );
+
+        Self::External(LocalLlmExternalCommand {
             executable,
             args,
             prompt,
+            add_transcript_affixes,
+            current_dir: local_llm_work_dir_from_env(),
+            ld_library_path: local_llm_library_path_from_env(),
         })
     }
 
@@ -856,38 +925,291 @@ impl LocalLlmCommandSource {
         &mut self,
         transcript: &[u8],
         phase: u8,
+        ordinal: u8,
         out: &mut [u8; LOCAL_LLM_COMMAND_BYTES],
     ) -> Result<usize, UnoQRuntimeError> {
-        let output = self.run(transcript)?;
-        let text = String::from_utf8_lossy(&output);
-        if let Some(len) = copy_shell_command_from_output(&text, phase, out) {
+        match self {
+            Self::Server(server) => server.next_command(transcript, phase, ordinal, out),
+            Self::External(command) => command.next_command(transcript, phase, ordinal, out),
+            Self::Scripted => scripted_local_llm_shell_command(phase, ordinal, out),
+            Self::Missing => Err(UnoQRuntimeError::RuntimeViolation),
+        }
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+impl LocalLlmServer {
+    fn from_env(model: &str) -> Option<Self> {
+        if let Ok(endpoint) = std::env::var("UNO_Q_LOCAL_LLM_SERVER_ENDPOINT") {
+            match Self::attach(endpoint) {
+                Ok(server) => return Some(server),
+                Err(()) => {
+                    if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+                        eprintln!("uno-q local LLM server endpoint is not healthy");
+                    }
+                    return None;
+                }
+            }
+        }
+
+        let executable = std::env::var("UNO_Q_LOCAL_LLM_SERVER")
+            .ok()
+            .or_else(|| local_llm_existing_path(DEFAULT_UNO_Q_LOCAL_LLM_SERVER))?;
+        let port = local_llm_server_port_from_env();
+        let endpoint = format!("http://127.0.0.1:{port}");
+        match Self::start(executable, model.to_owned(), endpoint) {
+            Ok(server) => Some(server),
+            Err(()) => {
+                if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+                    eprintln!("uno-q local LLM server failed to start");
+                }
+                None
+            }
+        }
+    }
+
+    fn attach(endpoint: String) -> Result<Self, ()> {
+        if !local_llm_server_health_ok(&endpoint, std::time::Duration::from_millis(250)) {
+            return Err(());
+        }
+        Ok(Self {
+            endpoint,
+            child: None,
+        })
+    }
+
+    fn start(executable: String, model: String, endpoint: String) -> Result<Self, ()> {
+        if local_llm_server_health_ok(&endpoint, std::time::Duration::from_millis(250)) {
+            return Ok(Self {
+                endpoint,
+                child: None,
+            });
+        }
+
+        let (_host, port) = local_llm_http_endpoint_parts(&endpoint).ok_or(())?;
+        let mut args = vec![
+            "-m".to_owned(),
+            model,
+            "--host".to_owned(),
+            "127.0.0.1".to_owned(),
+            "--port".to_owned(),
+            port.to_string(),
+            "-t".to_owned(),
+            "4".to_owned(),
+            "-c".to_owned(),
+            "512".to_owned(),
+            "-np".to_owned(),
+            "1".to_owned(),
+            "--no-warmup".to_owned(),
+            "--no-webui".to_owned(),
+            "--no-slots".to_owned(),
+            "--temp".to_owned(),
+            "0".to_owned(),
+            "-n".to_owned(),
+            "8".to_owned(),
+        ];
+        if let Ok(extra) = std::env::var("UNO_Q_LOCAL_LLM_SERVER_ARGS") {
+            args.extend(split_local_llm_args(&extra));
+        }
+
+        let mut command = std::process::Command::new(&executable);
+        command
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null());
+        if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+            command.stderr(std::process::Stdio::inherit());
+        } else {
+            command.stderr(std::process::Stdio::null());
+        }
+        if let Some(dir) = local_llm_work_dir_from_env() {
+            command.current_dir(dir);
+        }
+        if let Some(path) = local_llm_library_path_from_env() {
+            command.env("LD_LIBRARY_PATH", path);
+        }
+
+        let child = command.spawn().map_err(|_| ())?;
+        let mut server = Self {
+            endpoint,
+            child: Some(child),
+        };
+        server.wait_until_ready(std::time::Duration::from_secs(90))?;
+        Ok(server)
+    }
+
+    fn wait_until_ready(&mut self, timeout: std::time::Duration) -> Result<(), ()> {
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            if local_llm_server_health_ok(&self.endpoint, std::time::Duration::from_millis(500)) {
+                return Ok(());
+            }
+            if let Some(child) = self.child.as_mut() {
+                if child.try_wait().map_err(|_| ())?.is_some() {
+                    return Err(());
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        Err(())
+    }
+
+    fn next_command(
+        &mut self,
+        transcript: &[u8],
+        phase: u8,
+        ordinal: u8,
+        out: &mut [u8; LOCAL_LLM_COMMAND_BYTES],
+    ) -> Result<usize, UnoQRuntimeError> {
+        let prompt = local_llm_prompt_for_server(transcript, phase, ordinal)?;
+        let response = self.complete(&prompt)?;
+        if let Some(len) = copy_llm_terminal_input_from_output(&response, out) {
             return Ok(len);
         }
         if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
-            eprintln!("uno-q local LLM produced no shell command: {text}");
+            eprintln!("uno-q local LLM server produced no terminal input: {response}");
         }
         Err(UnoQRuntimeError::RuntimeViolation)
     }
 
-    fn run(&mut self, transcript: &[u8]) -> Result<Vec<u8>, UnoQRuntimeError> {
+    fn complete(&mut self, prompt: &str) -> Result<String, UnoQRuntimeError> {
+        use std::io::{Read, Write};
+
+        let (host, port) = local_llm_http_endpoint_parts(&self.endpoint)
+            .ok_or(UnoQRuntimeError::RuntimeViolation)?;
+        let body = format!(
+            "{{\"prompt\":{},\"n_predict\":8,\"temperature\":0,\"stop\":[\"\\n\"]}}",
+            local_llm_json_string(prompt)
+        );
+        let mut stream = std::net::TcpStream::connect((host.as_str(), port))
+            .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
+        let timeout = Some(std::time::Duration::from_secs(120));
+        stream
+            .set_read_timeout(timeout)
+            .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
+        stream
+            .set_write_timeout(timeout)
+            .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
+        write!(
+            stream,
+            "POST /completion HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
+        if !response.starts_with("HTTP/1.1 200") && !response.starts_with("HTTP/1.0 200") {
+            if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+                eprintln!("uno-q local LLM server HTTP failure: {response}");
+            }
+            return Err(UnoQRuntimeError::RuntimeViolation);
+        }
+        let body = response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or(response.as_str());
+        local_llm_json_string_field(body, "content").ok_or(UnoQRuntimeError::RuntimeViolation)
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+impl Drop for LocalLlmServer {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+impl LocalLlmExternalCommand {
+    fn next_command(
+        &mut self,
+        transcript: &[u8],
+        phase: u8,
+        ordinal: u8,
+        out: &mut [u8; LOCAL_LLM_COMMAND_BYTES],
+    ) -> Result<usize, UnoQRuntimeError> {
+        let output = self.run(transcript, phase, ordinal)?;
+        let text = String::from_utf8_lossy(&output);
+        if let Some(len) = copy_llm_terminal_input_from_output(&text, out) {
+            return Ok(len);
+        }
+        if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+            eprintln!("uno-q local LLM produced no terminal input: {text}");
+        }
+        Err(UnoQRuntimeError::RuntimeViolation)
+    }
+
+    fn run(
+        &mut self,
+        transcript: &[u8],
+        phase: u8,
+        ordinal: u8,
+    ) -> Result<Vec<u8>, UnoQRuntimeError> {
         use std::io::Write;
 
         let mut args = self.args.clone();
-        if let Some(prompt) = &self.prompt {
-            let transcript = String::from_utf8_lossy(transcript);
-            args.push("-p".to_owned());
-            args.push(format!("{prompt}\n\nTranscript:\n{transcript}"));
+        let user_prompt = local_llm_user_prompt();
+        let self_mood = local_llm_self_mood_enabled();
+        let face_choice = (user_prompt.is_some() || self_mood) && phase != 0;
+        let pass_transcript_on_stdin = self.prompt.is_none() || phase != 0;
+        if self.add_transcript_affixes && phase != 0 {
+            args.push("--in-prefix".to_owned());
+            args.push("\nTranscript:\n".to_owned());
+            args.push("--in-suffix".to_owned());
+            args.push("\nCommand:".to_owned());
         }
-        let mut child = std::process::Command::new(&self.executable)
+        if let Some(prompt) = &self.prompt {
+            args.push("-p".to_owned());
+            let self_mood_prompt = self_mood.then(|| local_llm_self_mood_prompt(ordinal));
+            let prompt_text = if std::env::var_os("UNO_Q_LOCAL_LLM_PROMPT").is_some() {
+                prompt.clone()
+            } else if phase == 0 {
+                local_llm_discovery_prompt()
+            } else if face_choice {
+                let mood_context = user_prompt
+                    .as_deref()
+                    .or(self_mood_prompt.as_deref())
+                    .unwrap_or("");
+                local_llm_face_choice_prompt(local_llm_mood_key(mood_context))
+            } else {
+                local_llm_default_face_prompt(
+                    core::str::from_utf8(local_llm_face_label_for_ordinal(ordinal)?)
+                        .map_err(|_| UnoQRuntimeError::RuntimeViolation)?,
+                )
+            };
+            args.push(prompt_text);
+        }
+        let mut command = std::process::Command::new(&self.executable);
+        command
             .args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if let Some(dir) = &self.current_dir {
+            command.current_dir(dir);
+        }
+        if let Some(path) = &self.ld_library_path {
+            command.env("LD_LIBRARY_PATH", path);
+        }
+        let mut child = command
             .spawn()
             .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
-        if let Some(stdin) = child.stdin.as_mut() {
-            stdin
-                .write_all(transcript)
-                .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
+        if pass_transcript_on_stdin {
+            if let Some(stdin) = child.stdin.as_mut() {
+                stdin
+                    .write_all(transcript)
+                    .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
+            }
+        }
+        drop(child.stdin.take());
+        if !pass_transcript_on_stdin {
+            let _ = transcript;
         }
         let output = child
             .wait_with_output()
@@ -904,6 +1226,272 @@ impl LocalLlmCommandSource {
         }
         Ok(output.stdout)
     }
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_existing_path(path: &str) -> Option<String> {
+    std::path::Path::new(path).exists().then(|| path.to_owned())
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_work_dir_from_env() -> Option<String> {
+    std::env::var("UNO_Q_LOCAL_LLM_WORK_DIR")
+        .ok()
+        .or_else(|| local_llm_existing_path(DEFAULT_UNO_Q_LOCAL_LLM_BIN_DIR))
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_library_path_from_env() -> Option<String> {
+    if let Ok(path) = std::env::var("UNO_Q_LOCAL_LLM_LD_LIBRARY_PATH") {
+        return Some(path);
+    }
+
+    let mut parts = split_local_llm_args(
+        &std::env::var("UNO_Q_LOCAL_LLM_LIB_DIRS").unwrap_or_else(|_| {
+            format!(
+                "{} {}",
+                DEFAULT_UNO_Q_LOCAL_LLM_BIN_DIR, DEFAULT_UNO_Q_LOCAL_LLM_LIB_DIR
+            )
+        }),
+    );
+    parts.retain(|path| std::path::Path::new(path).exists());
+    if parts.is_empty() {
+        return None;
+    }
+    let mut path = parts.join(":");
+    if let Ok(existing) = std::env::var("LD_LIBRARY_PATH") {
+        if !existing.is_empty() {
+            path.push(':');
+            path.push_str(&existing);
+        }
+    }
+    Some(path)
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_server_port_from_env() -> u16 {
+    std::env::var("UNO_Q_LOCAL_LLM_SERVER_PORT")
+        .ok()
+        .and_then(|port| port.parse::<u16>().ok())
+        .unwrap_or(DEFAULT_UNO_Q_LOCAL_LLM_SERVER_PORT)
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_http_endpoint_parts(endpoint: &str) -> Option<(String, u16)> {
+    let rest = endpoint.strip_prefix("http://")?;
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let (host, port) = authority.rsplit_once(':')?;
+    Some((host.to_owned(), port.parse().ok()?))
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_server_health_ok(endpoint: &str, timeout: std::time::Duration) -> bool {
+    use std::io::{Read, Write};
+
+    let Some((host, port)) = local_llm_http_endpoint_parts(endpoint) else {
+        return false;
+    };
+    let Ok(mut stream) = std::net::TcpStream::connect((host.as_str(), port)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    if write!(
+        stream,
+        "GET /health HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .is_err()
+    {
+        return false;
+    }
+    let mut response = String::new();
+    stream.read_to_string(&mut response).is_ok()
+        && (response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200"))
+        && response.contains("\"ok\"")
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_prompt_for_phase(phase: u8, ordinal: u8) -> Result<String, UnoQRuntimeError> {
+    if let Ok(prompt) = std::env::var("UNO_Q_LOCAL_LLM_PROMPT") {
+        return Ok(prompt);
+    }
+    if phase == 0 {
+        return Ok(local_llm_discovery_prompt());
+    }
+
+    let user_prompt = local_llm_user_prompt();
+    let self_mood = local_llm_self_mood_enabled();
+    if user_prompt.is_some() || self_mood {
+        let self_mood_prompt = self_mood.then(|| local_llm_self_mood_prompt(ordinal));
+        let mood_context = user_prompt
+            .as_deref()
+            .or(self_mood_prompt.as_deref())
+            .unwrap_or("");
+        return Ok(local_llm_face_choice_prompt(local_llm_mood_key(
+            mood_context,
+        )));
+    }
+
+    Ok(local_llm_default_face_prompt(
+        core::str::from_utf8(local_llm_face_label_for_ordinal(ordinal)?)
+            .map_err(|_| UnoQRuntimeError::RuntimeViolation)?,
+    ))
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_prompt_for_server(
+    transcript: &[u8],
+    phase: u8,
+    ordinal: u8,
+) -> Result<String, UnoQRuntimeError> {
+    let prompt = local_llm_prompt_for_phase(phase, ordinal)?;
+    if phase == 0 || transcript.is_empty() {
+        return Ok(prompt);
+    }
+    let transcript = String::from_utf8_lossy(transcript);
+    Ok(format!(
+        "You are controlling the same WASI shell. Shell transcript so far:\n\
+{transcript}\n\nReturn one next terminal input line.\n{prompt}"
+    ))
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_json_string(value: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch < ' ' => {
+                let _ = write!(out, "\\u{:04x}", ch as u32);
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_json_string_field(input: &str, field: &str) -> Option<String> {
+    let needle = format!("\"{field}\"");
+    let rest = input.split_once(&needle)?.1;
+    let rest = rest.split_once(':')?.1.trim_start();
+    local_llm_decode_json_string(rest)
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_decode_json_string(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    if bytes.first().copied() != Some(b'"') {
+        return None;
+    }
+    let mut out = String::new();
+    let mut i = 1usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => return Some(out),
+            b'\\' => {
+                i += 1;
+                let escaped = *bytes.get(i)?;
+                match escaped {
+                    b'"' => out.push('"'),
+                    b'\\' => out.push('\\'),
+                    b'/' => out.push('/'),
+                    b'b' => out.push('\u{0008}'),
+                    b'f' => out.push('\u{000c}'),
+                    b'n' => out.push('\n'),
+                    b'r' => out.push('\r'),
+                    b't' => out.push('\t'),
+                    b'u' => {
+                        let value = local_llm_decode_json_hex4(bytes.get(i + 1..i + 5)?)?;
+                        out.push(char::from_u32(value).unwrap_or('\u{fffd}'));
+                        i += 4;
+                    }
+                    _ => return None,
+                }
+                i += 1;
+            }
+            byte if byte < 0x20 => return None,
+            _ => {
+                let ch = input[i..].chars().next()?;
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_decode_json_hex4(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() != 4 {
+        return None;
+    }
+    let mut value = 0u32;
+    for &byte in bytes {
+        value <<= 4;
+        value |= match byte {
+            b'0'..=b'9' => u32::from(byte - b'0'),
+            b'a'..=b'f' => u32::from(byte - b'a' + 10),
+            b'A'..=b'F' => u32::from(byte - b'A' + 10),
+            _ => return None,
+        };
+    }
+    Some(value)
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_user_prompt() -> Option<String> {
+    if let Ok(prompt) = std::env::var("UNO_Q_LOCAL_LLM_USER_PROMPT") {
+        return local_llm_prompt_from_bytes(prompt.into_bytes());
+    }
+    let path = std::env::var("UNO_Q_LOCAL_LLM_USER_PROMPT_FILE")
+        .ok()
+        .or_else(|| local_llm_existing_path(DEFAULT_UNO_Q_LOCAL_LLM_USER_PROMPT_FILE))?;
+    let bytes = std::fs::read(path).ok()?;
+    local_llm_prompt_from_bytes(bytes)
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_self_mood_enabled() -> bool {
+    std::env::var_os("UNO_Q_LOCAL_LLM_SELF_MOOD").is_some()
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_self_mood_prompt(ordinal: u8) -> String {
+    std::env::var("UNO_Q_LOCAL_LLM_SELF_MOOD_PROMPT").unwrap_or_else(|_| {
+        let mood = match ordinal % 4 {
+            0 => "I am happy and pleased.",
+            1 => "I am frustrated and focused.",
+            2 => "I am sad and tired.",
+            _ => "I am surprised and curious.",
+        };
+        format!(
+            "For this turn, the simulated assistant mood is: {mood} You do not \
+need to explain the mood; return only the matching shell command."
+        )
+    })
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_context_has_any(context: &str, words: &[&str]) -> bool {
+    words.iter().any(|word| context.contains(word))
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_prompt_from_bytes(mut bytes: Vec<u8>) -> Option<String> {
+    if bytes.len() > LOCAL_LLM_USER_PROMPT_BYTES {
+        bytes.truncate(LOCAL_LLM_USER_PROMPT_BYTES);
+    }
+    let prompt = String::from_utf8_lossy(&bytes).trim().to_owned();
+    (!prompt.is_empty()).then_some(prompt)
 }
 
 fn face_loop_forever_enabled() -> bool {
@@ -946,13 +1534,7 @@ fn scripted_local_llm_shell_command(
     if phase == 0 {
         return copy_command_bytes(b"ls\n", out);
     }
-    let index = usize::from(ordinal) % UNO_Q_FACE_CYCLE_FRAME_COUNT;
-    let face = if index < UNO_Q_FACE_EMOTION_FRAMES.len() {
-        UNO_Q_FACE_EMOTION_FRAMES[index]
-    } else {
-        UNO_Q_FACE_MOUTH_FRAMES[index - UNO_Q_FACE_EMOTION_FRAMES.len()]
-    };
-    let label = face_shell_label(face)?;
+    let label = local_llm_face_label_for_ordinal(ordinal)?;
     let mut len = 0usize;
     for bytes in [b"echo " as &[u8], label, b" > /face/frame\n"] {
         if len + bytes.len() > out.len() {
@@ -962,6 +1544,16 @@ fn scripted_local_llm_shell_command(
         len += bytes.len();
     }
     Ok(len)
+}
+
+fn local_llm_face_label_for_ordinal(ordinal: u8) -> Result<&'static [u8], UnoQRuntimeError> {
+    let index = usize::from(ordinal) % UNO_Q_FACE_CYCLE_FRAME_COUNT;
+    let face = if index < UNO_Q_FACE_EMOTION_FRAMES.len() {
+        UNO_Q_FACE_EMOTION_FRAMES[index]
+    } else {
+        UNO_Q_FACE_MOUTH_FRAMES[index - UNO_Q_FACE_EMOTION_FRAMES.len()]
+    };
+    face_shell_label(face)
 }
 
 fn copy_command_bytes(
@@ -1036,38 +1628,72 @@ fn split_local_llm_args(input: &str) -> Vec<String> {
 #[cfg(not(target_os = "none"))]
 fn default_local_llm_shell_prompt() -> &'static str {
     "You are controlling a WASI shell. Read the transcript from stdin and return \
-exactly one shell command. First run `ls`. After the shell lists ChoreoFS, run \
-`echo <code> > /face/frame`. Valid codes: h happy, a angry, s sad, u surprised, \
-mc mouth closed, ms mouth small, mw mouth wide, mr mouth round."
+one terminal input line. First run `ls` to discover ChoreoFS. After the shell \
+lists ChoreoFS, you may run `echo <code> > /face/frame` to change the face. \
+The WASI shell and hibana choreography decide which effects are admitted."
 }
 
 #[cfg(not(target_os = "none"))]
-fn copy_shell_command_from_output(
+fn local_llm_discovery_prompt() -> String {
+    "Shell command examples:\nTask: list files\nCommand: ls\nTask: list directory\nCommand: ls\nTask: start by listing files\nCommand:"
+        .to_owned()
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_face_choice_prompt(mood: &str) -> String {
+    format!(
+        "Face command examples:\nInput mood: happy\nCommand: echo h > /face/frame\n\
+Input mood: angry\nCommand: echo a > /face/frame\nInput mood: sad\nCommand: \
+echo s > /face/frame\nInput mood: surprised\nCommand: echo u > /face/frame\n\
+Input mood: {mood}\nCommand:"
+    )
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_default_face_prompt(label: &str) -> String {
+    format!(
+        "Shell command examples:\nFace code h\nCommand: echo h > /face/frame\n\
+Face code a\nCommand: echo a > /face/frame\nFace code s\nCommand: echo s > \
+/face/frame\nFace code u\nCommand: echo u > /face/frame\nFace code {label}\n\
+Command:"
+    )
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_mood_key(context: &str) -> &'static str {
+    let lower = context.to_ascii_lowercase();
+    if local_llm_context_has_any(&lower, &["angry", "frustrated", "mad", "upset"]) {
+        "angry"
+    } else if local_llm_context_has_any(&lower, &["sad", "tired", "lonely", "disappointed"]) {
+        "sad"
+    } else if local_llm_context_has_any(&lower, &["surprised", "confused", "amazed", "curious"]) {
+        "surprised"
+    } else {
+        "happy"
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+fn copy_llm_terminal_input_from_output(
     output: &str,
-    phase: u8,
     out: &mut [u8; LOCAL_LLM_COMMAND_BYTES],
 ) -> Option<usize> {
     for line in output.lines() {
-        let command = line.trim();
-        if command.is_empty() {
+        let input = line.trim();
+        if input.is_empty() || input == "[end of text]" {
             continue;
         }
-        if phase == 0 {
-            if command.eq_ignore_ascii_case("ls") {
-                return copy_command_bytes(b"ls\n", out).ok();
-            }
-            continue;
+        let bytes = input.as_bytes();
+        let copy_len = bytes.len().min(out.len());
+        if copy_len == 0 {
+            return None;
         }
-        if command.starts_with("echo ") && command.ends_with(" > /face/frame") {
-            let bytes = command.as_bytes();
-            let len = bytes.len().checked_add(1)?;
-            if len > out.len() {
-                return None;
-            }
-            out[..bytes.len()].copy_from_slice(bytes);
-            out[bytes.len()] = b'\n';
-            return Some(len);
+        out[..copy_len].copy_from_slice(&bytes[..copy_len]);
+        if copy_len == out.len() {
+            return Some(copy_len);
         }
+        out[copy_len] = b'\n';
+        return Some(copy_len + 1);
     }
     None
 }
@@ -2738,6 +3364,9 @@ mod tests {
             assert!(source.contains("\"/llm/stdout\""));
             assert!(source.contains("\"/face/frame\""));
             assert!(source.contains("CMD_LS"));
+            assert!(source.contains("find ChoreoFS -type f"));
+            assert!(source.contains("is_catalog_discovery_command"));
+            assert!(source.contains("face[0] == b'v'"));
             assert!(source.contains("echo "));
             assert!(source.contains(" > /face/frame"));
             assert!(source.contains("read_once"));
@@ -2839,20 +3468,138 @@ mod tests {
     }
 
     #[test]
-    fn local_llm_output_is_parsed_as_shell_commands_not_face_payloads() {
+    fn local_llm_output_is_terminal_input_not_choreography_filter() {
         let mut out = [0u8; LOCAL_LLM_COMMAND_BYTES];
         assert_eq!(
-            copy_shell_command_from_output("thinking...\nls\n", 0, &mut out),
-            Some(3)
-        );
-        assert_eq!(&out[..3], b"ls\n");
-
-        let mut out = [0u8; LOCAL_LLM_COMMAND_BYTES];
-        assert_eq!(
-            copy_shell_command_from_output("echo mc > /face/frame\n", 1, &mut out),
+            copy_llm_terminal_input_from_output(
+                "echo mc > /face/frame\n [end of text]\n",
+                &mut out,
+            ),
             Some(22)
         );
         assert_eq!(&out[..22], b"echo mc > /face/frame\n");
+
+        let mut out = [0u8; LOCAL_LLM_COMMAND_BYTES];
+        let invalid = "cat /etc/passwd\n";
+        assert_eq!(
+            copy_llm_terminal_input_from_output(invalid, &mut out),
+            Some(invalid.len())
+        );
+        assert_eq!(&out[..invalid.len()], invalid.as_bytes());
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn local_llm_default_source_keeps_one_persistent_llama_server() {
+        let source = include_str!("lib.rs");
+        assert!(source.contains("DEFAULT_UNO_Q_LOCAL_LLM_SERVER"));
+        assert!(source.contains("llama-server"));
+        assert!(source.contains("LocalLlmServer"));
+        assert!(source.contains("Self::Server(server)"));
+        assert!(source.contains("POST /completion"));
+        assert!(source.contains("GET /health"));
+        assert!(source.contains("UNO_Q_LOCAL_LLM_SERVER_ENDPOINT"));
+        assert!(source.contains("UNO_Q_LOCAL_LLM_SERVER_PORT"));
+        assert!(source.contains("UNO_Q_LOCAL_LLM_SERVER_ARGS"));
+        assert!(source.contains("DEFAULT_UNO_Q_LOCAL_LLM_COMPLETION"));
+        assert!(source.contains("llama-completion"));
+        assert!(source.contains("UNO_Q_LOCAL_LLM_SCRIPTED"));
+        assert!(source.contains("UNO_Q_LOCAL_LLM_USER_PROMPT"));
+        assert!(source.contains("DEFAULT_UNO_Q_LOCAL_LLM_USER_PROMPT_FILE"));
+        assert!(source.contains("UNO_Q_LOCAL_LLM_SELF_MOOD"));
+        assert!(source.contains("Assistant mood instruction"));
+        assert!(source.contains("Face command examples"));
+        assert!(source.contains("local_llm_face_choice_prompt"));
+        assert!(source.contains("local_llm_mood_key"));
+        assert!(source.contains("angry\", \"frustrated\", \"mad\", \"upset"));
+        assert!(source.contains("human request or assistant mood"));
+        assert!(source.contains("Self::Missing => Err"));
+        let llama_grammar_flag = ["--", "grammar"].concat();
+        assert!(!source.contains(&llama_grammar_flag));
+        let old_grammar_helper = ["local_llm_", "grammar_for_phase"].concat();
+        assert!(!source.contains(&old_grammar_helper));
+        let enough_predict_tokens = ["\"", "8", "\".to_owned()"].concat();
+        assert!(source.contains(&enough_predict_tokens));
+        let piped_stderr = [".stderr(std::process::Stdio::", "piped())"].concat();
+        assert!(source.contains(&piped_stderr));
+        let old_optional_source = ["command: ", "Option<LocalLlmCommandSource>"].concat();
+        assert!(!source.contains(&old_optional_source));
+
+        let prompt = default_local_llm_shell_prompt();
+        assert!(prompt.contains("WASI shell"));
+        assert!(prompt.contains("choreography"));
+        let server_prompt = local_llm_prompt_for_server(b"llm/stdout\n", 1, 0).unwrap();
+        assert!(server_prompt.contains("Shell transcript so far"));
+        assert!(server_prompt.ends_with("Command:"));
+        assert_eq!(local_llm_mood_key("frustrated"), "angry");
+        assert_eq!(local_llm_mood_key("curious"), "surprised");
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn local_llm_prompt_guidance_is_not_llama_grammar() {
+        assert!(local_llm_discovery_prompt().contains("Command: ls"));
+        assert!(
+            local_llm_face_choice_prompt("sad")
+                .contains("Input mood: sad\nCommand: echo s > /face/frame")
+        );
+        assert!(
+            local_llm_default_face_prompt("h")
+                .contains("Face code h\nCommand: echo h > /face/frame")
+        );
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn local_llm_server_json_codec_handles_completion_content() {
+        let prompt = "Transcript:\nls\nCommand: echo a > /face/frame";
+        let encoded = local_llm_json_string(prompt);
+        assert!(encoded.contains("\\n"));
+        assert!(encoded.contains("echo a > /face/frame"));
+
+        let body = "{\"index\":0,\"content\":\" echo a > /face/frame\",\"tokens_predicted\":5}";
+        assert_eq!(
+            local_llm_json_string_field(body, "content").as_deref(),
+            Some(" echo a > /face/frame")
+        );
+        let escaped = "{\"content\":\"echo s > /face/frame\\n\"}";
+        assert_eq!(
+            local_llm_json_string_field(escaped, "content").as_deref(),
+            Some("echo s > /face/frame\n")
+        );
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn human_prompt_is_prompt_context_not_runtime_authority() {
+        let bytes = vec![b'x'; LOCAL_LLM_USER_PROMPT_BYTES + 32];
+        let prompt = local_llm_prompt_from_bytes(bytes).unwrap();
+        assert_eq!(prompt.len(), LOCAL_LLM_USER_PROMPT_BYTES);
+
+        let mut out = [0u8; LOCAL_LLM_COMMAND_BYTES];
+        let arbitrary = "echo hello > /tmp/free-shell\n";
+        assert_eq!(
+            copy_llm_terminal_input_from_output(arbitrary, &mut out),
+            Some(arbitrary.len())
+        );
+        assert_eq!(&out[..arbitrary.len()], arbitrary.as_bytes());
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn self_mood_mode_is_prompt_guidance_only() {
+        let prompt = local_llm_self_mood_prompt(1);
+        assert!(prompt.contains("simulated assistant mood"));
+        assert!(prompt.contains("frustrated"));
+        assert!(prompt.contains("return only"));
+
+        assert_eq!(local_llm_mood_key("I am frustrated"), "angry");
+        assert_eq!(local_llm_mood_key("I am tired"), "sad");
+        assert_eq!(local_llm_mood_key("I am curious"), "surprised");
+        assert_eq!(local_llm_mood_key("I am happy"), "happy");
+        let face_prompt = local_llm_face_choice_prompt("angry");
+        assert!(face_prompt.contains("Input mood: angry\nCommand: echo a > /face/frame"));
+        assert!(face_prompt.ends_with("Command:"));
     }
 
     #[cfg(not(target_os = "none"))]

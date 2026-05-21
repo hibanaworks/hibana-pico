@@ -1544,7 +1544,7 @@ fn cargo_keeps_plan_private_and_no_demo_meaning_features() {
     assert_present(
         "Cargo.toml",
         cargo,
-        &["hibana = { version = \"0.6.1\", default-features = false }"],
+        &["hibana = { version = \"0.6.2\", default-features = false }"],
     );
     assert_absent(
         "Cargo.toml",

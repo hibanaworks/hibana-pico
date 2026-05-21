@@ -5,6 +5,50 @@ const PROOF_FRAME_COUNT: usize = 20;
 const SHELL_CATALOG: &[u8] = b"w /face/frame FaceFrame\n";
 const CMD_LS: u8 = 0xff;
 
+macro_rules! is_catalog_discovery_command {
+    ($command:expr) => {{
+        let command = $command;
+        (command.len() == 2 && command[0] == b'l' && command[1] == b's')
+            || (command.len() == 21
+                && command[0] == b'f'
+                && command[1] == b'i'
+                && command[2] == b'n'
+                && command[3] == b'd'
+                && command[4] == b' '
+                && (command[5] == b'C' || command[5] == b'c')
+                && command[6] == b'h'
+                && command[7] == b'o'
+                && command[8] == b'r'
+                && command[9] == b'e'
+                && command[10] == b'o'
+                && (command[11] == b'F' || command[11] == b'f')
+                && (command[12] == b'S' || command[12] == b's')
+                && command[13] == b' '
+                && command[14] == b'-'
+                && command[15] == b't'
+                && command[16] == b'y'
+                && command[17] == b'p'
+                && command[18] == b'e'
+                && command[19] == b' '
+                && command[20] == b'f')
+            || (command.len() == 14
+                && command[0] == b'f'
+                && command[1] == b'i'
+                && command[2] == b'n'
+                && command[3] == b'd'
+                && command[4] == b' '
+                && (command[5] == b'.' || command[5] == b'/')
+                && command[6] == b' '
+                && command[7] == b'-'
+                && command[8] == b't'
+                && command[9] == b'y'
+                && command[10] == b'p'
+                && command[11] == b'e'
+                && command[12] == b' '
+                && command[13] == b'f')
+    }};
+}
+
 fn main() -> Result<()> {
     run()
 }
@@ -41,12 +85,13 @@ fn read_command(stdin: &choreofs::ReadFile) -> Result<u8> {
         end -= 1;
     }
     let command = &buffer[..end];
-    if command == b"ls" {
+    if is_catalog_discovery_command!(command) {
         return Ok(CMD_LS);
     }
     decode_echo_face_command(command)
 }
 
+#[inline(always)]
 fn decode_echo_face_command(command: &[u8]) -> Result<u8> {
     let prefix = b"echo ";
     let redirect = b" > /face/frame";
@@ -59,7 +104,7 @@ fn decode_echo_face_command(command: &[u8]) -> Result<u8> {
     decode_face_code(&command[prefix.len()..command.len() - redirect.len()])
 }
 
-#[inline(never)]
+#[inline(always)]
 fn decode_face_code(face: &[u8]) -> Result<u8> {
     if face.len() == 1 {
         if face[0] == b'h' {
@@ -72,6 +117,9 @@ fn decode_face_code(face: &[u8]) -> Result<u8> {
             return Ok(3);
         }
         if face[0] == b'u' {
+            return Ok(4);
+        }
+        if face[0] == b'v' {
             return Ok(4);
         }
     }
@@ -90,4 +138,39 @@ fn decode_face_code(face: &[u8]) -> Result<u8> {
         }
     }
     Err(Error::InvalidPath)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::decode_face_code;
+
+    #[test]
+    fn catalog_discovery_accepts_ls_and_shell_find() {
+        for command in [
+            b"ls" as &[u8],
+            b"find ChoreoFS -type f",
+            b"find choreofs -type f",
+            b"find . -type f",
+            b"find / -type f",
+        ] {
+            assert!(is_catalog_discovery_command!(command));
+        }
+    }
+
+    #[test]
+    fn catalog_discovery_rejects_non_file_find_and_effect_commands() {
+        for command in [
+            b"find ChoreoFS -type d" as &[u8],
+            b"find ChoreoFS",
+            b"echo h > /face/frame",
+        ] {
+            assert!(!is_catalog_discovery_command!(command));
+        }
+    }
+
+    #[test]
+    fn surprised_accepts_model_alias_v() {
+        assert_eq!(decode_face_code(b"u"), Ok(4));
+        assert_eq!(decode_face_code(b"v"), Ok(4));
+    }
 }
