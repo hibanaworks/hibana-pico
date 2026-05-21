@@ -4982,7 +4982,8 @@ mod tests {
 
         let mut code = Vec::new();
         push_test_u32(&mut code, 2);
-        for _ in 0..2 {
+        for body_index in 0..2 {
+            core::hint::black_box(body_index);
             push_test_u32(&mut code, 2);
             code.push(0);
             code.push(OPCODE_END);

@@ -2,7 +2,7 @@ use hibana::integration::wire::{CodecError, Payload, WireEncode, WirePayload};
 
 pub const ROLE_M33_LED_KERNEL: u8 = 0;
 pub const ROLE_WASI_LLM_CELL: u8 = 1;
-pub const ROLE_PSEUDO_LLM: u8 = 2;
+pub const ROLE_LOCAL_LLM: u8 = 2;
 
 pub const FACE_NEUTRAL: u8 = 0;
 pub const FACE_HAPPY: u8 = 1;

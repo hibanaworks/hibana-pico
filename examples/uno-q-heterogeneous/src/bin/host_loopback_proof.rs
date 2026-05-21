@@ -17,6 +17,6 @@ fn main() {
     assert!(report.artifact_len() > 0);
 
     println!(
-        "uno-q proof ok: WASI ChoreoFS read frames from pseudo LLM and wrote M33 face frames through projected choreography"
+        "uno-q proof ok: WASI ChoreoFS read frames from local LLM and wrote M33 face frames through projected choreography"
     );
 }

@@ -10,12 +10,12 @@ publish = false
 hibana-wasip1-guest = { path = "../../../../guest/hibana-wasip1-guest" }
 
 [[bin]]
-name = "uno-q-llm-face-cell"
-path = "src/bin/uno-q-llm-face-cell.rs"
+name = "uno-q-llm-face-shell"
+path = "src/bin/uno-q-llm-face-shell.rs"
 
 [[bin]]
-name = "uno-q-llm-face-router"
-path = "src/bin/uno-q-llm-face-router.rs"
+name = "uno-q-llm-face-shell-loop"
+path = "src/bin/uno-q-llm-face-shell-loop.rs"
 
 [profile.release]
 panic = "abort"

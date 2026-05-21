@@ -4,7 +4,9 @@ pub mod protocol;
 
 use core::cell::{Cell, UnsafeCell};
 use core::convert::Infallible;
-use core::task::Poll;
+use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll};
 
 use hibana::g;
 use hibana::integration::{
@@ -24,7 +26,7 @@ use hibana_pico::{
 };
 use protocol::{
     FACE_ANGRY, FACE_HAPPY, FACE_MOUTH_CLOSED, FACE_MOUTH_ROUND, FACE_MOUTH_SMALL, FACE_MOUTH_WIDE,
-    FACE_SAD, FACE_SURPRISED, FaceFrame, ROLE_M33_LED_KERNEL, ROLE_PSEUDO_LLM, ROLE_WASI_LLM_CELL,
+    FACE_SAD, FACE_SURPRISED, FaceFrame, ROLE_LOCAL_LLM, ROLE_M33_LED_KERNEL, ROLE_WASI_LLM_CELL,
 };
 
 pub struct UnoQCapsule;
@@ -42,14 +44,15 @@ impl LabelUniverse for UnoQLabelUniverse {
 pub mod image {
     pub struct HostLoopbackProof;
     pub struct HardwarePeerProof;
-    pub struct PseudoLlmProcess;
+    pub struct LocalLlmProcess;
     pub struct WasiLlmCellProcess;
     pub struct M33LedKernelImage;
 }
 
 pub const UNO_Q_CARRIER: appkit::CarrierKind = appkit::CarrierKind::new(0x7101);
 pub const PREOPEN_FD: u8 = 9;
-pub const LLM_FRAME_FD: u8 = 12;
+pub const LLM_STDIN_FD: u8 = 12;
+pub const LLM_STDOUT_FD: u8 = 13;
 pub const FACE_FRAME_FD: u8 = 15;
 
 const FD_READ_RIGHT: u64 = 1 << 1;
@@ -63,7 +66,7 @@ const UART_CARRIER_HEADER_BYTES: usize = 13;
 const UART_CARRIER_FRAME_BYTES: usize = UART_CARRIER_HEADER_BYTES + PROOF_CARRIER_FRAME_BYTES + 1;
 #[cfg(any(test, target_os = "none"))]
 const UNO_Q_M33_HINT_DRAIN_TICKS: u32 = 2_000_000;
-const HARDWARE_PEER_ROLE_BITS: u128 = (1u128 << ROLE_WASI_LLM_CELL) | (1u128 << ROLE_PSEUDO_LLM);
+const HARDWARE_PEER_ROLE_BITS: u128 = (1u128 << ROLE_WASI_LLM_CELL) | (1u128 << ROLE_LOCAL_LLM);
 #[cfg(any(test, not(target_os = "none")))]
 const UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS: u32 = 50_000;
 #[cfg(any(test, target_os = "none"))]
@@ -99,7 +102,8 @@ const UNO_Q_FACE_MOUTH_FRAMES: [u8; 8] = [
 const UNO_Q_FACE_CYCLE_FRAME_COUNT: usize =
     UNO_Q_FACE_EMOTION_FRAMES.len() + UNO_Q_FACE_MOUTH_FRAMES.len();
 
-const LLM_FRAME_PATH: &[u8] = b"llm/frame";
+const LLM_STDIN_PATH: &[u8] = b"llm/stdin";
+const LLM_STDOUT_PATH: &[u8] = b"llm/stdout";
 const FACE_FRAME_PATH: &[u8] = b"face/frame";
 
 #[cfg(all(not(target_os = "none"), target_os = "linux"))]
@@ -149,10 +153,15 @@ fn drain_uno_q_uart_byte(_file: &std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
-pub const LLM_FRAME_OBJECT: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
-    LLM_FRAME_PATH,
+pub const LLM_STDIN_OBJECT: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
+    LLM_STDIN_PATH,
     appkit::ObjectId(71_002),
-    appkit::FdSpec::new(LLM_FRAME_FD as u32, FD_READ_RIGHT, 1),
+    appkit::FdSpec::new(LLM_STDIN_FD as u32, FD_READ_RIGHT, 1),
+);
+pub const LLM_STDOUT_OBJECT: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
+    LLM_STDOUT_PATH,
+    appkit::ObjectId(71_003),
+    appkit::FdSpec::new(LLM_STDOUT_FD as u32, FD_WRITE_RIGHT, 1),
 );
 pub const FACE_FRAME_OBJECT: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
     FACE_FRAME_PATH,
@@ -164,20 +173,20 @@ static UNO_Q_DRIVER_FACTS: appkit::ChoreoFsObjectSet<1> =
     appkit::ChoreoFsObjectSet::new([FACE_FRAME_OBJECT]);
 
 #[cfg(feature = "embed-wasip1-artifacts")]
-const WASM_UNO_Q_LLM_FACE_CELL: &[u8] = include_bytes!(concat!(
+const WASM_UNO_Q_LLM_FACE_SHELL: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../target/wasip1-apps/wasm32-wasip1/release/uno-q-llm-face-cell.wasm"
+    "/../../target/wasip1-apps/wasm32-wasip1/release/uno-q-llm-face-shell.wasm"
 ));
 #[cfg(feature = "embed-wasip1-artifacts")]
-const WASM_UNO_Q_LLM_FACE_ROUTER: &[u8] = include_bytes!(concat!(
+const WASM_UNO_Q_LLM_FACE_SHELL_LOOP: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../target/wasip1-apps/wasm32-wasip1/release/uno-q-llm-face-router.wasm"
+    "/../../target/wasip1-apps/wasm32-wasip1/release/uno-q-llm-face-shell-loop.wasm"
 ));
 #[cfg(not(feature = "embed-wasip1-artifacts"))]
-const WASM_UNO_Q_LLM_FACE_CELL: &[u8] = &[];
+const WASM_UNO_Q_LLM_FACE_SHELL: &[u8] = &[];
 #[cfg(not(feature = "embed-wasip1-artifacts"))]
 #[cfg_attr(target_os = "none", allow(dead_code))]
-const WASM_UNO_Q_LLM_FACE_ROUTER: &[u8] = &[];
+const WASM_UNO_Q_LLM_FACE_SHELL_LOOP: &[u8] = &[];
 
 #[cfg(feature = "runtime-wasip1")]
 static mut UNO_Q_WASI_GUEST_ARENA: appkit::WasiGuestArena = appkit::WasiGuestArena::empty();
@@ -197,7 +206,7 @@ static HOST_PROOF_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLA
 static HARDWARE_PEER_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLAB_BYTES> =
     appkit::EmbeddedAttachStorage::empty();
 #[cfg(all(not(test), target_os = "none"))]
-static PSEUDO_LLM_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLAB_BYTES> =
+static LOCAL_LLM_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLAB_BYTES> =
     appkit::EmbeddedAttachStorage::empty();
 #[cfg(all(not(test), target_os = "none"))]
 static WASI_CELL_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLAB_BYTES> =
@@ -247,6 +256,62 @@ impl appkit::Capsule for UnoQCapsule {
     type Report = Infallible;
 
     fn choreography() -> impl Projectable<Self::Universe> {
+        let shell_discovery = g::seq(
+            g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_LOCAL_LLM>, WasiFdWriteReqMsg, 0>(),
+            g::seq(
+                g::send::<g::Role<ROLE_LOCAL_LLM>, g::Role<ROLE_WASI_LLM_CELL>, WasiFdWriteRetMsg, 0>(
+                ),
+                g::seq(
+                    g::send::<
+                        g::Role<ROLE_WASI_LLM_CELL>,
+                        g::Role<ROLE_LOCAL_LLM>,
+                        WasiFdReadReqMsg,
+                        0,
+                    >(),
+                    g::send::<
+                        g::Role<ROLE_LOCAL_LLM>,
+                        g::Role<ROLE_WASI_LLM_CELL>,
+                        WasiFdReadRetMsg,
+                        0,
+                    >(),
+                ),
+            ),
+        );
+        let face_write_command = g::seq(
+            g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_LOCAL_LLM>, WasiFdWriteReqMsg, 0>(),
+            g::seq(
+                g::send::<g::Role<ROLE_LOCAL_LLM>, g::Role<ROLE_WASI_LLM_CELL>, WasiFdWriteRetMsg, 0>(
+                ),
+                g::seq(
+                    g::send::<
+                        g::Role<ROLE_WASI_LLM_CELL>,
+                        g::Role<ROLE_LOCAL_LLM>,
+                        WasiFdReadReqMsg,
+                        0,
+                    >(),
+                    g::send::<
+                        g::Role<ROLE_LOCAL_LLM>,
+                        g::Role<ROLE_WASI_LLM_CELL>,
+                        WasiFdReadRetMsg,
+                        0,
+                    >(),
+                ),
+            ),
+        );
+        let face_frame_commit = g::seq(
+            g::send::<
+                g::Role<ROLE_WASI_LLM_CELL>,
+                g::Role<ROLE_M33_LED_KERNEL>,
+                WasiFdWriteReqMsg,
+                0,
+            >(),
+            g::send::<
+                g::Role<ROLE_M33_LED_KERNEL>,
+                g::Role<ROLE_WASI_LLM_CELL>,
+                WasiFdWriteRetMsg,
+                0,
+            >(),
+        );
         let frame_cycle = g::seq(
             g::send::<
                 g::Role<ROLE_WASI_LLM_CELL>,
@@ -255,30 +320,8 @@ impl appkit::Capsule for UnoQCapsule {
                 0,
             >(),
             g::seq(
-                g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_PSEUDO_LLM>, WasiFdReadReqMsg, 0>(
-                ),
-                g::seq(
-                    g::send::<
-                        g::Role<ROLE_PSEUDO_LLM>,
-                        g::Role<ROLE_WASI_LLM_CELL>,
-                        WasiFdReadRetMsg,
-                        0,
-                    >(),
-                    g::seq(
-                        g::send::<
-                            g::Role<ROLE_WASI_LLM_CELL>,
-                            g::Role<ROLE_M33_LED_KERNEL>,
-                            WasiFdWriteReqMsg,
-                            1,
-                        >(),
-                        g::send::<
-                            g::Role<ROLE_M33_LED_KERNEL>,
-                            g::Role<ROLE_WASI_LLM_CELL>,
-                            WasiFdWriteRetMsg,
-                            1,
-                        >(),
-                    ),
-                ),
+                shell_discovery,
+                g::seq(face_write_command, face_frame_commit),
             ),
         );
         let face_frame_loop = g::route(
@@ -293,7 +336,7 @@ impl appkit::Capsule for UnoQCapsule {
                 g::seq(
                     g::send::<
                         g::Role<ROLE_WASI_LLM_CELL>,
-                        g::Role<ROLE_PSEUDO_LLM>,
+                        g::Role<ROLE_LOCAL_LLM>,
                         WasiProcExitReqMsg,
                         0,
                     >(),
@@ -301,17 +344,17 @@ impl appkit::Capsule for UnoQCapsule {
                         g::Role<ROLE_WASI_LLM_CELL>,
                         g::Role<ROLE_M33_LED_KERNEL>,
                         WasiProcExitReqMsg,
-                        1,
+                        0,
                     >(),
                 ),
             ),
         );
         g::seq(
-            g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_PSEUDO_LLM>, WasiPathOpenReqMsg, 0>(
+            g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_LOCAL_LLM>, WasiPathOpenReqMsg, 0>(
             ),
             g::seq(
                 g::send::<
-                    g::Role<ROLE_PSEUDO_LLM>,
+                    g::Role<ROLE_LOCAL_LLM>,
                     g::Role<ROLE_WASI_LLM_CELL>,
                     WasiPathOpenRetMsg,
                     0,
@@ -319,18 +362,34 @@ impl appkit::Capsule for UnoQCapsule {
                 g::seq(
                     g::send::<
                         g::Role<ROLE_WASI_LLM_CELL>,
-                        g::Role<ROLE_M33_LED_KERNEL>,
+                        g::Role<ROLE_LOCAL_LLM>,
                         WasiPathOpenReqMsg,
-                        1,
+                        0,
                     >(),
                     g::seq(
                         g::send::<
-                            g::Role<ROLE_M33_LED_KERNEL>,
+                            g::Role<ROLE_LOCAL_LLM>,
                             g::Role<ROLE_WASI_LLM_CELL>,
                             WasiPathOpenRetMsg,
-                            1,
+                            0,
                         >(),
-                        face_frame_loop,
+                        g::seq(
+                            g::send::<
+                                g::Role<ROLE_WASI_LLM_CELL>,
+                                g::Role<ROLE_M33_LED_KERNEL>,
+                                WasiPathOpenReqMsg,
+                                0,
+                            >(),
+                            g::seq(
+                                g::send::<
+                                    g::Role<ROLE_M33_LED_KERNEL>,
+                                    g::Role<ROLE_WASI_LLM_CELL>,
+                                    WasiPathOpenRetMsg,
+                                    0,
+                                >(),
+                                face_frame_loop,
+                            ),
+                        ),
                     ),
                 ),
             ),
@@ -343,7 +402,7 @@ impl appkit::Placement<UnoQCapsule> for UnoQPlacement {
         match role {
             ROLE_WASI_LLM_CELL => appkit::RoleKind::Engine,
             ROLE_M33_LED_KERNEL => appkit::RoleKind::Driver,
-            ROLE_PSEUDO_LLM => appkit::RoleKind::Boundary,
+            ROLE_LOCAL_LLM => appkit::RoleKind::Boundary,
             _ => appkit::RoleKind::Supervisor,
         }
     }
@@ -406,29 +465,56 @@ async fn run_boundary<const ROLE: u8>(
     mut ctx: appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
 ) -> appkit::RoleResult<UnoQRuntimeError> {
     match ROLE {
-        ROLE_PSEUDO_LLM => {
+        ROLE_LOCAL_LLM => {
+            #[cfg(not(target_os = "none"))]
+            if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+                eprintln!("uno-q local LLM boundary: open stdin");
+            }
             let request = expect_path_open(ctx.endpoint().recv::<WasiPathOpenReqMsg>().await?)?;
-            complete_boundary_path_open(&mut ctx, request, LLM_FRAME_PATH, FD_READ_RIGHT).await?;
-            let mut ordinal = 0u8;
+            complete_boundary_path_open(
+                &mut ctx,
+                request,
+                LLM_STDIN_PATH,
+                FD_READ_RIGHT,
+                LLM_STDIN_FD,
+            )
+            .await?;
+            #[cfg(not(target_os = "none"))]
+            if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+                eprintln!("uno-q local LLM boundary: open stdout");
+            }
+            let request = expect_path_open(ctx.endpoint().recv::<WasiPathOpenReqMsg>().await?)?;
+            complete_boundary_path_open(
+                &mut ctx,
+                request,
+                LLM_STDOUT_PATH,
+                FD_WRITE_RIGHT,
+                LLM_STDOUT_FD,
+            )
+            .await?;
+            let mut source = LocalLlmShellSource::new();
             loop {
-                pseudo_llm_wait_before_frame(ordinal);
                 let branch = ctx.endpoint().offer().await?;
+                #[cfg(not(target_os = "none"))]
+                if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+                    eprintln!("uno-q local LLM boundary branch label={}", branch.label());
+                }
                 match branch.label() {
-                    LABEL_WASI_FD_READ => {
-                        let read = expect_fd_read(branch.decode::<WasiFdReadReqMsg>().await?)?;
-                        if read.fd() != LLM_FRAME_FD || read.max_len() < 2 {
-                            return Err(UnoQRuntimeError::RuntimeViolation);
-                        }
-                        let frame = pseudo_llm_frame(ordinal as u8)?;
-                        ctx.endpoint()
-                            .flow::<WasiFdReadRetMsg>()?
-                            .send(&EngineRet::FdReadDone(FdReadDone::new_with_lease(
-                                read.fd(),
-                                read.lease_id(),
-                                &[frame.face(), frame.ordinal()],
-                            )?))
-                            .await?;
-                        ordinal = ordinal.wrapping_add(1);
+                    LABEL_WASI_FD_WRITE => {
+                        let write = expect_fd_write(branch.decode::<WasiFdWriteReqMsg>().await?)?;
+                        complete_local_llm_stdout_write(&mut ctx, &mut source, write).await?;
+
+                        let read =
+                            expect_fd_read(ctx.endpoint().recv::<WasiFdReadReqMsg>().await?)?;
+                        complete_local_llm_stdin_read(&mut ctx, &mut source, read).await?;
+
+                        let write =
+                            expect_fd_write(ctx.endpoint().recv::<WasiFdWriteReqMsg>().await?)?;
+                        complete_local_llm_stdout_write(&mut ctx, &mut source, write).await?;
+
+                        let read =
+                            expect_fd_read(ctx.endpoint().recv::<WasiFdReadReqMsg>().await?)?;
+                        complete_local_llm_stdin_read(&mut ctx, &mut source, read).await?;
                     }
                     LABEL_WASI_PROC_EXIT => {
                         let proc_exit = branch.decode::<WasiProcExitReqMsg>().await?;
@@ -447,6 +533,87 @@ async fn run_boundary<const ROLE: u8>(
         _ => {}
     }
     ctx.pending().await
+}
+
+async fn complete_local_llm_stdout_write<const ROLE: u8>(
+    ctx: &mut appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
+    source: &mut LocalLlmShellSource,
+    write: hibana_pico::choreography::protocol::FdWrite,
+) -> Result<(), UnoQRuntimeError> {
+    #[cfg(not(target_os = "none"))]
+    if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+        eprintln!(
+            "uno-q local LLM stdout fd={} len={} text={:?}",
+            write.fd(),
+            write.len(),
+            core::str::from_utf8(write.as_bytes()).unwrap_or("<binary>")
+        );
+    }
+    if write.fd() != LLM_STDOUT_FD {
+        return Err(UnoQRuntimeError::RuntimeViolation);
+    }
+    source.observe_shell_output(write.as_bytes());
+    ctx.endpoint()
+        .flow::<WasiFdWriteRetMsg>()?
+        .send(&EngineRet::FdWriteDone(FdWriteDone::new(
+            write.fd(),
+            write.len() as u8,
+        )))
+        .await?;
+    #[cfg(not(target_os = "none"))]
+    if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+        eprintln!("uno-q local LLM stdout ack");
+    }
+    Ok(())
+}
+
+async fn complete_local_llm_stdin_read<const ROLE: u8>(
+    ctx: &mut appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
+    source: &mut LocalLlmShellSource,
+    read: hibana_pico::choreography::protocol::FdRead,
+) -> Result<(), UnoQRuntimeError> {
+    #[cfg(not(target_os = "none"))]
+    if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+        eprintln!(
+            "uno-q local LLM stdin fd={} max={}",
+            read.fd(),
+            read.max_len()
+        );
+    }
+    if read.fd() != LLM_STDIN_FD || read.max_len() == 0 {
+        return Err(UnoQRuntimeError::RuntimeViolation);
+    }
+    let (command, len) = source.next_command(read.max_len() as usize)?;
+    ctx.endpoint()
+        .flow::<WasiFdReadRetMsg>()?
+        .send(&EngineRet::FdReadDone(FdReadDone::new_with_lease(
+            read.fd(),
+            read.lease_id(),
+            &command[..len],
+        )?))
+        .await?;
+    Ok(())
+}
+
+struct YieldToPeerRoles {
+    yielded: bool,
+}
+
+impl Future for YieldToPeerRoles {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.yielded {
+            Poll::Ready(())
+        } else {
+            self.yielded = true;
+            Poll::Pending
+        }
+    }
+}
+
+fn yield_to_peer_roles() -> YieldToPeerRoles {
+    YieldToPeerRoles { yielded: false }
 }
 
 async fn drive_face_frame_loop<const ROLE: u8>(
@@ -507,6 +674,7 @@ async fn drive_face_frame_loop<const ROLE: u8>(
                 );
                 send_fd_write_done(ctx, write.fd(), write.len()).await?;
                 ordinal = ordinal.wrapping_add(1);
+                yield_to_peer_roles().await;
             }
             LABEL_WASI_PROC_EXIT => {
                 m33_role_step(0x0d26_0000 | u32::from(ordinal));
@@ -537,17 +705,205 @@ async fn drive_face_frame_loop<const ROLE: u8>(
     Ok(())
 }
 
-fn pseudo_llm_wait_before_frame(ordinal: u8) {
-    if ordinal == 0 {
-        return;
-    }
-    if !face_loop_forever_enabled() {
-        return;
-    }
+const LOCAL_LLM_TRANSCRIPT_BYTES: usize = 768;
+const LOCAL_LLM_COMMAND_BYTES: usize = 96;
+
+struct LocalLlmShellSource {
+    transcript: [u8; LOCAL_LLM_TRANSCRIPT_BYTES],
+    transcript_len: usize,
+    read_phase: u8,
+    ordinal: u8,
     #[cfg(not(target_os = "none"))]
-    std::thread::sleep(std::time::Duration::from_micros(face_hold_us_for_ordinal(
-        ordinal.wrapping_sub(1),
-    )));
+    command: Option<LocalLlmCommandSource>,
+}
+
+impl LocalLlmShellSource {
+    fn new() -> Self {
+        Self {
+            transcript: [0; LOCAL_LLM_TRANSCRIPT_BYTES],
+            transcript_len: 0,
+            read_phase: 0,
+            ordinal: 0,
+            #[cfg(not(target_os = "none"))]
+            command: LocalLlmCommandSource::from_env(),
+        }
+    }
+
+    fn observe_shell_output(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if self.transcript_len == self.transcript.len() {
+                self.transcript.copy_within(1.., 0);
+                self.transcript_len -= 1;
+            }
+            self.transcript[self.transcript_len] = byte;
+            self.transcript_len += 1;
+        }
+    }
+
+    fn next_command(
+        &mut self,
+        max_len: usize,
+    ) -> Result<([u8; LOCAL_LLM_COMMAND_BYTES], usize), UnoQRuntimeError> {
+        if self.read_phase == 0 {
+            self.wait_before_cycle();
+        }
+
+        let mut command = [0u8; LOCAL_LLM_COMMAND_BYTES];
+        let len = {
+            #[cfg(not(target_os = "none"))]
+            if let Some(source) = &mut self.command {
+                source.next_command(
+                    &self.transcript[..self.transcript_len],
+                    self.read_phase,
+                    &mut command,
+                )?
+            } else {
+                scripted_local_llm_shell_command(self.read_phase, self.ordinal, &mut command)?
+            }
+            #[cfg(target_os = "none")]
+            {
+                scripted_local_llm_shell_command(self.read_phase, self.ordinal, &mut command)?
+            }
+        };
+        if len == 0 || len > max_len {
+            return Err(UnoQRuntimeError::RuntimeViolation);
+        }
+        self.observe_shell_output(&command[..len]);
+        if self.read_phase == 0 {
+            self.read_phase = 1;
+        } else {
+            self.read_phase = 0;
+            self.ordinal = self.ordinal.wrapping_add(1);
+        }
+        Ok((command, len))
+    }
+
+    fn wait_before_cycle(&self) {
+        if self.ordinal == 0 {
+            return;
+        }
+        if !face_loop_forever_enabled() {
+            return;
+        }
+        #[cfg(not(target_os = "none"))]
+        std::thread::sleep(std::time::Duration::from_micros(face_hold_us_for_ordinal(
+            self.ordinal.wrapping_sub(1),
+        )));
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+struct LocalLlmCommandSource {
+    executable: String,
+    args: Vec<String>,
+    prompt: Option<String>,
+}
+
+#[cfg(not(target_os = "none"))]
+impl LocalLlmCommandSource {
+    fn from_env() -> Option<Self> {
+        let explicit = std::env::var("UNO_Q_LOCAL_LLM_CMD").ok();
+        let model = std::env::var("UNO_Q_LOCAL_LLM_MODEL").ok();
+        let cli = std::env::var("UNO_Q_LOCAL_LLM_CLI").ok();
+        if explicit.is_none() && model.is_none() && cli.is_none() {
+            return None;
+        }
+        let explicit_mode = explicit.is_some();
+
+        let (executable, args) = if let Some(command) = explicit {
+            let mut parts = split_local_llm_args(&command);
+            if parts.is_empty() {
+                return None;
+            }
+            let executable = parts.remove(0);
+            (executable, parts)
+        } else {
+            let executable = cli.unwrap_or_else(|| "llama-cli".to_owned());
+            let mut args = Vec::new();
+            if let Some(model) = model {
+                args.push("-m".to_owned());
+                args.push(model);
+            }
+            if let Ok(extra) = std::env::var("UNO_Q_LOCAL_LLM_ARGS") {
+                args.extend(split_local_llm_args(&extra));
+            } else {
+                args.push("--no-display-prompt".to_owned());
+                args.push("-n".to_owned());
+                args.push("48".to_owned());
+                args.push("--temp".to_owned());
+                args.push("0.2".to_owned());
+            }
+            (executable, args)
+        };
+
+        let prompt = if explicit_mode {
+            None
+        } else {
+            Some(
+                std::env::var("UNO_Q_LOCAL_LLM_PROMPT")
+                    .unwrap_or_else(|_| default_local_llm_shell_prompt().to_owned()),
+            )
+        };
+
+        Some(Self {
+            executable,
+            args,
+            prompt,
+        })
+    }
+
+    fn next_command(
+        &mut self,
+        transcript: &[u8],
+        phase: u8,
+        out: &mut [u8; LOCAL_LLM_COMMAND_BYTES],
+    ) -> Result<usize, UnoQRuntimeError> {
+        let output = self.run(transcript)?;
+        let text = String::from_utf8_lossy(&output);
+        if let Some(len) = copy_shell_command_from_output(&text, phase, out) {
+            return Ok(len);
+        }
+        if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+            eprintln!("uno-q local LLM produced no shell command: {text}");
+        }
+        Err(UnoQRuntimeError::RuntimeViolation)
+    }
+
+    fn run(&mut self, transcript: &[u8]) -> Result<Vec<u8>, UnoQRuntimeError> {
+        use std::io::Write;
+
+        let mut args = self.args.clone();
+        if let Some(prompt) = &self.prompt {
+            let transcript = String::from_utf8_lossy(transcript);
+            args.push("-p".to_owned());
+            args.push(format!("{prompt}\n\nTranscript:\n{transcript}"));
+        }
+        let mut child = std::process::Command::new(&self.executable)
+            .args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin
+                .write_all(transcript)
+                .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
+        if !output.status.success() {
+            if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+                eprintln!(
+                    "uno-q local LLM command failed: status={:?} stderr={}",
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return Err(UnoQRuntimeError::RuntimeViolation);
+        }
+        Ok(output.stdout)
+    }
 }
 
 fn face_loop_forever_enabled() -> bool {
@@ -582,14 +938,138 @@ fn face_hold_us(face: u8) -> u64 {
     }
 }
 
-fn pseudo_llm_frame(ordinal: u8) -> Result<FaceFrame, UnoQRuntimeError> {
+fn scripted_local_llm_shell_command(
+    phase: u8,
+    ordinal: u8,
+    out: &mut [u8; LOCAL_LLM_COMMAND_BYTES],
+) -> Result<usize, UnoQRuntimeError> {
+    if phase == 0 {
+        return copy_command_bytes(b"ls\n", out);
+    }
     let index = usize::from(ordinal) % UNO_Q_FACE_CYCLE_FRAME_COUNT;
     let face = if index < UNO_Q_FACE_EMOTION_FRAMES.len() {
         UNO_Q_FACE_EMOTION_FRAMES[index]
     } else {
         UNO_Q_FACE_MOUTH_FRAMES[index - UNO_Q_FACE_EMOTION_FRAMES.len()]
     };
-    FaceFrame::new(face, ordinal).map_err(Into::into)
+    let label = face_shell_label(face)?;
+    let mut len = 0usize;
+    for bytes in [b"echo " as &[u8], label, b" > /face/frame\n"] {
+        if len + bytes.len() > out.len() {
+            return Err(UnoQRuntimeError::RuntimeViolation);
+        }
+        out[len..len + bytes.len()].copy_from_slice(bytes);
+        len += bytes.len();
+    }
+    Ok(len)
+}
+
+fn copy_command_bytes(
+    bytes: &[u8],
+    out: &mut [u8; LOCAL_LLM_COMMAND_BYTES],
+) -> Result<usize, UnoQRuntimeError> {
+    if bytes.is_empty() || bytes.len() > out.len() {
+        return Err(UnoQRuntimeError::RuntimeViolation);
+    }
+    out[..bytes.len()].copy_from_slice(bytes);
+    Ok(bytes.len())
+}
+
+fn face_shell_label(face: u8) -> Result<&'static [u8], UnoQRuntimeError> {
+    match face {
+        FACE_HAPPY => Ok(b"h"),
+        FACE_ANGRY => Ok(b"a"),
+        FACE_SAD => Ok(b"s"),
+        FACE_SURPRISED => Ok(b"u"),
+        FACE_MOUTH_CLOSED => Ok(b"mc"),
+        FACE_MOUTH_SMALL => Ok(b"ms"),
+        FACE_MOUTH_WIDE => Ok(b"mw"),
+        FACE_MOUTH_ROUND => Ok(b"mr"),
+        _ => Err(UnoQRuntimeError::RuntimeViolation),
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+fn split_local_llm_args(input: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote = None::<char>;
+    let mut escaped = false;
+
+    for ch in input.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(active) = quote {
+            if ch == active {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ch if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    args.push(core::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if escaped {
+        current.push('\\');
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    args
+}
+
+#[cfg(not(target_os = "none"))]
+fn default_local_llm_shell_prompt() -> &'static str {
+    "You are controlling a WASI shell. Read the transcript from stdin and return \
+exactly one shell command. First run `ls`. After the shell lists ChoreoFS, run \
+`echo <code> > /face/frame`. Valid codes: h happy, a angry, s sad, u surprised, \
+mc mouth closed, ms mouth small, mw mouth wide, mr mouth round."
+}
+
+#[cfg(not(target_os = "none"))]
+fn copy_shell_command_from_output(
+    output: &str,
+    phase: u8,
+    out: &mut [u8; LOCAL_LLM_COMMAND_BYTES],
+) -> Option<usize> {
+    for line in output.lines() {
+        let command = line.trim();
+        if command.is_empty() {
+            continue;
+        }
+        if phase == 0 {
+            if command.eq_ignore_ascii_case("ls") {
+                return copy_command_bytes(b"ls\n", out).ok();
+            }
+            continue;
+        }
+        if command.starts_with("echo ") && command.ends_with(" > /face/frame") {
+            let bytes = command.as_bytes();
+            let len = bytes.len().checked_add(1)?;
+            if len > out.len() {
+                return None;
+            }
+            out[..bytes.len()].copy_from_slice(bytes);
+            out[bytes.len()] = b'\n';
+            return Some(len);
+        }
+    }
+    None
 }
 
 impl appkit::Localside<UnoQCapsule> for UnoQLocal {
@@ -690,6 +1170,7 @@ async fn complete_boundary_path_open<const ROLE: u8>(
     request: hibana_pico::choreography::protocol::PathOpen,
     expected_path: &[u8],
     expected_rights: u64,
+    returned_fd: u8,
 ) -> Result<(), UnoQRuntimeError> {
     if request.preopen_fd() != PREOPEN_FD || request.rights_base() != expected_rights {
         return Err(UnoQRuntimeError::RuntimeViolation);
@@ -697,7 +1178,7 @@ async fn complete_boundary_path_open<const ROLE: u8>(
     if request.path() != expected_path {
         return Err(UnoQRuntimeError::RuntimeViolation);
     }
-    let reply = EngineRet::PathOpened(PathOpened::new(LLM_FRAME_FD, 0));
+    let reply = EngineRet::PathOpened(PathOpened::new(returned_fd, 0));
     ctx.endpoint()
         .flow::<WasiPathOpenRetMsg>()?
         .send(&reply)
@@ -737,7 +1218,7 @@ impl appkit::ArtifactForImage<UnoQCapsule, site::Local<image::HostLoopbackProof>
     for UnoQArtifacts
 {
     fn artifact_for_image(&self) -> appkit::WasiImage<'static> {
-        appkit::WasiImage::from_static(WASM_UNO_Q_LLM_FACE_CELL)
+        appkit::WasiImage::from_static(WASM_UNO_Q_LLM_FACE_SHELL)
     }
 }
 
@@ -759,9 +1240,9 @@ impl appkit::ArtifactForImage<UnoQCapsule, site::Local<image::WasiLlmCellProcess
 
 fn uno_q_hardware_wasi_guest() -> &'static [u8] {
     if face_loop_forever_enabled() {
-        return WASM_UNO_Q_LLM_FACE_ROUTER;
+        return WASM_UNO_Q_LLM_FACE_SHELL_LOOP;
     }
-    WASM_UNO_Q_LLM_FACE_CELL
+    WASM_UNO_Q_LLM_FACE_SHELL
 }
 
 impl<I> appkit::ArtifactForImage<UnoQCapsule, I> for UnoQArtifacts
@@ -1952,12 +2433,12 @@ impl appkit::LogicalImage<UnoQCapsule> for site::Local<image::WasiLlmCellProcess
 }
 
 impl_nowasi_image!(
-    image::PseudoLlmProcess,
+    image::LocalLlmProcess,
     712,
     7102,
-    appkit::RoleSet::single(ROLE_PSEUDO_LLM),
+    appkit::RoleSet::single(ROLE_LOCAL_LLM),
     appkit::PeerImageSet::pair(appkit::ImageId(711), appkit::ImageId(715)),
-    PSEUDO_LLM_ATTACH_STORAGE
+    LOCAL_LLM_ATTACH_STORAGE
 );
 
 impl appkit::LogicalImage<UnoQCapsule> for site::Local<image::M33LedKernelImage> {
@@ -2103,10 +2584,13 @@ mod tests {
                 'F', 'A', 'C', 'E', '_', 'F', 'R', 'A', 'M', 'E', '_', 'P', 'A', 'T', 'H',
             ]),
             text(&[
-                'L', 'L', 'M', '_', 'F', 'R', 'A', 'M', 'E', '_', 'P', 'A', 'T', 'H',
+                'L', 'L', 'M', '_', 'S', 'T', 'D', 'I', 'N', '_', 'P', 'A', 'T', 'H',
             ]),
             text(&[
-                'P', 's', 'e', 'u', 'd', 'o', 'L', 'l', 'm', 'P', 'r', 'o', 'c', 'e', 's', 's',
+                'L', 'L', 'M', '_', 'S', 'T', 'D', 'O', 'U', 'T', '_', 'P', 'A', 'T', 'H',
+            ]),
+            text(&[
+                'L', 'o', 'c', 'a', 'l', 'L', 'l', 'm', 'P', 'r', 'o', 'c', 'e', 's', 's',
             ]),
             text(&[
                 'W', 'a', 's', 'i', 'F', 'd', 'R', 'e', 'a', 'd', 'R', 'e', 'q', 'M', 's', 'g',
@@ -2121,9 +2605,10 @@ mod tests {
                 'b', 'r', 'a', 'n', 'c', 'h', '.', 'd', 'e', 'c', 'o', 'd', 'e',
             ]),
             text(&[
-                'p', 's', 'e', 'u', 'd', 'o', '_', 'l', 'l', 'm', '_', 'w', 'a', 'i', 't', '_',
-                'b', 'e', 'f', 'o', 'r', 'e', '_', 'f', 'r', 'a', 'm', 'e',
+                'o', 'b', 's', 'e', 'r', 'v', 'e', '_', 's', 'h', 'e', 'l', 'l', '_', 'o', 'u',
+                't', 'p', 'u', 't',
             ]),
+            text(&['n', 'e', 'x', 't', '_', 'c', 'o', 'm', 'm', 'a', 'n', 'd']),
         ] {
             assert!(
                 source.contains(&required),
@@ -2140,8 +2625,8 @@ mod tests {
             'R', 'O', 'L', 'E', '_', 'M', '3', '3', '_', 'L', 'E', 'D', '_', 'K', 'E', 'R', 'N',
             'E', 'L',
         ]);
-        let pseudo = text(&[
-            'R', 'O', 'L', 'E', '_', 'P', 'S', 'E', 'U', 'D', 'O', '_', 'L', 'L', 'M',
+        let local_llm = text(&[
+            'R', 'O', 'L', 'E', '_', 'L', 'O', 'C', 'A', 'L', '_', 'L', 'L', 'M',
         ]);
         let read_req = text(&[
             'W', 'a', 's', 'i', 'F', 'd', 'R', 'e', 'a', 'd', 'R', 'e', 'q', 'M', 's', 'g',
@@ -2154,28 +2639,28 @@ mod tests {
             'g',
         ]);
         assert!(
-            compact.contains(&format!("g::Role<{wasi}>,g::Role<{pseudo}>,{read_req}")),
-            "WASI must read /llm/frame from the pseudo LLM role through ChoreoFS"
+            compact.contains(&format!("g::Role<{wasi}>,g::Role<{local_llm}>,{read_req}")),
+            "WASI shell must read terminal commands from the local LLM role through ChoreoFS"
         );
         assert!(
-            compact.contains(&format!("g::Role<{pseudo}>,g::Role<{wasi}>,{read_ret}")),
-            "pseudo LLM must answer only the WASI fd_read reply"
+            compact.contains(&format!("g::Role<{local_llm}>,g::Role<{wasi}>,{read_ret}")),
+            "local LLM must answer only the WASI fd_read reply"
         );
         assert!(
-            compact.contains(&format!("g::Role<{wasi}>,g::Role<{pseudo}>,{proc_exit}")),
-            "bounded WASI proc_exit must be visible to the pseudo LLM role"
+            compact.contains(&format!("g::Role<{wasi}>,g::Role<{local_llm}>,{proc_exit}")),
+            "bounded WASI proc_exit must be visible to the local LLM role"
         );
         assert!(
             compact.contains(&format!("g::Role<{wasi}>,g::Role<{m33}>,{proc_exit}")),
             "bounded WASI proc_exit must be visible to the M33 role"
         );
         for forbidden in [
-            format!("g::Role<{m33}>,g::Role<{pseudo}>"),
-            format!("g::Role<{pseudo}>,g::Role<{m33}>"),
+            format!("g::Role<{m33}>,g::Role<{local_llm}>"),
+            format!("g::Role<{local_llm}>,g::Role<{m33}>"),
         ] {
             assert!(
                 !compact.contains(&forbidden),
-                "M33 and pseudo LLM must not be directly wired; found {forbidden}"
+                "M33 and local LLM must not be directly wired; found {forbidden}"
             );
         }
 
@@ -2194,6 +2679,9 @@ mod tests {
             ]),
             text(&[
                 'L', 'A', 'B', 'E', 'L', '_', 'L', 'L', 'M', '_', 'F', 'R', 'A', 'M', 'E',
+            ]),
+            text(&[
+                'L', 'L', 'M', '_', 'F', 'R', 'A', 'M', 'E', '_', 'P', 'A', 'T', 'H',
             ]),
             text(&[
                 'L', 'A', 'B', 'E', 'L', '_', 'F', 'A', 'C', 'E', '_', 'F', 'R', 'A', 'M', 'E',
@@ -2233,13 +2721,25 @@ mod tests {
     }
 
     #[test]
-    fn wasi_guest_stays_router_not_face_controller() {
-        let proof_guest = include_str!("../wasip1/guest/src/bin/uno-q-llm-face-cell.rs");
-        let router_guest = include_str!("../wasip1/guest/src/bin/uno-q-llm-face-router.rs");
-        for source in [proof_guest, router_guest] {
+    fn wasi_guest_is_the_llm_visible_choreofs_shell() {
+        fn text(chars: &[char]) -> String {
+            chars.iter().collect()
+        }
+
+        let shell_guest = include_str!("../wasip1/guest/src/bin/uno-q-llm-face-shell.rs");
+        let shell_loop_guest = include_str!("../wasip1/guest/src/bin/uno-q-llm-face-shell-loop.rs");
+        let old_llm_frame_path =
+            text(&['"', '/', 'l', 'l', 'm', '/', 'f', 'r', 'a', 'm', 'e', '"']);
+        for source in [shell_guest, shell_loop_guest] {
             assert!(source.contains("fn main()"));
             assert!(source.contains("choreofs::open_read"));
             assert!(source.contains("choreofs::open_write"));
+            assert!(source.contains("\"/llm/stdin\""));
+            assert!(source.contains("\"/llm/stdout\""));
+            assert!(source.contains("\"/face/frame\""));
+            assert!(source.contains("CMD_LS"));
+            assert!(source.contains("echo "));
+            assert!(source.contains(" > /face/frame"));
             assert!(source.contains("read_once"));
             assert!(source.contains("write_once_exact"));
             for forbidden in [
@@ -2257,13 +2757,47 @@ mod tests {
                 "FACE_MOUTH_",
                 "EMOTION_FRAMES",
                 "MOUTH_FRAMES",
+                old_llm_frame_path.as_str(),
             ] {
                 assert!(
                     !source.contains(forbidden),
-                    "WASI guest is only the LLM-to-face router; remove {forbidden}"
+                    "WASI guest must remain the LLM-visible ChoreoFS shell; remove {forbidden}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn passive_roles_offer_only_route_heads_and_recv_mid_arm_imports() {
+        fn text(chars: &[char]) -> String {
+            chars.iter().collect()
+        }
+
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains("branch.decode::<WasiFdWriteReqMsg>()"),
+            "local LLM must decode the route-head stdout write through offer"
+        );
+        assert!(
+            source.contains("recv::<WasiFdReadReqMsg>()"),
+            "local LLM must receive fd_read inside the selected arm, not offer it as a new route"
+        );
+        assert!(
+            source.contains("complete_local_llm_stdin_read"),
+            "local LLM stdin replies must stay behind the WASI fd_read path"
+        );
+        assert!(
+            source.contains("yield_to_peer_roles().await"),
+            "M33 ACK must yield before the next offer so the WASI controller publishes continue/break"
+        );
+        let fd_read_route_arm = text(&[
+            'L', 'A', 'B', 'E', 'L', '_', 'W', 'A', 'S', 'I', '_', 'F', 'D', '_', 'R', 'E', 'A',
+            'D', ' ', '=', '>',
+        ]);
+        assert!(
+            !source.contains(&fd_read_route_arm),
+            "fd_read is not a route branch head in this choreography"
+        );
     }
 
     #[test]
@@ -2276,14 +2810,14 @@ mod tests {
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
-        let pseudo_proc_exit_decode = text(&[
+        let local_llm_proc_exit_decode = text(&[
             'b', 'r', 'a', 'n', 'c', 'h', '.', 'd', 'e', 'c', 'o', 'd', 'e', ':', ':', '<', 'W',
             'a', 's', 'i', 'P', 'r', 'o', 'c', 'E', 'x', 'i', 't', 'R', 'e', 'q', 'M', 's', 'g',
             '>', '(', ')',
         ]);
         assert!(
-            compact.contains(&pseudo_proc_exit_decode),
-            "finite pseudo LLM role must observe the projected proc_exit break arm"
+            compact.contains(&local_llm_proc_exit_decode),
+            "finite local LLM role must observe the projected proc_exit break arm"
         );
         let source = include_str!("lib.rs");
         let hardware_proof = include_str!("bin/uno_q_hardware_proof.rs");
@@ -2302,5 +2836,37 @@ mod tests {
                 "README forbids local stop/deadline authority: remove {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn local_llm_output_is_parsed_as_shell_commands_not_face_payloads() {
+        let mut out = [0u8; LOCAL_LLM_COMMAND_BYTES];
+        assert_eq!(
+            copy_shell_command_from_output("thinking...\nls\n", 0, &mut out),
+            Some(3)
+        );
+        assert_eq!(&out[..3], b"ls\n");
+
+        let mut out = [0u8; LOCAL_LLM_COMMAND_BYTES];
+        assert_eq!(
+            copy_shell_command_from_output("echo mc > /face/frame\n", 1, &mut out),
+            Some(22)
+        );
+        assert_eq!(&out[..22], b"echo mc > /face/frame\n");
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn local_llm_command_args_support_quoted_prompt_fragments() {
+        assert_eq!(
+            split_local_llm_args("llama-cli -m model.gguf -p 'echo mc > /face/frame'"),
+            vec![
+                "llama-cli",
+                "-m",
+                "model.gguf",
+                "-p",
+                "echo mc > /face/frame"
+            ]
+        );
     }
 }

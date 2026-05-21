@@ -194,7 +194,8 @@ fn uno_q_uart_carrier_defaults_to_hardware_safe_byte_pacing() {
         &[
             "UNO_Q_HIBANA_UART_BYTE_US",
             ".unwrap_or(10_000)",
-            "UNO_Q_UART_OPERATIONAL_DEADLINE_TICKS",
+            "UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS",
+            "UNO_Q_M33_UART_OPERATIONAL_DEADLINE_TICKS",
         ],
     );
     assert_absent(

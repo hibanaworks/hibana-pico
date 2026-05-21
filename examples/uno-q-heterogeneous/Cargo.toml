@@ -29,8 +29,8 @@ name = "uno-q-hardware-proof"
 path = "src/bin/uno_q_hardware_proof.rs"
 
 [[bin]]
-name = "uno-q-pseudo-llm"
-path = "src/bin/uno_q_pseudo_llm.rs"
+name = "uno-q-local-llm"
+path = "src/bin/uno_q_local_llm.rs"
 
 [[bin]]
 name = "uno-q-wasi-llm-cell"

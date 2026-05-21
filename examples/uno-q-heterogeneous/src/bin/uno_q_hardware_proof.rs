@@ -23,7 +23,9 @@ fn main() {
         unsafe {
             env::set_var("UNO_Q_FACE_LOOP_FOREVER", "1");
         }
-        eprintln!("uno-q face loop mode: WASI guest routes /llm/frame to /face/frame forever");
+        eprintln!(
+            "uno-q face loop mode: local LLM drives the WASI ChoreoFS shell into /face/frame forever"
+        );
     }
 
     let serial = env::var("UNO_Q_HIBANA_SERIAL")

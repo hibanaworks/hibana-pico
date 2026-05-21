@@ -5,8 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 GUEST_MANIFEST="${REPO_ROOT}/examples/uno-q-heterogeneous/wasip1/guest/Cargo.toml"
 GUEST_DIR="${REPO_ROOT}/examples/uno-q-heterogeneous/wasip1/guest"
-WASM="${REPO_ROOT}/target/wasip1-apps/wasm32-wasip1/release/uno-q-llm-face-cell.wasm"
-ROUTER_WASM="${REPO_ROOT}/target/wasip1-apps/wasm32-wasip1/release/uno-q-llm-face-router.wasm"
+WASM="${REPO_ROOT}/target/wasip1-apps/wasm32-wasip1/release/uno-q-llm-face-shell.wasm"
+SHELL_LOOP_WASM="${REPO_ROOT}/target/wasip1-apps/wasm32-wasip1/release/uno-q-llm-face-shell-loop.wasm"
 
 cd "${GUEST_DIR}"
 cargo build \
@@ -15,14 +15,14 @@ cargo build \
   --release \
   --target-dir "${REPO_ROOT}/target/wasip1-apps"
 
-for artifact in "${WASM}" "${ROUTER_WASM}"; do
+for artifact in "${WASM}" "${SHELL_LOOP_WASM}"; do
   if [[ ! -s "${artifact}" ]]; then
     echo "missing WASI guest artifact: ${artifact}" >&2
     exit 1
   fi
 done
 
-python3 - "${WASM}" "${ROUTER_WASM}" <<'PY'
+python3 - "${WASM}" "${SHELL_LOOP_WASM}" <<'PY'
 import sys
 from pathlib import Path
 
@@ -107,4 +107,4 @@ for path in sys.argv[1:]:
 PY
 
 echo "${WASM}"
-echo "${ROUTER_WASM}"
+echo "${SHELL_LOOP_WASM}"

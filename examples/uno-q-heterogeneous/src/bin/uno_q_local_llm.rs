@@ -2,7 +2,7 @@ use hibana_pico::{appkit, appkit::ArtifactBundle, site};
 use uno_q_heterogeneous::{UnoQCapsule, image, protocol};
 
 fn main() {
-    type Image = site::Local<image::PseudoLlmProcess>;
+    type Image = site::Local<image::LocalLlmProcess>;
 
     let report =
         appkit::run::<Image, UnoQCapsule>(uno_q_heterogeneous::ARTIFACTS.for_image::<Image>());
@@ -11,6 +11,6 @@ fn main() {
     assert_eq!(report.site_id(), appkit::SiteId(7102));
     assert_eq!(
         report.requested_roles(),
-        appkit::RoleSet::single(protocol::ROLE_PSEUDO_LLM)
+        appkit::RoleSet::single(protocol::ROLE_LOCAL_LLM)
     );
 }

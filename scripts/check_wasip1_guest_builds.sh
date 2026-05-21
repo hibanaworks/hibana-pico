@@ -30,7 +30,8 @@ expected_wasms=(
   wasip1-stdin.wasm
   wasip1-stdout.wasm
   wasip1-timer.wasm
-  uno-q-llm-face-cell.wasm
+  uno-q-llm-face-shell-loop.wasm
+  uno-q-llm-face-shell.wasm
   wasip1-trap.wasm
   wasip1-xbot-reply-normalizer.wasm
 )

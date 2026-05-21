@@ -3377,7 +3377,11 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         }
         let flow = match self.endpoint().flow::<WasiImportLoopContinue>() {
             Ok(flow) => flow,
-            Err(error) => return Err(WasiGuestError::endpoint(0x5745_6000, error)),
+            // Loop admission is position-scoped, not label-scoped. A WASI label
+            // can appear again inside the selected arm; in that case the import
+            // itself remains the next descriptor step and must not be rejected
+            // merely because the label also names the loop head.
+            Err(_) => return Ok(()),
         };
         match flow.send(()).await {
             Ok(()) => Ok(()),
@@ -3399,7 +3403,9 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         }
         let flow = match self.endpoint().flow::<WasiImportLoopContinue>() {
             Ok(flow) => flow,
-            Err(error) => return Err(WasiGuestError::endpoint(0x5745_6000, error)),
+            // See the async path above: duplicate import labels inside one arm
+            // must not be treated as another loop-head decision.
+            Err(_) => return Ok(()),
         };
         match poll_embedded_endpoint_unit(flow.send(())) {
             Ok(()) => Ok(()),
@@ -3420,7 +3426,9 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         }
         let flow = match self.endpoint().flow::<WasiImportLoopBreak>() {
             Ok(flow) => flow,
-            Err(error) => return Err(WasiGuestError::endpoint(0x5745_6200, error)),
+            // Break admission is also position-scoped; duplicate terminal
+            // labels should fall through to the ordinary endpoint send.
+            Err(_) => return Ok(()),
         };
         match flow.send(()).await {
             Ok(()) => Ok(()),
@@ -3442,7 +3450,8 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         }
         let flow = match self.endpoint().flow::<WasiImportLoopBreak>() {
             Ok(flow) => flow,
-            Err(error) => return Err(WasiGuestError::endpoint(0x5745_6200, error)),
+            // See the async break path above.
+            Err(_) => return Ok(()),
         };
         match poll_embedded_endpoint_unit(flow.send(())) {
             Ok(()) => Ok(()),
