@@ -18,15 +18,17 @@ use hibana_pico::{
     appkit,
     choreography::protocol::{
         EngineReq, EngineRet, FdReadDone, FdWriteDone, LABEL_WASI_FD_READ, LABEL_WASI_FD_READ_RET,
-        LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET, LABEL_WASI_IMPORT_LOOP_BREAK_CONTROL,
-        LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_PROC_EXIT, PathOpened,
-        WasiImportLoopBreak, WasiImportLoopContinue,
+        LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET, LABEL_WASI_PATH_OPEN,
+        LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_PROC_EXIT, PathOpened, WasiImportLoopBreak,
+        WasiImportLoopContinue,
     },
     site,
 };
 use protocol::{
     FACE_ANGRY, FACE_HAPPY, FACE_MOUTH_CLOSED, FACE_MOUTH_ROUND, FACE_MOUTH_SMALL, FACE_MOUTH_WIDE,
-    FACE_SAD, FACE_SURPRISED, FaceFrame, ROLE_LOCAL_LLM, ROLE_M33_LED_KERNEL, ROLE_WASI_LLM_CELL,
+    FACE_SAD, FACE_SURPRISED, FaceFrame, HumanInputText, LABEL_HUMAN_INPUT_ACK,
+    LABEL_HUMAN_INPUT_REQ, LABEL_HUMAN_INPUT_TEXT, ROLE_HUMAN_INPUT, ROLE_LOCAL_LLM,
+    ROLE_M33_LED_KERNEL, ROLE_WASI_LLM_CELL,
 };
 
 pub struct UnoQCapsule;
@@ -38,13 +40,14 @@ pub struct UnoQArtifacts;
 pub struct UnoQLabelUniverse;
 
 impl LabelUniverse for UnoQLabelUniverse {
-    const MAX_LABEL: u8 = LABEL_WASI_IMPORT_LOOP_BREAK_CONTROL;
+    const MAX_LABEL: u8 = LABEL_HUMAN_INPUT_REQ;
 }
 
 pub mod image {
     pub struct HostLoopbackProof;
     pub struct HardwarePeerProof;
     pub struct LocalLlmProcess;
+    pub struct HumanInputProcess;
     pub struct WasiLlmCellProcess;
     pub struct M33LedKernelImage;
 }
@@ -57,7 +60,7 @@ pub const FACE_FRAME_FD: u8 = 15;
 
 const FD_READ_RIGHT: u64 = 1 << 1;
 const FD_WRITE_RIGHT: u64 = 1 << 6;
-const PROOF_CARRIER_ROLES: usize = 3;
+const PROOF_CARRIER_ROLES: usize = 4;
 const PROOF_CARRIER_QUEUE_DEPTH: usize = 24;
 const PROOF_CARRIER_FRAME_BYTES: usize = 128;
 const UART_CARRIER_MAGIC: [u8; 4] = *b"HBU1";
@@ -65,10 +68,11 @@ const UART_CARRIER_CHECK: u8 = 0xa7;
 const UART_CARRIER_HEADER_BYTES: usize = 13;
 const UART_CARRIER_FRAME_BYTES: usize = UART_CARRIER_HEADER_BYTES + PROOF_CARRIER_FRAME_BYTES + 1;
 #[cfg(any(test, target_os = "none"))]
-const UNO_Q_M33_HINT_DRAIN_TICKS: u32 = 2_000_000;
-const HARDWARE_PEER_ROLE_BITS: u128 = (1u128 << ROLE_WASI_LLM_CELL) | (1u128 << ROLE_LOCAL_LLM);
+const UNO_Q_M33_HINT_DRAIN_TICKS: u32 = 7_000_000;
+const HARDWARE_PEER_ROLE_BITS: u128 =
+    (1u128 << ROLE_WASI_LLM_CELL) | (1u128 << ROLE_LOCAL_LLM) | (1u128 << ROLE_HUMAN_INPUT);
 #[cfg(any(test, not(target_os = "none")))]
-const UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS: u32 = 50_000;
+const UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS: u32 = 300_000;
 #[cfg(any(test, target_os = "none"))]
 const UNO_Q_M33_UART_OPERATIONAL_DEADLINE_TICKS: u32 = 1_000_000_000;
 #[cfg_attr(target_os = "none", allow(dead_code))]
@@ -209,6 +213,9 @@ static HARDWARE_PEER_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_
 static LOCAL_LLM_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLAB_BYTES> =
     appkit::EmbeddedAttachStorage::empty();
 #[cfg(all(not(test), target_os = "none"))]
+static HUMAN_INPUT_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLAB_BYTES> =
+    appkit::EmbeddedAttachStorage::empty();
+#[cfg(all(not(test), target_os = "none"))]
 static WASI_CELL_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLAB_BYTES> =
     appkit::EmbeddedAttachStorage::empty();
 #[cfg(all(not(test), target_os = "none"))]
@@ -222,6 +229,9 @@ type WasiFdReadRetMsg = g::Msg<LABEL_WASI_FD_READ_RET, EngineRet>;
 type WasiFdWriteReqMsg = g::Msg<LABEL_WASI_FD_WRITE, EngineReq>;
 type WasiFdWriteRetMsg = g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>;
 type WasiProcExitReqMsg = g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>;
+type HumanInputReqMsg = g::Msg<LABEL_HUMAN_INPUT_REQ, u8>;
+type HumanInputTextMsg = g::Msg<LABEL_HUMAN_INPUT_TEXT, HumanInputText>;
+type HumanInputAckMsg = g::Msg<LABEL_HUMAN_INPUT_ACK, u8>;
 
 #[derive(Debug)]
 pub enum UnoQRuntimeError {
@@ -256,18 +266,40 @@ impl appkit::Capsule for UnoQCapsule {
     type Report = Infallible;
 
     fn choreography() -> impl Projectable<Self::Universe> {
-        let shell_discovery = g::seq(
-            g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_LOCAL_LLM>, WasiFdWriteReqMsg, 0>(),
+        let stdout_write = || {
             g::seq(
+                g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_LOCAL_LLM>, WasiFdWriteReqMsg, 0>(
+                ),
                 g::send::<g::Role<ROLE_LOCAL_LLM>, g::Role<ROLE_WASI_LLM_CELL>, WasiFdWriteRetMsg, 0>(
+                ),
+            )
+        };
+        let human_input_turn = || {
+            g::seq(
+                g::send::<g::Role<ROLE_LOCAL_LLM>, g::Role<ROLE_HUMAN_INPUT>, HumanInputReqMsg, 0>(
                 ),
                 g::seq(
                     g::send::<
-                        g::Role<ROLE_WASI_LLM_CELL>,
+                        g::Role<ROLE_HUMAN_INPUT>,
                         g::Role<ROLE_LOCAL_LLM>,
-                        WasiFdReadReqMsg,
+                        HumanInputTextMsg,
                         0,
                     >(),
+                    g::send::<
+                        g::Role<ROLE_LOCAL_LLM>,
+                        g::Role<ROLE_HUMAN_INPUT>,
+                        HumanInputAckMsg,
+                        0,
+                    >(),
+                ),
+            )
+        };
+        let stdin_read = || {
+            g::seq(
+                g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_LOCAL_LLM>, WasiFdReadReqMsg, 0>(
+                ),
+                g::seq(
+                    human_input_turn(),
                     g::send::<
                         g::Role<ROLE_LOCAL_LLM>,
                         g::Role<ROLE_WASI_LLM_CELL>,
@@ -275,29 +307,8 @@ impl appkit::Capsule for UnoQCapsule {
                         0,
                     >(),
                 ),
-            ),
-        );
-        let face_write_command = g::seq(
-            g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_LOCAL_LLM>, WasiFdWriteReqMsg, 0>(),
-            g::seq(
-                g::send::<g::Role<ROLE_LOCAL_LLM>, g::Role<ROLE_WASI_LLM_CELL>, WasiFdWriteRetMsg, 0>(
-                ),
-                g::seq(
-                    g::send::<
-                        g::Role<ROLE_WASI_LLM_CELL>,
-                        g::Role<ROLE_LOCAL_LLM>,
-                        WasiFdReadReqMsg,
-                        0,
-                    >(),
-                    g::send::<
-                        g::Role<ROLE_LOCAL_LLM>,
-                        g::Role<ROLE_WASI_LLM_CELL>,
-                        WasiFdReadRetMsg,
-                        0,
-                    >(),
-                ),
-            ),
-        );
+            )
+        };
         let face_frame_commit = g::seq(
             g::send::<
                 g::Role<ROLE_WASI_LLM_CELL>,
@@ -320,8 +331,11 @@ impl appkit::Capsule for UnoQCapsule {
                 0,
             >(),
             g::seq(
-                shell_discovery,
-                g::seq(face_write_command, face_frame_commit),
+                stdin_read(),
+                g::seq(
+                    stdout_write(),
+                    g::seq(stdin_read(), g::seq(face_frame_commit, stdout_write())),
+                ),
             ),
         );
         let face_frame_loop = g::route(
@@ -340,12 +354,20 @@ impl appkit::Capsule for UnoQCapsule {
                         WasiProcExitReqMsg,
                         0,
                     >(),
-                    g::send::<
-                        g::Role<ROLE_WASI_LLM_CELL>,
-                        g::Role<ROLE_M33_LED_KERNEL>,
-                        WasiProcExitReqMsg,
-                        0,
-                    >(),
+                    g::seq(
+                        g::send::<
+                            g::Role<ROLE_WASI_LLM_CELL>,
+                            g::Role<ROLE_M33_LED_KERNEL>,
+                            WasiProcExitReqMsg,
+                            0,
+                        >(),
+                        g::send::<
+                            g::Role<ROLE_WASI_LLM_CELL>,
+                            g::Role<ROLE_HUMAN_INPUT>,
+                            WasiProcExitReqMsg,
+                            0,
+                        >(),
+                    ),
                 ),
             ),
         );
@@ -387,7 +409,7 @@ impl appkit::Capsule for UnoQCapsule {
                                     WasiPathOpenRetMsg,
                                     0,
                                 >(),
-                                face_frame_loop,
+                                g::seq(stdout_write(), face_frame_loop),
                             ),
                         ),
                     ),
@@ -403,6 +425,7 @@ impl appkit::Placement<UnoQCapsule> for UnoQPlacement {
             ROLE_WASI_LLM_CELL => appkit::RoleKind::Engine,
             ROLE_M33_LED_KERNEL => appkit::RoleKind::Driver,
             ROLE_LOCAL_LLM => appkit::RoleKind::Boundary,
+            ROLE_HUMAN_INPUT => appkit::RoleKind::Boundary,
             _ => appkit::RoleKind::Supervisor,
         }
     }
@@ -493,6 +516,8 @@ async fn run_boundary<const ROLE: u8>(
             )
             .await?;
             let mut source = LocalLlmShellSource::new();
+            let write = expect_fd_write(ctx.endpoint().recv::<WasiFdWriteReqMsg>().await?)?;
+            complete_local_llm_stdout_write(&mut ctx, &mut source, write).await?;
             loop {
                 let branch = ctx.endpoint().offer().await?;
                 #[cfg(not(target_os = "none"))]
@@ -500,21 +525,55 @@ async fn run_boundary<const ROLE: u8>(
                     eprintln!("uno-q local LLM boundary branch label={}", branch.label());
                 }
                 match branch.label() {
-                    LABEL_WASI_FD_WRITE => {
-                        let write = expect_fd_write(branch.decode::<WasiFdWriteReqMsg>().await?)?;
-                        complete_local_llm_stdout_write(&mut ctx, &mut source, write).await?;
-
-                        let read =
-                            expect_fd_read(ctx.endpoint().recv::<WasiFdReadReqMsg>().await?)?;
-                        complete_local_llm_stdin_read(&mut ctx, &mut source, read).await?;
+                    LABEL_WASI_FD_READ => {
+                        let read = expect_fd_read(branch.decode::<WasiFdReadReqMsg>().await?)?;
+                        complete_local_llm_stdin_read_with_human_read(&mut ctx, &mut source, read)
+                            .await?;
 
                         let write =
                             expect_fd_write(ctx.endpoint().recv::<WasiFdWriteReqMsg>().await?)?;
                         complete_local_llm_stdout_write(&mut ctx, &mut source, write).await?;
 
-                        let read =
-                            expect_fd_read(ctx.endpoint().recv::<WasiFdReadReqMsg>().await?)?;
-                        complete_local_llm_stdin_read(&mut ctx, &mut source, read).await?;
+                        complete_local_llm_stdin_read_with_human(&mut ctx, &mut source).await?;
+
+                        yield_to_peer_roles().await;
+
+                        let write =
+                            expect_fd_write(ctx.endpoint().recv::<WasiFdWriteReqMsg>().await?)?;
+                        complete_local_llm_stdout_write(&mut ctx, &mut source, write).await?;
+                    }
+                    LABEL_WASI_PROC_EXIT => {
+                        let proc_exit = branch.decode::<WasiProcExitReqMsg>().await?;
+                        let EngineReq::ProcExit(status) = proc_exit else {
+                            return Err(UnoQRuntimeError::RuntimeViolation);
+                        };
+                        if status.code() != 0 {
+                            return Err(UnoQRuntimeError::RuntimeViolation);
+                        }
+                        break;
+                    }
+                    _ => return Err(UnoQRuntimeError::RuntimeViolation),
+                }
+            }
+        }
+        ROLE_HUMAN_INPUT => {
+            #[cfg(not(target_os = "none"))]
+            if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+                eprintln!("uno-q human input boundary: start");
+            }
+            let mut source = HumanInputSource::from_env();
+            loop {
+                let branch = ctx.endpoint().offer().await?;
+                #[cfg(not(target_os = "none"))]
+                if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+                    eprintln!("uno-q human input boundary branch label={}", branch.label());
+                }
+                match branch.label() {
+                    LABEL_HUMAN_INPUT_REQ => {
+                        let request = branch.decode::<HumanInputReqMsg>().await?;
+                        complete_human_input_turn_after_request(&mut ctx, &mut source, request)
+                            .await?;
+                        complete_human_input_turn_recv(&mut ctx, &mut source).await?;
                     }
                     LABEL_WASI_PROC_EXIT => {
                         let proc_exit = branch.decode::<WasiProcExitReqMsg>().await?;
@@ -603,6 +662,61 @@ async fn complete_local_llm_stdin_read<const ROLE: u8>(
     Ok(())
 }
 
+async fn complete_local_llm_stdin_read_with_human<const ROLE: u8>(
+    ctx: &mut appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
+    source: &mut LocalLlmShellSource,
+) -> Result<(), UnoQRuntimeError> {
+    let read = expect_fd_read(ctx.endpoint().recv::<WasiFdReadReqMsg>().await?)?;
+    complete_local_llm_stdin_read_with_human_read(ctx, source, read).await
+}
+
+async fn complete_local_llm_stdin_read_with_human_read<const ROLE: u8>(
+    ctx: &mut appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
+    source: &mut LocalLlmShellSource,
+    read: hibana_pico::choreography::protocol::FdRead,
+) -> Result<(), UnoQRuntimeError> {
+    yield_to_peer_roles().await;
+    ctx.endpoint().flow::<HumanInputReqMsg>()?.send(&0).await?;
+    yield_to_peer_roles().await;
+    let human_input = ctx.endpoint().recv::<HumanInputTextMsg>().await?;
+    source.observe_human_input(human_input)?;
+    ctx.endpoint().flow::<HumanInputAckMsg>()?.send(&0).await?;
+    yield_to_peer_roles().await;
+    complete_local_llm_stdin_read(ctx, source, read).await
+}
+
+async fn complete_human_input_turn_recv<const ROLE: u8>(
+    ctx: &mut appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
+    source: &mut HumanInputSource,
+) -> Result<(), UnoQRuntimeError> {
+    let request = ctx.endpoint().recv::<HumanInputReqMsg>().await?;
+    complete_human_input_turn_after_request(ctx, source, request).await
+}
+
+async fn complete_human_input_turn_after_request<const ROLE: u8>(
+    ctx: &mut appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
+    source: &mut HumanInputSource,
+    request: u8,
+) -> Result<(), UnoQRuntimeError> {
+    if request != 0 {
+        return Err(UnoQRuntimeError::RuntimeViolation);
+    }
+    let input = source.next_input()?;
+    #[cfg(not(target_os = "none"))]
+    if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+        eprintln!("uno-q human input boundary send len={}", input.len());
+    }
+    ctx.endpoint()
+        .flow::<HumanInputTextMsg>()?
+        .send(&input)
+        .await?;
+    let ack = ctx.endpoint().recv::<HumanInputAckMsg>().await?;
+    if ack != 0 {
+        return Err(UnoQRuntimeError::RuntimeViolation);
+    }
+    Ok(())
+}
+
 struct YieldToPeerRoles {
     yielded: bool,
 }
@@ -610,11 +724,12 @@ struct YieldToPeerRoles {
 impl Future for YieldToPeerRoles {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.yielded {
             Poll::Ready(())
         } else {
             self.yielded = true;
+            cx.waker().wake_by_ref();
             Poll::Pending
         }
     }
@@ -716,8 +831,6 @@ async fn drive_face_frame_loop<const ROLE: u8>(
 const LOCAL_LLM_TRANSCRIPT_BYTES: usize = 768;
 const LOCAL_LLM_COMMAND_BYTES: usize = 96;
 #[cfg(not(target_os = "none"))]
-const LOCAL_LLM_USER_PROMPT_BYTES: usize = 512;
-#[cfg(not(target_os = "none"))]
 const DEFAULT_UNO_Q_LOCAL_LLM_BIN_DIR: &str = "/data/local/tmp/uno-q-local-llm/bin";
 #[cfg(not(target_os = "none"))]
 const DEFAULT_UNO_Q_LOCAL_LLM_LIB_DIR: &str = "/data/local/tmp/uno-q-local-llm/lib";
@@ -730,9 +843,6 @@ const DEFAULT_UNO_Q_LOCAL_LLM_SERVER: &str = "/data/local/tmp/uno-q-local-llm/bi
 const DEFAULT_UNO_Q_LOCAL_LLM_MODEL: &str =
     "/data/local/tmp/uno-q-local-llm/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf";
 #[cfg(not(target_os = "none"))]
-const DEFAULT_UNO_Q_LOCAL_LLM_USER_PROMPT_FILE: &str =
-    "/data/local/tmp/uno-q-local-llm/user-prompt.txt";
-#[cfg(not(target_os = "none"))]
 const DEFAULT_UNO_Q_LOCAL_LLM_SERVER_PORT: u16 = 18080;
 
 struct LocalLlmShellSource {
@@ -740,6 +850,8 @@ struct LocalLlmShellSource {
     transcript_len: usize,
     read_phase: u8,
     ordinal: u8,
+    #[cfg(not(target_os = "none"))]
+    human_request: Option<String>,
     #[cfg(not(target_os = "none"))]
     command: LocalLlmCommandSource,
 }
@@ -751,6 +863,8 @@ impl LocalLlmShellSource {
             transcript_len: 0,
             read_phase: 0,
             ordinal: 0,
+            #[cfg(not(target_os = "none"))]
+            human_request: None,
             #[cfg(not(target_os = "none"))]
             command: LocalLlmCommandSource::from_env(),
         }
@@ -764,6 +878,23 @@ impl LocalLlmShellSource {
             }
             self.transcript[self.transcript_len] = byte;
             self.transcript_len += 1;
+        }
+    }
+
+    fn observe_human_input(&mut self, input: HumanInputText) -> Result<(), UnoQRuntimeError> {
+        #[cfg(not(target_os = "none"))]
+        {
+            if input.is_empty() {
+                self.human_request = None;
+                return Ok(());
+            }
+            self.human_request = Some(input.as_str()?.to_owned());
+            Ok(())
+        }
+        #[cfg(target_os = "none")]
+        {
+            let _ = input;
+            Ok(())
         }
     }
 
@@ -783,6 +914,7 @@ impl LocalLlmShellSource {
                     &self.transcript[..self.transcript_len],
                     self.read_phase,
                     self.ordinal,
+                    self.human_request.as_deref(),
                     &mut command,
                 )?
             }
@@ -815,6 +947,168 @@ impl LocalLlmShellSource {
         std::thread::sleep(std::time::Duration::from_micros(face_hold_us_for_ordinal(
             self.ordinal.wrapping_sub(1),
         )));
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+struct HumanInputSource {
+    receiver: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+    latest: HumanInputText,
+}
+
+#[cfg(not(target_os = "none"))]
+impl HumanInputSource {
+    fn from_env() -> Self {
+        let receiver = match human_input_mode_from_env() {
+            HumanInputMode::Prompt => spawn_prompt_human_input(),
+            HumanInputMode::Voice => spawn_voice_human_input(),
+            HumanInputMode::Off => None,
+        };
+        let latest = std::env::var("UNO_Q_HUMAN_INPUT_TEXT")
+            .ok()
+            .and_then(|text| HumanInputText::new(&text).ok())
+            .unwrap_or_else(HumanInputText::empty);
+        Self { receiver, latest }
+    }
+
+    fn next_input(&mut self) -> Result<HumanInputText, UnoQRuntimeError> {
+        if let Some(receiver) = &self.receiver {
+            while let Ok(bytes) = receiver.try_recv() {
+                self.latest = HumanInputText::from_bytes(&bytes)?;
+            }
+        }
+        Ok(self.latest)
+    }
+}
+
+#[cfg(target_os = "none")]
+struct HumanInputSource;
+
+#[cfg(target_os = "none")]
+impl HumanInputSource {
+    fn from_env() -> Self {
+        Self
+    }
+
+    fn next_input(&mut self) -> Result<HumanInputText, UnoQRuntimeError> {
+        Ok(HumanInputText::empty())
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+enum HumanInputMode {
+    Prompt,
+    Voice,
+    Off,
+}
+
+#[cfg(not(target_os = "none"))]
+fn human_input_mode_from_env() -> HumanInputMode {
+    match std::env::var("UNO_Q_HUMAN_INPUT_MODE").as_deref() {
+        Ok("prompt") | Ok("prompt-shell") => HumanInputMode::Prompt,
+        Ok("voice") | Ok("voice-shell") => HumanInputMode::Voice,
+        Ok("off") | Ok("none") | Ok("0") => HumanInputMode::Off,
+        Ok(_) => HumanInputMode::Off,
+        Err(_) => HumanInputMode::Off,
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+fn spawn_prompt_human_input() -> Option<std::sync::mpsc::Receiver<Vec<u8>>> {
+    use std::io::BufRead as _;
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("uno-q-human-prompt-shell".to_owned())
+        .spawn(move || {
+            eprintln!(
+                "uno-q input role prompt shell: type a request; line bytes go unchanged to the LLM role"
+            );
+            let stdin = std::io::stdin();
+            let mut locked = stdin.lock();
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match locked.read_until(b'\n', &mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        strip_terminal_line_delimiter(&mut line);
+                        if line.len() > protocol::HUMAN_INPUT_TEXT_BYTES {
+                            eprintln!(
+                                "uno-q input role ignored over-capacity line: {} bytes",
+                                line.len()
+                            );
+                            continue;
+                        }
+                        if sender.send(line.clone()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .ok()?;
+    Some(receiver)
+}
+
+#[cfg(not(target_os = "none"))]
+fn spawn_voice_human_input() -> Option<std::sync::mpsc::Receiver<Vec<u8>>> {
+    use std::io::BufRead as _;
+
+    let command = std::env::var("UNO_Q_HUMAN_INPUT_VOICE_CMD").ok()?;
+    let mut parts = split_local_llm_args(&command);
+    if parts.is_empty() {
+        return None;
+    }
+    let executable = parts.remove(0);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("uno-q-human-voice-shell".to_owned())
+        .spawn(move || {
+            let mut child = match std::process::Command::new(&executable)
+                .args(&parts)
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(error) => {
+                    eprintln!("uno-q input role failed to start voice shell: {error}");
+                    return;
+                }
+            };
+            let Some(stdout) = child.stdout.take() else {
+                return;
+            };
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.split(b'\n') {
+                let Ok(mut bytes) = line else {
+                    break;
+                };
+                strip_terminal_line_delimiter(&mut bytes);
+                if bytes.len() > protocol::HUMAN_INPUT_TEXT_BYTES {
+                    eprintln!(
+                        "uno-q input role ignored over-capacity voice line: {} bytes",
+                        bytes.len()
+                    );
+                    continue;
+                }
+                if sender.send(bytes).is_err() {
+                    break;
+                }
+            }
+            let _ = child.wait();
+        })
+        .ok()?;
+    Some(receiver)
+}
+
+#[cfg(not(target_os = "none"))]
+fn strip_terminal_line_delimiter(bytes: &mut Vec<u8>) {
+    if bytes.last().copied() == Some(b'\n') {
+        bytes.pop();
+    }
+    if bytes.last().copied() == Some(b'\r') {
+        bytes.pop();
     }
 }
 
@@ -926,11 +1220,16 @@ impl LocalLlmCommandSource {
         transcript: &[u8],
         phase: u8,
         ordinal: u8,
+        human_request: Option<&str>,
         out: &mut [u8; LOCAL_LLM_COMMAND_BYTES],
     ) -> Result<usize, UnoQRuntimeError> {
         match self {
-            Self::Server(server) => server.next_command(transcript, phase, ordinal, out),
-            Self::External(command) => command.next_command(transcript, phase, ordinal, out),
+            Self::Server(server) => {
+                server.next_command(transcript, phase, ordinal, human_request, out)
+            }
+            Self::External(command) => {
+                command.next_command(transcript, phase, ordinal, human_request, out)
+            }
             Self::Scripted => scripted_local_llm_shell_command(phase, ordinal, out),
             Self::Missing => Err(UnoQRuntimeError::RuntimeViolation),
         }
@@ -1059,9 +1358,10 @@ impl LocalLlmServer {
         transcript: &[u8],
         phase: u8,
         ordinal: u8,
+        human_request: Option<&str>,
         out: &mut [u8; LOCAL_LLM_COMMAND_BYTES],
     ) -> Result<usize, UnoQRuntimeError> {
-        let prompt = local_llm_prompt_for_server(transcript, phase, ordinal)?;
+        let prompt = local_llm_prompt_for_server(transcript, phase, ordinal, human_request)?;
         let response = self.complete(&prompt)?;
         if let Some(len) = copy_llm_terminal_input_from_output(&response, out) {
             return Ok(len);
@@ -1132,9 +1432,10 @@ impl LocalLlmExternalCommand {
         transcript: &[u8],
         phase: u8,
         ordinal: u8,
+        human_request: Option<&str>,
         out: &mut [u8; LOCAL_LLM_COMMAND_BYTES],
     ) -> Result<usize, UnoQRuntimeError> {
-        let output = self.run(transcript, phase, ordinal)?;
+        let output = self.run(transcript, phase, ordinal, human_request)?;
         let text = String::from_utf8_lossy(&output);
         if let Some(len) = copy_llm_terminal_input_from_output(&text, out) {
             return Ok(len);
@@ -1150,13 +1451,11 @@ impl LocalLlmExternalCommand {
         transcript: &[u8],
         phase: u8,
         ordinal: u8,
+        human_request: Option<&str>,
     ) -> Result<Vec<u8>, UnoQRuntimeError> {
         use std::io::Write;
 
         let mut args = self.args.clone();
-        let user_prompt = local_llm_user_prompt();
-        let self_mood = local_llm_self_mood_enabled();
-        let face_choice = (user_prompt.is_some() || self_mood) && phase != 0;
         let pass_transcript_on_stdin = self.prompt.is_none() || phase != 0;
         if self.add_transcript_affixes && phase != 0 {
             args.push("--in-prefix".to_owned());
@@ -1166,22 +1465,10 @@ impl LocalLlmExternalCommand {
         }
         if let Some(prompt) = &self.prompt {
             args.push("-p".to_owned());
-            let self_mood_prompt = self_mood.then(|| local_llm_self_mood_prompt(ordinal));
             let prompt_text = if std::env::var_os("UNO_Q_LOCAL_LLM_PROMPT").is_some() {
                 prompt.clone()
-            } else if phase == 0 {
-                local_llm_discovery_prompt()
-            } else if face_choice {
-                let mood_context = user_prompt
-                    .as_deref()
-                    .or(self_mood_prompt.as_deref())
-                    .unwrap_or("");
-                local_llm_face_choice_prompt(local_llm_mood_key(mood_context))
             } else {
-                local_llm_default_face_prompt(
-                    core::str::from_utf8(local_llm_face_label_for_ordinal(ordinal)?)
-                        .map_err(|_| UnoQRuntimeError::RuntimeViolation)?,
-                )
+                local_llm_prompt_for_phase(phase, ordinal, human_request)?
             };
             args.push(prompt_text);
         }
@@ -1311,7 +1598,11 @@ fn local_llm_server_health_ok(endpoint: &str, timeout: std::time::Duration) -> b
 }
 
 #[cfg(not(target_os = "none"))]
-fn local_llm_prompt_for_phase(phase: u8, ordinal: u8) -> Result<String, UnoQRuntimeError> {
+fn local_llm_prompt_for_phase(
+    phase: u8,
+    ordinal: u8,
+    human_request: Option<&str>,
+) -> Result<String, UnoQRuntimeError> {
     if let Ok(prompt) = std::env::var("UNO_Q_LOCAL_LLM_PROMPT") {
         return Ok(prompt);
     }
@@ -1319,17 +1610,10 @@ fn local_llm_prompt_for_phase(phase: u8, ordinal: u8) -> Result<String, UnoQRunt
         return Ok(local_llm_discovery_prompt());
     }
 
-    let user_prompt = local_llm_user_prompt();
-    let self_mood = local_llm_self_mood_enabled();
-    if user_prompt.is_some() || self_mood {
-        let self_mood_prompt = self_mood.then(|| local_llm_self_mood_prompt(ordinal));
-        let mood_context = user_prompt
-            .as_deref()
-            .or(self_mood_prompt.as_deref())
-            .unwrap_or("");
-        return Ok(local_llm_face_choice_prompt(local_llm_mood_key(
-            mood_context,
-        )));
+    let self_mood_prompt =
+        local_llm_self_mood_enabled().then(|| local_llm_self_mood_prompt(ordinal));
+    if let Some(request) = human_request.or(self_mood_prompt.as_deref()) {
+        return Ok(local_llm_human_face_prompt(request));
     }
 
     Ok(local_llm_default_face_prompt(
@@ -1343,9 +1627,10 @@ fn local_llm_prompt_for_server(
     transcript: &[u8],
     phase: u8,
     ordinal: u8,
+    human_request: Option<&str>,
 ) -> Result<String, UnoQRuntimeError> {
-    let prompt = local_llm_prompt_for_phase(phase, ordinal)?;
-    if phase == 0 || transcript.is_empty() {
+    let prompt = local_llm_prompt_for_phase(phase, ordinal, human_request)?;
+    if phase != 0 || transcript.is_empty() {
         return Ok(prompt);
     }
     let transcript = String::from_utf8_lossy(transcript);
@@ -1448,18 +1733,6 @@ fn local_llm_decode_json_hex4(bytes: &[u8]) -> Option<u32> {
 }
 
 #[cfg(not(target_os = "none"))]
-fn local_llm_user_prompt() -> Option<String> {
-    if let Ok(prompt) = std::env::var("UNO_Q_LOCAL_LLM_USER_PROMPT") {
-        return local_llm_prompt_from_bytes(prompt.into_bytes());
-    }
-    let path = std::env::var("UNO_Q_LOCAL_LLM_USER_PROMPT_FILE")
-        .ok()
-        .or_else(|| local_llm_existing_path(DEFAULT_UNO_Q_LOCAL_LLM_USER_PROMPT_FILE))?;
-    let bytes = std::fs::read(path).ok()?;
-    local_llm_prompt_from_bytes(bytes)
-}
-
-#[cfg(not(target_os = "none"))]
 fn local_llm_self_mood_enabled() -> bool {
     std::env::var_os("UNO_Q_LOCAL_LLM_SELF_MOOD").is_some()
 }
@@ -1478,20 +1751,6 @@ fn local_llm_self_mood_prompt(ordinal: u8) -> String {
 need to explain the mood; return only the matching shell command."
         )
     })
-}
-
-#[cfg(not(target_os = "none"))]
-fn local_llm_context_has_any(context: &str, words: &[&str]) -> bool {
-    words.iter().any(|word| context.contains(word))
-}
-
-#[cfg(not(target_os = "none"))]
-fn local_llm_prompt_from_bytes(mut bytes: Vec<u8>) -> Option<String> {
-    if bytes.len() > LOCAL_LLM_USER_PROMPT_BYTES {
-        bytes.truncate(LOCAL_LLM_USER_PROMPT_BYTES);
-    }
-    let prompt = String::from_utf8_lossy(&bytes).trim().to_owned();
-    (!prompt.is_empty()).then_some(prompt)
 }
 
 fn face_loop_forever_enabled() -> bool {
@@ -1640,37 +1899,25 @@ fn local_llm_discovery_prompt() -> String {
 }
 
 #[cfg(not(target_os = "none"))]
-fn local_llm_face_choice_prompt(mood: &str) -> String {
+fn local_llm_human_face_prompt(request: &str) -> String {
     format!(
-        "Face command examples:\nInput mood: happy\nCommand: echo h > /face/frame\n\
-Input mood: angry\nCommand: echo a > /face/frame\nInput mood: sad\nCommand: \
-echo s > /face/frame\nInput mood: surprised\nCommand: echo u > /face/frame\n\
-Input mood: {mood}\nCommand:"
+        "You are controlling a WASI shell. The latest human request or assistant mood is:\n\
+{request}\n\nReturn only one shell command. Choose the face by typing a ChoreoFS \
+write command. Examples:\nInput: happy or cheerful\nCommand: echo h > \
+/face/frame\nInput: laugh, smile, happy, or cheerful\nCommand: echo h > \
+/face/frame\nInput: angry, frustrated, or upset\nCommand: echo a > /face/frame\n\
+Input: sad or tired\nCommand: echo s > /face/frame\nInput: surprised or curious\n\
+Command: echo u > /face/frame\nInput: speaking or talking\nCommand: echo mw > \
+/face/frame\nCommand:"
     )
 }
 
 #[cfg(not(target_os = "none"))]
 fn local_llm_default_face_prompt(label: &str) -> String {
     format!(
-        "Shell command examples:\nFace code h\nCommand: echo h > /face/frame\n\
-Face code a\nCommand: echo a > /face/frame\nFace code s\nCommand: echo s > \
-/face/frame\nFace code u\nCommand: echo u > /face/frame\nFace code {label}\n\
-Command:"
+        "Task: write the single face code {label}. Valid shell syntax is echo CODE > /face/frame.\n\
+Answer with exactly: echo {label} > /face/frame\nAnswer:"
     )
-}
-
-#[cfg(not(target_os = "none"))]
-fn local_llm_mood_key(context: &str) -> &'static str {
-    let lower = context.to_ascii_lowercase();
-    if local_llm_context_has_any(&lower, &["angry", "frustrated", "mad", "upset"]) {
-        "angry"
-    } else if local_llm_context_has_any(&lower, &["sad", "tired", "lonely", "disappointed"]) {
-        "sad"
-    } else if local_llm_context_has_any(&lower, &["surprised", "confused", "amazed", "curious"]) {
-        "surprised"
-    } else {
-        "happy"
-    }
 }
 
 #[cfg(not(target_os = "none"))]
@@ -2605,7 +2852,7 @@ impl hibana::integration::Transport for HardwarePeerCarrier {
             let turnaround_us = std::env::var("UNO_Q_HIBANA_UART_TURNAROUND_US")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(50_000);
+                .unwrap_or(200_000);
             if turnaround_us != 0 {
                 std::thread::sleep(std::time::Duration::from_micros(turnaround_us));
             }
@@ -2629,7 +2876,7 @@ impl hibana::integration::Transport for HardwarePeerCarrier {
             let byte_delay_us = std::env::var("UNO_Q_HIBANA_UART_BYTE_US")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(10_000);
+                .unwrap_or(50_000);
             for &byte in &frame[..len] {
                 serial
                     .write_all(&[byte])
@@ -2805,6 +3052,18 @@ impl hibana::integration::Transport for ProofCarrier {
         if peer >= PROOF_CARRIER_ROLES {
             return Poll::Ready(Err(hibana::integration::transport::TransportError::Failed));
         }
+        #[cfg(not(target_os = "none"))]
+        if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+            eprintln!(
+                "proof-carrier tx session={} lane={} {}->{} label={} len={}",
+                tx.session_id,
+                outgoing.lane(),
+                tx.local_role,
+                outgoing.peer(),
+                outgoing.frame_label().raw(),
+                outgoing.payload().as_bytes().len()
+            );
+        }
         self.edit(|queues| {
             queues.by_role[peer].push_back(
                 outgoing.lane(),
@@ -2839,6 +3098,18 @@ impl hibana::integration::Transport for ProofCarrier {
         rx.hint_frame_label.set(Some(frame.frame_label));
         rx.len = frame.len;
         rx.bytes[..frame.len].copy_from_slice(&frame.bytes[..frame.len]);
+        #[cfg(not(target_os = "none"))]
+        if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+            eprintln!(
+                "proof-carrier rx session={} lane={} role={} label={} len={} bytes={:?}",
+                rx.session_id,
+                rx.lane,
+                rx.local_role,
+                frame.frame_label.raw(),
+                frame.len,
+                &rx.bytes[..rx.len]
+            );
+        }
         task_context.waker().wake_by_ref();
         Poll::Ready(Ok(Payload::new(&rx.bytes[..rx.len])))
     }
@@ -2943,7 +3214,7 @@ impl appkit::LogicalImage<UnoQCapsule> for site::Local<image::HostLoopbackProof>
 
     const IMAGE_ID: appkit::ImageId = appkit::ImageId(710);
     const SITE_ID: appkit::SiteId = appkit::SiteId(7100);
-    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::from_bits(0x7);
+    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::from_bits(0xf);
     const CARRIER: appkit::CarrierKind = UNO_Q_CARRIER;
 
     fn init() -> Self {
@@ -3065,6 +3336,15 @@ impl_nowasi_image!(
     appkit::RoleSet::single(ROLE_LOCAL_LLM),
     appkit::PeerImageSet::pair(appkit::ImageId(711), appkit::ImageId(715)),
     LOCAL_LLM_ATTACH_STORAGE
+);
+
+impl_nowasi_image!(
+    image::HumanInputProcess,
+    713,
+    7103,
+    appkit::RoleSet::single(ROLE_HUMAN_INPUT),
+    appkit::PeerImageSet::pair(appkit::ImageId(711), appkit::ImageId(712)),
+    HUMAN_INPUT_ATTACH_STORAGE
 );
 
 impl appkit::LogicalImage<UnoQCapsule> for site::Local<image::M33LedKernelImage> {
@@ -3219,6 +3499,15 @@ mod tests {
                 'L', 'o', 'c', 'a', 'l', 'L', 'l', 'm', 'P', 'r', 'o', 'c', 'e', 's', 's',
             ]),
             text(&[
+                'H', 'u', 'm', 'a', 'n', 'I', 'n', 'p', 'u', 't', 'P', 'r', 'o', 'c', 'e', 's', 's',
+            ]),
+            text(&[
+                'H', 'u', 'm', 'a', 'n', 'I', 'n', 'p', 'u', 't', 'A', 'c', 'k', 'M', 's', 'g',
+            ]),
+            text(&[
+                'H', 'u', 'm', 'a', 'n', 'I', 'n', 'p', 'u', 't', 'T', 'e', 'x', 't', 'M', 's', 'g',
+            ]),
+            text(&[
                 'W', 'a', 's', 'i', 'F', 'd', 'R', 'e', 'a', 'd', 'R', 'e', 'q', 'M', 's', 'g',
             ]),
             text(&[
@@ -3254,6 +3543,9 @@ mod tests {
         let local_llm = text(&[
             'R', 'O', 'L', 'E', '_', 'L', 'O', 'C', 'A', 'L', '_', 'L', 'L', 'M',
         ]);
+        let human_input = text(&[
+            'R', 'O', 'L', 'E', '_', 'H', 'U', 'M', 'A', 'N', '_', 'I', 'N', 'P', 'U', 'T',
+        ]);
         let read_req = text(&[
             'W', 'a', 's', 'i', 'F', 'd', 'R', 'e', 'a', 'd', 'R', 'e', 'q', 'M', 's', 'g',
         ]);
@@ -3263,6 +3555,12 @@ mod tests {
         let proc_exit = text(&[
             'W', 'a', 's', 'i', 'P', 'r', 'o', 'c', 'E', 'x', 'i', 't', 'R', 'e', 'q', 'M', 's',
             'g',
+        ]);
+        let human_text = text(&[
+            'H', 'u', 'm', 'a', 'n', 'I', 'n', 'p', 'u', 't', 'T', 'e', 'x', 't', 'M', 's', 'g',
+        ]);
+        let human_ack = text(&[
+            'H', 'u', 'm', 'a', 'n', 'I', 'n', 'p', 'u', 't', 'A', 'c', 'k', 'M', 's', 'g',
         ]);
         assert!(
             compact.contains(&format!("g::Role<{wasi}>,g::Role<{local_llm}>,{read_req}")),
@@ -3280,13 +3578,27 @@ mod tests {
             compact.contains(&format!("g::Role<{wasi}>,g::Role<{m33}>,{proc_exit}")),
             "bounded WASI proc_exit must be visible to the M33 role"
         );
+        assert!(
+            compact.contains(&format!(
+                "g::Role<{human_input}>,g::Role<{local_llm}>,{human_text}"
+            )),
+            "input role must pass arbitrary human text to the local LLM role as one typed message"
+        );
+        assert!(
+            compact.contains(&format!(
+                "g::Role<{local_llm}>,g::Role<{human_input}>,{human_ack}"
+            )),
+            "local LLM must acknowledge the input turn as one projected typed message"
+        );
         for forbidden in [
             format!("g::Role<{m33}>,g::Role<{local_llm}>"),
             format!("g::Role<{local_llm}>,g::Role<{m33}>"),
+            format!("g::Role<{human_input}>,g::Role<{m33}>"),
+            format!("g::Role<{m33}>,g::Role<{human_input}>"),
         ] {
             assert!(
                 !compact.contains(&forbidden),
-                "M33 and local LLM must not be directly wired; found {forbidden}"
+                "M33 must only observe WASI ChoreoFS face writes; found {forbidden}"
             );
         }
 
@@ -3363,12 +3675,14 @@ mod tests {
             assert!(source.contains("\"/llm/stdin\""));
             assert!(source.contains("\"/llm/stdout\""));
             assert!(source.contains("\"/face/frame\""));
-            assert!(source.contains("CMD_LS"));
+            assert!(source.contains("ShellCommand::Catalog"));
             assert!(source.contains("find ChoreoFS -type f"));
             assert!(source.contains("is_catalog_discovery_command"));
             assert!(source.contains("face[0] == b'v'"));
             assert!(source.contains("echo "));
             assert!(source.contains(" > /face/frame"));
+            assert!(source.contains("SHELL_INVALID_COMMAND"));
+            assert!(source.contains("ShellCommand::Invalid"));
             assert!(source.contains("read_once"));
             assert!(source.contains("write_once_exact"));
             for forbidden in [
@@ -3397,7 +3711,7 @@ mod tests {
     }
 
     #[test]
-    fn passive_roles_offer_only_route_heads_and_recv_mid_arm_imports() {
+    fn passive_roles_offer_projected_shell_routes_without_llm_output_filtering() {
         fn text(chars: &[char]) -> String {
             chars.iter().collect()
         }
@@ -3405,11 +3719,11 @@ mod tests {
         let source = include_str!("lib.rs");
         assert!(
             source.contains("branch.decode::<WasiFdWriteReqMsg>()"),
-            "local LLM must decode the route-head stdout write through offer"
+            "local LLM must decode projected stdout writes through offer"
         );
         assert!(
-            source.contains("recv::<WasiFdReadReqMsg>()"),
-            "local LLM must receive fd_read inside the selected arm, not offer it as a new route"
+            source.contains("branch.decode::<WasiFdReadReqMsg>()"),
+            "local LLM must decode projected stdin reads through offer"
         );
         assert!(
             source.contains("complete_local_llm_stdin_read"),
@@ -3417,15 +3731,69 @@ mod tests {
         );
         assert!(
             source.contains("yield_to_peer_roles().await"),
-            "M33 ACK must yield before the next offer so the WASI controller publishes continue/break"
+            "passive hardware split peers must yield after local handshakes so the next projected role can advance"
         );
-        let fd_read_route_arm = text(&[
-            'L', 'A', 'B', 'E', 'L', '_', 'W', 'A', 'S', 'I', '_', 'F', 'D', '_', 'R', 'E', 'A',
-            'D', ' ', '=', '>',
+        assert!(
+            source.contains("cx.waker().wake_by_ref()"),
+            "local scheduler yield must wake itself so hardware split tasks are polled again"
+        );
+        assert!(
+            {
+                let old_human_poll = text(&[
+                    'H', 'u', 'm', 'a', 'n', 'I', 'n', 'p', 'u', 't', 'P', 'o', 'l', 'l', 'M', 's',
+                    'g',
+                ]);
+                source.contains("recv::<HumanInputTextMsg>().await?")
+                    && source.contains("flow::<HumanInputAckMsg>()?")
+                    && source.contains("flow::<HumanInputReqMsg>()?")
+                    && source.contains("LABEL_HUMAN_INPUT_TEXT")
+                    && !source.contains(&old_human_poll)
+            },
+            "human input must use a choreography-visible request, one typed send, and one ack; not a separate poll protocol"
+        );
+        let forbidden_fd_write_route_hook = [
+            text(&[
+                'W', 'a', 's', 'i', 'F', 'd', 'W', 'r', 'i', 't', 'e', 'B', 'o', 'u', 'n', 'd',
+                'a', 'r', 'y', 'R', 'o', 'u', 't', 'e', 'C', 'o', 'n', 't', 'r', 'o', 'l',
+            ]),
+            text(&[
+                'W', 'a', 's', 'i', 'F', 'd', 'W', 'r', 'i', 't', 'e', 'D', 'r', 'i', 'v', 'e',
+                'r', 'R', 'o', 'u', 't', 'e', 'C', 'o', 'n', 't', 'r', 'o', 'l',
+            ]),
+            text(&[
+                'W', 'a', 's', 'i', 'F', 'd', 'W', 'r', 'i', 't', 'e', 'B', 'o', 'u', 'n', 'd',
+                'a', 'r', 'y', 'P', 'e', 'e', 'r', 'R', 'o', 'u', 't', 'e', 'M', 's', 'g',
+            ]),
+            text(&[
+                'f', 'n', ' ', 'w', 'a', 's', 'i', '_', 'f', 'd', '_', 'w', 'r', 'i', 't', 'e',
+                '_', 'r', 'o', 'u', 't', 'e',
+            ]),
+        ];
+        for forbidden in forbidden_fd_write_route_hook {
+            assert!(
+                !source.contains(forbidden.as_str()),
+                "fd_write target routing must not be hidden behind appkit fd evidence: remove {forbidden}"
+            );
+        }
+        let old_phase_filter = text(&[
+            'c', 'o', 'p', 'y', '_', 'l', 'l', 'm', '_', 't', 'e', 'r', 'm', 'i', 'n', 'a', 'l',
+            '_', 'i', 'n', 'p', 'u', 't', '_', 'f', 'r', 'o', 'm', '_', 'o', 'u', 't', 'p', 'u',
+            't', '_', 'f', 'o', 'r', '_', 'p', 'h', 'a', 's', 'e',
+        ]);
+        let old_face_filter = text(&[
+            'l', 'o', 'c', 'a', 'l', '_', 'l', 'l', 'm', '_', 'i', 's', '_', 'f', 'a', 'c', 'e',
+            '_', 'w', 'r', 'i', 't', 'e', '_', 'c', 'o', 'm', 'm', 'a', 'n', 'd',
+        ]);
+        let old_repair_prompt = text(&[
+            'l', 'o', 'c', 'a', 'l', '_', 'l', 'l', 'm', '_', 'f', 'a', 'c', 'e', '_', 'c', 'o',
+            'm', 'm', 'a', 'n', 'd', '_', 'r', 'e', 'p', 'a', 'i', 'r', '_', 'p', 'r', 'o', 'm',
+            'p', 't',
         ]);
         assert!(
-            !source.contains(&fd_read_route_arm),
-            "fd_read is not a route branch head in this choreography"
+            !source.contains(old_phase_filter.as_str())
+                && !source.contains(old_face_filter.as_str())
+                && !source.contains(old_repair_prompt.as_str()),
+            "LLM terminal input must not be filtered outside the WASI shell/choreography path"
         );
     }
 
@@ -3504,16 +3872,42 @@ mod tests {
         assert!(source.contains("DEFAULT_UNO_Q_LOCAL_LLM_COMPLETION"));
         assert!(source.contains("llama-completion"));
         assert!(source.contains("UNO_Q_LOCAL_LLM_SCRIPTED"));
-        assert!(source.contains("UNO_Q_LOCAL_LLM_USER_PROMPT"));
-        assert!(source.contains("DEFAULT_UNO_Q_LOCAL_LLM_USER_PROMPT_FILE"));
+        assert!(source.contains("struct HumanInputSource"));
+        assert!(source.contains("std::sync::mpsc::Receiver<Vec<u8>>"));
+        assert!(source.contains("UNO_Q_HUMAN_INPUT_MODE"));
+        assert!(source.contains("UNO_Q_HUMAN_INPUT_TEXT"));
+        assert!(source.contains("UNO_Q_HUMAN_INPUT_VOICE_CMD"));
+        assert!(source.contains("HumanInputText::from_bytes"));
+        assert!(source.contains("strip_terminal_line_delimiter"));
+        assert!(source.contains("observe_human_input"));
         assert!(source.contains("UNO_Q_LOCAL_LLM_SELF_MOOD"));
         assert!(source.contains("Assistant mood instruction"));
-        assert!(source.contains("Face command examples"));
-        assert!(source.contains("local_llm_face_choice_prompt"));
-        assert!(source.contains("local_llm_mood_key"));
-        assert!(source.contains("angry\", \"frustrated\", \"mad\", \"upset"));
+        assert!(source.contains("local_llm_human_face_prompt"));
         assert!(source.contains("human request or assistant mood"));
         assert!(source.contains("Self::Missing => Err"));
+        let old_prompt_file_const = ["DEFAULT_UNO_Q_LOCAL_LLM_", "USER_PROMPT_FILE"].concat();
+        let old_prompt_file_env = ["UNO_Q_LOCAL_LLM_", "USER_PROMPT_FILE"].concat();
+        let old_mood_classifier = ["local_llm_", "mood_key"].concat();
+        let old_mood_words_helper = ["local_llm_", "context_has_any"].concat();
+        assert!(!source.contains(&old_prompt_file_const));
+        assert!(!source.contains(&old_prompt_file_env));
+        assert!(!source.contains(&old_mood_classifier));
+        assert!(!source.contains(&old_mood_words_helper));
+        let old_interactive_env = ["UNO_Q_LOCAL_LLM_", "INTERACTIVE"].concat();
+        let old_user_prompt_env = ["UNO_Q_LOCAL_LLM_", "USER_PROMPT"].concat();
+        let old_prompt_bytes = ["local_llm_", "prompt_from_bytes"].concat();
+        assert!(!source.contains(&old_interactive_env));
+        assert!(!source.contains(&old_user_prompt_env));
+        assert!(!source.contains(&old_prompt_bytes));
+        let old_keyword_bucket = ["angry\", \"frustrated", "\", \"mad\", \"upset"].concat();
+        assert!(!source.contains(&old_keyword_bucket));
+        let old_prompt_file_script = ["inject_llm_", "prompt.sh"].concat();
+        assert!(
+            !std::path::Path::new(&format!(
+                "examples/uno-q-heterogeneous/scripts/{old_prompt_file_script}"
+            ))
+            .exists()
+        );
         let llama_grammar_flag = ["--", "grammar"].concat();
         assert!(!source.contains(&llama_grammar_flag));
         let old_grammar_helper = ["local_llm_", "grammar_for_phase"].concat();
@@ -3528,11 +3922,11 @@ mod tests {
         let prompt = default_local_llm_shell_prompt();
         assert!(prompt.contains("WASI shell"));
         assert!(prompt.contains("choreography"));
-        let server_prompt = local_llm_prompt_for_server(b"llm/stdout\n", 1, 0).unwrap();
-        assert!(server_prompt.contains("Shell transcript so far"));
+        let server_prompt =
+            local_llm_prompt_for_server(b"llm/stdout\n", 1, 0, Some("怒った感じで")).unwrap();
+        assert!(!server_prompt.contains("Shell transcript so far"));
+        assert!(server_prompt.contains("怒った感じで"));
         assert!(server_prompt.ends_with("Command:"));
-        assert_eq!(local_llm_mood_key("frustrated"), "angry");
-        assert_eq!(local_llm_mood_key("curious"), "surprised");
     }
 
     #[cfg(not(target_os = "none"))]
@@ -3540,13 +3934,14 @@ mod tests {
     fn local_llm_prompt_guidance_is_not_llama_grammar() {
         assert!(local_llm_discovery_prompt().contains("Command: ls"));
         assert!(
-            local_llm_face_choice_prompt("sad")
-                .contains("Input mood: sad\nCommand: echo s > /face/frame")
+            local_llm_human_face_prompt("悲しい感じで")
+                .contains("Input: sad or tired\nCommand: echo s > /face/frame")
         );
         assert!(
             local_llm_default_face_prompt("h")
-                .contains("Face code h\nCommand: echo h > /face/frame")
+                .contains("Answer with exactly: echo h > /face/frame\nAnswer:")
         );
+        assert!(local_llm_default_face_prompt("h").contains("Valid shell syntax"));
     }
 
     #[cfg(not(target_os = "none"))]
@@ -3571,10 +3966,20 @@ mod tests {
 
     #[cfg(not(target_os = "none"))]
     #[test]
-    fn human_prompt_is_prompt_context_not_runtime_authority() {
-        let bytes = vec![b'x'; LOCAL_LLM_USER_PROMPT_BYTES + 32];
-        let prompt = local_llm_prompt_from_bytes(bytes).unwrap();
-        assert_eq!(prompt.len(), LOCAL_LLM_USER_PROMPT_BYTES);
+    fn human_input_role_forwards_exact_text_as_prompt_context_not_runtime_authority() {
+        let input = HumanInputText::new("怒った感じで  keep spaces  ").unwrap();
+        assert_eq!(input.as_str().unwrap(), "怒った感じで  keep spaces  ");
+        assert_eq!(input.as_bytes(), "怒った感じで  keep spaces  ".as_bytes());
+
+        let too_long = vec![b'x'; protocol::HUMAN_INPUT_TEXT_BYTES + 1];
+        assert_eq!(
+            HumanInputText::from_bytes(&too_long),
+            Err(protocol::ProtocolError::HumanInputTooLong)
+        );
+
+        let mut line = b"happy now  \r\n".to_vec();
+        strip_terminal_line_delimiter(&mut line);
+        assert_eq!(&line, b"happy now  ");
 
         let mut out = [0u8; LOCAL_LLM_COMMAND_BYTES];
         let arbitrary = "echo hello > /tmp/free-shell\n";
@@ -3593,12 +3998,9 @@ mod tests {
         assert!(prompt.contains("frustrated"));
         assert!(prompt.contains("return only"));
 
-        assert_eq!(local_llm_mood_key("I am frustrated"), "angry");
-        assert_eq!(local_llm_mood_key("I am tired"), "sad");
-        assert_eq!(local_llm_mood_key("I am curious"), "surprised");
-        assert_eq!(local_llm_mood_key("I am happy"), "happy");
-        let face_prompt = local_llm_face_choice_prompt("angry");
-        assert!(face_prompt.contains("Input mood: angry\nCommand: echo a > /face/frame"));
+        let face_prompt = local_llm_human_face_prompt(&prompt);
+        assert!(face_prompt.contains("latest human request or assistant mood"));
+        assert!(face_prompt.contains("Command: echo a > /face/frame"));
         assert!(face_prompt.ends_with("Command:"));
     }
 

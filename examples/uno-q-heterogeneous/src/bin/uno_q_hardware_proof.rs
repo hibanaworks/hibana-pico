@@ -10,8 +10,9 @@ use hibana_pico::{appkit, appkit::ArtifactBundle, site};
 use uno_q_heterogeneous::{UnoQCapsule, image};
 
 fn main() {
-    set_env_default("UNO_Q_HIBANA_UART_TURNAROUND_US", "50000");
-    set_env_default("UNO_Q_HIBANA_UART_BYTE_US", "10000");
+    apply_cli_args();
+    set_env_default("UNO_Q_HIBANA_UART_TURNAROUND_US", "200000");
+    set_env_default("UNO_Q_HIBANA_UART_BYTE_US", "50000");
     let face_loop_forever = env::var_os("UNO_Q_FACE_LOOP_FOREVER").is_some();
     if face_loop_forever {
         unsafe {
@@ -63,11 +64,11 @@ fn run_choreography_proof() {
 
     assert_eq!(report.image_id(), appkit::ImageId(710));
     assert_eq!(report.site_id(), appkit::SiteId(7100));
-    assert_eq!(report.requested_roles(), appkit::RoleSet::from_bits(0x7));
-    assert_eq!(report.attached_endpoint_count(), 3);
+    assert_eq!(report.requested_roles(), appkit::RoleSet::from_bits(0xf));
+    assert_eq!(report.attached_endpoint_count(), 4);
     assert_eq!(report.attached_role_kinds().engine, 1);
     assert_eq!(report.attached_role_kinds().driver, 1);
-    assert_eq!(report.attached_role_kinds().boundary, 1);
+    assert_eq!(report.attached_role_kinds().boundary, 2);
     assert!(report.artifact_len() > 0);
 }
 
@@ -79,11 +80,11 @@ fn run_hardware_split_proof(serial: &str) {
 
     assert_eq!(report.image_id(), appkit::ImageId(717));
     assert_eq!(report.site_id(), appkit::SiteId(7107));
-    assert_eq!(report.requested_roles(), appkit::RoleSet::from_bits(0x6));
-    assert_eq!(report.attached_endpoint_count(), 2);
+    assert_eq!(report.requested_roles(), appkit::RoleSet::from_bits(0xe));
+    assert_eq!(report.attached_endpoint_count(), 3);
     assert_eq!(report.attached_role_kinds().engine, 1);
     assert_eq!(report.attached_role_kinds().driver, 0);
-    assert_eq!(report.attached_role_kinds().boundary, 1);
+    assert_eq!(report.attached_role_kinds().boundary, 2);
     assert!(report.artifact_len() > 0);
     assert_eq!(
         env::var("UNO_Q_HIBANA_SERIAL").as_deref(),
@@ -92,11 +93,56 @@ fn run_hardware_split_proof(serial: &str) {
     );
 }
 
+fn apply_cli_args() {
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--prompt-shell" => {
+                set_env("UNO_Q_HUMAN_INPUT_MODE", "prompt");
+                set_env("UNO_Q_FACE_LOOP_FOREVER", "1");
+            }
+            "--voice-shell" => {
+                set_env("UNO_Q_HUMAN_INPUT_MODE", "voice");
+                set_env("UNO_Q_FACE_LOOP_FOREVER", "1");
+            }
+            "--voice-cmd" => {
+                let Some(command) = args.next() else {
+                    panic!("--voice-cmd requires a command string");
+                };
+                set_env("UNO_Q_HUMAN_INPUT_VOICE_CMD", &command);
+                set_env("UNO_Q_HUMAN_INPUT_MODE", "voice");
+                set_env("UNO_Q_FACE_LOOP_FOREVER", "1");
+            }
+            "--serial" => {
+                let Some(serial) = args.next() else {
+                    panic!("--serial requires a device path");
+                };
+                set_env("UNO_Q_HIBANA_SERIAL", &serial);
+            }
+            "--trace" => set_env("UNO_Q_HIBANA_TRACE", "1"),
+            "--face-loop-forever" => set_env("UNO_Q_FACE_LOOP_FOREVER", "1"),
+            "--scripted-llm" => set_env("UNO_Q_LOCAL_LLM_SCRIPTED", "1"),
+            "--help" | "-h" => {
+                println!(
+                    "usage: uno-q-hardware-proof [--prompt-shell | --voice-shell] \
+[--voice-cmd CMD] [--serial PATH] [--trace] [--face-loop-forever] [--scripted-llm]"
+                );
+                std::process::exit(0);
+            }
+            other => panic!("unknown argument {other}; pass --help for usage"),
+        }
+    }
+}
+
+fn set_env(key: &str, value: &str) {
+    unsafe {
+        env::set_var(key, value);
+    }
+}
+
 fn set_env_default(key: &str, value: &str) {
     if env::var_os(key).is_none() {
-        unsafe {
-            env::set_var(key, value);
-        }
+        set_env(key, value);
     }
 }
 
@@ -204,7 +250,7 @@ fn reset_m33_appkit_image() {
             "-f",
             "openocd_gpiod.cfg",
             "-c",
-            "init; reset run; shutdown",
+            "reset_config srst_only srst_push_pull; init; reset run; shutdown",
         ])
         .status()
         .unwrap_or_else(|error| {

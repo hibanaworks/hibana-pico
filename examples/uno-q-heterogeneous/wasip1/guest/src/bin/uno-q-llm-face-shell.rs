@@ -1,9 +1,17 @@
-use hibana_wasip1_guest::{Error, Result, choreofs};
+use hibana_wasip1_guest::{Result, choreofs};
 
 const PREOPEN_FD: u32 = 9;
 const PROOF_FRAME_COUNT: usize = 20;
-const SHELL_CATALOG: &[u8] = b"w /face/frame FaceFrame\n";
-const CMD_LS: u8 = 0xff;
+const SHELL_PROMPT: &[u8] = b"$ ";
+const SHELL_CATALOG: &[u8] = b"w /face/frame FaceFrame\n$ ";
+const SHELL_INVALID_COMMAND: &[u8] = b"err\n$ ";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShellCommand {
+    Catalog,
+    Face(u8),
+    Invalid,
+}
 
 macro_rules! is_catalog_discovery_command {
     ($command:expr) => {{
@@ -59,25 +67,23 @@ fn run() -> Result<()> {
     let face = choreofs::open_write(PREOPEN_FD, "/face/frame")?;
 
     let mut ordinal = 0u8;
+    llm_stdout.write_once_exact(SHELL_PROMPT)?;
     while usize::from(ordinal) < PROOF_FRAME_COUNT {
-        llm_stdout.write_once_exact(b"choreofs$ ")?;
-        if read_command(&llm_stdin)? != CMD_LS {
-            return Err(Error::InvalidPath);
+        match read_command(&llm_stdin)? {
+            ShellCommand::Catalog => llm_stdout.write_once_exact(SHELL_CATALOG)?,
+            ShellCommand::Invalid => llm_stdout.write_once_exact(SHELL_INVALID_COMMAND)?,
+            ShellCommand::Face(face_kind) => {
+                let frame = [face_kind, ordinal];
+                face.write_once_exact(&frame)?;
+                ordinal = ordinal.wrapping_add(1);
+                llm_stdout.write_once_exact(SHELL_PROMPT)?;
+            }
         }
-
-        llm_stdout.write_once_exact(SHELL_CATALOG)?;
-        let face_kind = read_command(&llm_stdin)?;
-        if face_kind == CMD_LS {
-            return Err(Error::InvalidPath);
-        }
-        let frame = [face_kind, ordinal];
-        face.write_once_exact(&frame)?;
-        ordinal = ordinal.wrapping_add(1);
     }
     Ok(())
 }
 
-fn read_command(stdin: &choreofs::ReadFile) -> Result<u8> {
+fn read_command(stdin: &choreofs::ReadFile) -> Result<ShellCommand> {
     let mut buffer = [0u8; 30];
     let len = stdin.read_once(&mut buffer)?;
     let mut end = len;
@@ -86,63 +92,65 @@ fn read_command(stdin: &choreofs::ReadFile) -> Result<u8> {
     }
     let command = &buffer[..end];
     if is_catalog_discovery_command!(command) {
-        return Ok(CMD_LS);
+        return Ok(ShellCommand::Catalog);
     }
-    decode_echo_face_command(command)
+    Ok(decode_echo_face_command(command)
+        .map(ShellCommand::Face)
+        .unwrap_or(ShellCommand::Invalid))
 }
 
 #[inline(always)]
-fn decode_echo_face_command(command: &[u8]) -> Result<u8> {
+fn decode_echo_face_command(command: &[u8]) -> Option<u8> {
     let prefix = b"echo ";
     let redirect = b" > /face/frame";
     if command.len() <= prefix.len() + redirect.len()
         || &command[..prefix.len()] != prefix
         || &command[command.len() - redirect.len()..] != redirect
     {
-        return Err(Error::InvalidPath);
+        return None;
     }
     decode_face_code(&command[prefix.len()..command.len() - redirect.len()])
 }
 
 #[inline(always)]
-fn decode_face_code(face: &[u8]) -> Result<u8> {
+fn decode_face_code(face: &[u8]) -> Option<u8> {
     if face.len() == 1 {
         if face[0] == b'h' {
-            return Ok(1);
+            return Some(1);
         }
         if face[0] == b's' {
-            return Ok(2);
+            return Some(2);
         }
         if face[0] == b'a' {
-            return Ok(3);
+            return Some(3);
         }
         if face[0] == b'u' {
-            return Ok(4);
+            return Some(4);
         }
         if face[0] == b'v' {
-            return Ok(4);
+            return Some(4);
         }
     }
     if face.len() == 2 && face[0] == b'm' {
         if face[1] == b'c' {
-            return Ok(16);
+            return Some(16);
         }
         if face[1] == b's' {
-            return Ok(17);
+            return Some(17);
         }
         if face[1] == b'w' {
-            return Ok(18);
+            return Some(18);
         }
         if face[1] == b'r' {
-            return Ok(19);
+            return Some(19);
         }
     }
-    Err(Error::InvalidPath)
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::decode_face_code;
+    use crate::{ShellCommand, decode_echo_face_command, decode_face_code};
 
     #[test]
     fn catalog_discovery_accepts_ls_and_shell_find() {
@@ -170,7 +178,16 @@ mod tests {
 
     #[test]
     fn surprised_accepts_model_alias_v() {
-        assert_eq!(decode_face_code(b"u"), Ok(4));
-        assert_eq!(decode_face_code(b"v"), Ok(4));
+        assert_eq!(decode_face_code(b"u"), Some(4));
+        assert_eq!(decode_face_code(b"v"), Some(4));
+    }
+
+    #[test]
+    fn invalid_llm_terminal_input_is_shell_error_not_process_exit() {
+        assert_eq!(decode_echo_face_command(b"please laugh"), None);
+        let command = decode_echo_face_command(b"please laugh")
+            .map(ShellCommand::Face)
+            .unwrap_or(ShellCommand::Invalid);
+        assert_eq!(command, ShellCommand::Invalid);
     }
 }

@@ -193,7 +193,7 @@ fn uno_q_uart_carrier_defaults_to_hardware_safe_byte_pacing() {
         uno_q,
         &[
             "UNO_Q_HIBANA_UART_BYTE_US",
-            ".unwrap_or(10_000)",
+            ".unwrap_or(50_000)",
             "UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS",
             "UNO_Q_M33_UART_OPERATIONAL_DEADLINE_TICKS",
         ],
@@ -202,6 +202,135 @@ fn uno_q_uart_carrier_defaults_to_hardware_safe_byte_pacing() {
         "examples/uno-q-heterogeneous/src/lib.rs",
         uno_q,
         &[".unwrap_or(1_000)", ".unwrap_or(5_000)"],
+    );
+}
+
+#[test]
+fn uno_q_llm_demo_uses_input_role_cli_and_choreofs_only() {
+    let uno_q = include_str!("../examples/uno-q-heterogeneous/src/lib.rs");
+    let protocol = include_str!("../examples/uno-q-heterogeneous/src/protocol.rs");
+    let plan = include_str!("../examples/uno-q-heterogeneous/plan.md");
+    let hardware_cli =
+        include_str!("../examples/uno-q-heterogeneous/src/bin/uno_q_hardware_proof.rs");
+
+    assert_present(
+        "examples/uno-q-heterogeneous/src/lib.rs",
+        uno_q,
+        &[
+            "ROLE_HUMAN_INPUT",
+            "HumanInputReqMsg",
+            "HumanInputTextMsg",
+            "HumanInputAckMsg",
+            "struct HumanInputSource",
+            "std::sync::mpsc::Receiver<Vec<u8>>",
+            "UNO_Q_HUMAN_INPUT_MODE",
+            "UNO_Q_HUMAN_INPUT_TEXT",
+            "UNO_Q_HUMAN_INPUT_VOICE_CMD",
+            "HumanInputText::from_bytes",
+            "local_llm_human_face_prompt",
+            "Return only one shell command",
+            "LocalLlmServer",
+            "POST /completion",
+            "GET /health",
+            "DEFAULT_UNO_Q_LOCAL_LLM_SERVER",
+            "FACE_FRAME_PATH",
+            "branch.decode::<WasiFdWriteReqMsg>()",
+            "FaceFrame::decode_payload",
+            "m33_board_show_face(frame.face())",
+        ],
+    );
+    assert_absent(
+        "examples/uno-q-heterogeneous/src/lib.rs",
+        uno_q,
+        &[
+            "HumanInputPollMsg",
+            "LABEL_HUMAN_INPUT_POLL",
+            "WasiFdWriteBoundaryRouteControl",
+            "WasiFdWriteDriverRouteControl",
+            "WasiFdWriteBoundaryPeerRouteMsg",
+            "fn wasi_fd_write_route",
+        ],
+    );
+    assert_present(
+        "examples/uno-q-heterogeneous/src/protocol.rs",
+        protocol,
+        &[
+            "LABEL_HUMAN_INPUT_REQ",
+            "LABEL_HUMAN_INPUT_TEXT",
+            "LABEL_HUMAN_INPUT_ACK",
+        ],
+    );
+    assert_absent(
+        "examples/uno-q-heterogeneous/src/protocol.rs",
+        protocol,
+        &["LABEL_HUMAN_INPUT_POLL"],
+    );
+    assert_present(
+        "examples/uno-q-heterogeneous/plan.md",
+        plan,
+        &[
+            "HumanInput role",
+            "prompt shell",
+            "voice shell",
+            "The old prompt-file injection path is not\npart of the demo",
+            "The input role does not\nclassify, rewrite, or convert the text",
+            "M33 and the local LLM never exchange typed messages directly",
+        ],
+    );
+    assert_present(
+        "examples/uno-q-heterogeneous/src/bin/uno_q_hardware_proof.rs",
+        hardware_cli,
+        &[
+            "--prompt-shell",
+            "--voice-shell",
+            "--voice-cmd",
+            "UNO_Q_HUMAN_INPUT_MODE",
+            "UNO_Q_HUMAN_INPUT_VOICE_CMD",
+        ],
+    );
+
+    let old_prompt_file_const = ["DEFAULT_UNO_Q_LOCAL_LLM_", "USER_PROMPT_FILE"].concat();
+    let old_prompt_file_env = ["UNO_Q_LOCAL_LLM_", "USER_PROMPT_FILE"].concat();
+    let old_interactive_env = ["UNO_Q_LOCAL_LLM_", "INTERACTIVE"].concat();
+    let old_user_prompt_env = ["UNO_Q_LOCAL_LLM_", "USER_PROMPT"].concat();
+    let old_mood_classifier = ["local_llm_", "mood_key"].concat();
+    let old_mood_words_helper = ["local_llm_", "context_has_any"].concat();
+    let old_prompt_file_script = ["inject_llm_", "prompt.sh"].concat();
+    assert_absent(
+        "examples/uno-q-heterogeneous/src/lib.rs",
+        uno_q,
+        &[
+            old_prompt_file_const.as_str(),
+            old_prompt_file_env.as_str(),
+            old_interactive_env.as_str(),
+            old_user_prompt_env.as_str(),
+            old_mood_classifier.as_str(),
+            old_mood_words_helper.as_str(),
+            "std::sync::atomic",
+            "AtomicBool",
+            "AtomicU8",
+            "std::sync::Mutex<Face",
+            "ROLE_LOCAL_LLM, g::Role<ROLE_M33_LED_KERNEL>",
+            "ROLE_M33_LED_KERNEL, g::Role<ROLE_LOCAL_LLM>",
+        ],
+    );
+    assert_absent(
+        "examples/uno-q-heterogeneous/plan.md",
+        plan,
+        &[
+            "polls the HumanInput role",
+            old_prompt_file_env.as_str(),
+            old_interactive_env.as_str(),
+            old_user_prompt_env.as_str(),
+            old_prompt_file_script.as_str(),
+        ],
+    );
+    assert!(
+        !std::path::Path::new(&format!(
+            "examples/uno-q-heterogeneous/scripts/{old_prompt_file_script}"
+        ))
+        .exists(),
+        "file prompt injection helper must not remain in the baseline live demo"
     );
 }
 

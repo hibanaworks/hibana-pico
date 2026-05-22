@@ -1,8 +1,12 @@
 # UNO Q Heterogeneous Face Proof Plan
 
-This example proves a deliberately small three-role path:
+This example proves a deliberately small four-role path:
 
 ```text
+HumanInput CLI role on Linux
+  -> typed HumanInputText message
+  -> local LLM role on Linux
+  -> one shell command
 WASI P1 guest process on Linux
   -> ChoreoFS /llm/stdout write
   -> local LLM sees the WASI shell terminal
@@ -66,6 +70,11 @@ remains the authority for which effects can happen.
   path is only a reference that confirms llama.cpp runs on Uno Q Linux, not a
   dependency or fork. Scripted output is allowed only when explicitly requested
   with `UNO_Q_LOCAL_LLM_SCRIPTED=1` for host-only smoke checks.
+- `ROLE_HUMAN_INPUT = 3`: HumanInput role. On Linux it is started by the CLI and
+  can run either a prompt shell or a voice shell. It waits for the
+  choreography-visible input request, then sends the input text as a typed
+  `HumanInputText` message to the local LLM role; it does not classify,
+  rewrite, or convert the text into face commands.
 
 No iOS ingress, Challenger network role, or detached unused sidecar choreography
 is part of this proof.
@@ -75,30 +84,42 @@ is part of this proof.
 1. WASI opens `/llm/stdin` for read.
 2. WASI opens `/llm/stdout` for write.
 3. WASI opens `/face/frame` for write.
-4. WASI enters the projected import route loop.
-5. Continue arm:
-   - WASI writes the shell prompt to `/llm/stdout`.
+4. WASI writes the initial shell prompt to `/llm/stdout`.
+5. WASI enters the projected import route loop.
+6. Continue arm:
+   - WASI asks the local LLM for the next terminal input line.
+   - The local LLM sends a typed `HumanInputReq` to the HumanInput role.
+   - The HumanInput role sends the latest input text to the local LLM role as
+     one typed `HumanInputText` message.
+   - The local LLM acknowledges that input turn with one typed
+     `HumanInputAck` message.
    - The local LLM reads the terminal transcript and replies on `/llm/stdin`
      with `ls` or `find ChoreoFS -type f`.
    - WASI writes the ChoreoFS catalog to `/llm/stdout`.
+   - WASI asks the local LLM for the next terminal input line.
+   - The local LLM sends another typed `HumanInputReq` for this input turn.
+   - The HumanInput role sends the latest input text to the local LLM role as
+     one typed `HumanInputText` message.
+   - The local LLM acknowledges that input turn with one typed
+     `HumanInputAck` message, then answers the WASI read.
    - The local LLM replies with `echo <code> > /face/frame`.
    - WASI parses that shell command into `FaceFrame` bytes and writes them to
      `/face/frame`.
    - M33 decodes the write as `FaceFrame`, validates fd/object/ordinal, and
      updates the LED matrix.
-   - WASI immediately returns to the next shell prompt.
-6. Break arm:
+   - WASI writes the next shell prompt to `/llm/stdout`.
+7. Break arm:
    - Bounded proof guests send `proc_exit(0)`.
-   - The projected Endpoint admits that exit as terminal messages to both the
-     local LLM role and the M33 role, so neither passive role guesses that the
-     loop ended.
+   - The projected Endpoint admits that exit as terminal messages to the local
+     LLM role, the M33 role, and the HumanInput role, so no passive role guesses
+     that the loop ended.
    - The real face demo keeps selecting the continue arm forever.
 
 `FaceFrame` remains one typed message payload. Individual face patterns are
 payload values, not separate message types and not route authority. LLM text is
 not route authority either; it is terminal input consumed by the WASI shell.
 M33 and the local LLM never exchange typed messages directly; WASI is the
-isolation boundary.
+isolation boundary. HumanInput also never talks to M33.
 
 ## Cadence
 
@@ -161,8 +182,10 @@ These variables override the default placement:
 - `UNO_Q_LOCAL_LLM_CMD="custom command that prints face labels"`
 - `UNO_Q_LOCAL_LLM_LD_LIBRARY_PATH=/path/to/libs`
 - `UNO_Q_LOCAL_LLM_WORK_DIR=/path/to/bin`
-- `UNO_Q_LOCAL_LLM_USER_PROMPT="human request text"`
-- `UNO_Q_LOCAL_LLM_USER_PROMPT_FILE=/path/to/user-prompt.txt`
+- `UNO_Q_HUMAN_INPUT_MODE=prompt` to run the prompt shell input role
+- `UNO_Q_HUMAN_INPUT_MODE=voice` to run the voice shell input role
+- `UNO_Q_HUMAN_INPUT_TEXT="initial human request text"`
+- `UNO_Q_HUMAN_INPUT_VOICE_CMD="command that prints recognized utterances"`
 - `UNO_Q_LOCAL_LLM_SELF_MOOD=1`
 - `UNO_Q_LOCAL_LLM_SELF_MOOD_PROMPT="assistant mood instruction"`
 - `UNO_Q_LOCAL_LLM_SCRIPTED=1` for host-only scripted smoke checks
@@ -188,22 +211,32 @@ projected choreography. The shell transcript is included in the completion
 prompt sent to the persistent server. `UNO_Q_LOCAL_LLM_ARGS` can replace the
 fallback completion flags for manual experiments.
 
-A human can inject a live request at any time by setting
-`UNO_Q_LOCAL_LLM_USER_PROMPT` or by writing text to
-`/data/local/tmp/uno-q-local-llm/user-prompt.txt`; the helper
-`scripts/inject_llm_prompt.sh` writes that file over adb. The local LLM boundary
-re-reads this prompt source on every face-command turn, so an external input
-producer can update it while the infinite hardware loop is already running. The
-expected production input path is a voice recognizer that continually overwrites
-the prompt file with the latest human utterance. No model restart, proof restart,
-or choreography change is required for the next turn to observe the new human
-input.
+The hardware CLI can start the live input role directly:
+
+```text
+uno-q-hardware-proof --prompt-shell
+uno-q-hardware-proof --voice-shell --voice-cmd "speech-to-text-command"
+```
+
+The prompt shell reads terminal lines. The voice shell starts
+`UNO_Q_HUMAN_INPUT_VOICE_CMD` and reads recognized utterances from that process'
+stdout. In both modes the input role strips only the terminal line delimiter as
+transport framing, validates the fixed-capacity UTF-8 typed payload, and sends
+the remaining text unchanged to the local LLM role. The input role does not
+classify, rewrite, or convert the text into face commands. The local LLM receives
+the exact text as prompt context and remains the only component that chooses the
+next shell command.
+
+The old prompt-file injection path is not
+part of the demo: human input is a live terminal interaction, not a file that a
+sidecar rewrites. No model restart, proof restart, or choreography change is
+required for the next turn to observe the new human input.
 
 Human text is prompt context for the LLM only. It never becomes route authority,
-never bypasses WASI, and never writes `/face/frame` directly. When a human
-request is present, the prompt gives face-command guidance, but the boundary
-still forwards the LLM's terminal input as text. The shell parser and the
-projected ChoreoFS write are the enforcement points.
+never bypasses WASI, and never writes `/face/frame` directly. The input role does
+not classify, rewrite, or convert the text; the local LLM decides what shell
+command to emit, and the shell parser plus projected ChoreoFS write are the
+enforcement points.
 
 The face-choice LLM prompt uses few-shot terminal examples rather than a hard
 grammar: happy maps to `echo h > /face/frame`, frustrated maps to
@@ -228,9 +261,9 @@ changes the face only when the projected Endpoint admits and decodes a
 
 ## Success Criteria
 
-- `host-loopback-proof` passes with roles 0, 1, and 2.
+- `host-loopback-proof` passes with roles 0, 1, 2, and 3.
 - `uno-q-hardware-proof` passes with M33 as the physical peer and Linux running
-  the WASI role plus the local LLM role.
+  the WASI role plus the local LLM role plus the HumanInput role.
 - The bounded proof makes `HIBANA_M33_FACE_UPDATES` reach one cycle.
 - The infinite face demo keeps increasing `HIBANA_M33_FACE_UPDATES` after the
   first cycle.
