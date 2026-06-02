@@ -1,0 +1,21 @@
+[package]
+name = "rpw2-wasip1-guest"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+hibana-wasip1-guest = { path = "../../../../guest/hibana-wasip1-guest" }
+
+[[bin]]
+name = "rpw2-sensor-panel-guest"
+path = "src/bin/rpw2-sensor-panel-guest.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "debuginfo"

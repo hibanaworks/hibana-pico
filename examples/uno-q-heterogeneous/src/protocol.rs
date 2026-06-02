@@ -68,12 +68,22 @@ impl WireEncode for FaceFrame {
 impl WirePayload for FaceFrame {
     type Decoded<'a> = Self;
 
-    fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
+    fn validate_payload(input: Payload<'_>) -> Result<(), CodecError> {
         let bytes = input.as_bytes();
         if bytes.len() != 2 {
             return Err(CodecError::Invalid("face frame carries two bytes"));
         }
-        Self::new(bytes[0], bytes[1]).map_err(|_| CodecError::Invalid("invalid face frame"))
+        Self::new(bytes[0], bytes[1])
+            .map(|_| ())
+            .map_err(|_| CodecError::Invalid("invalid face frame"))
+    }
+
+    fn decode_validated_payload<'a>(input: Payload<'a>) -> Self::Decoded<'a> {
+        let bytes = input.as_bytes();
+        match Self::new(bytes[0], bytes[1]) {
+            Ok(value) => value,
+            Err(_) => panic!("validated face frame must decode"),
+        }
     }
 
     fn synthetic_payload<'a>(scratch: &'a mut [u8]) -> Result<Payload<'a>, CodecError> {
@@ -155,7 +165,7 @@ impl WireEncode for HumanInputText {
 impl WirePayload for HumanInputText {
     type Decoded<'a> = Self;
 
-    fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
+    fn validate_payload(input: Payload<'_>) -> Result<(), CodecError> {
         let bytes = input.as_bytes();
         let Some((&len, rest)) = bytes.split_first() else {
             return Err(CodecError::Invalid("human input text missing length"));
@@ -167,7 +177,18 @@ impl WirePayload for HumanInputText {
         if rest.len() != len {
             return Err(CodecError::Invalid("human input text length mismatch"));
         }
-        Self::from_bytes(rest).map_err(|_| CodecError::Invalid("invalid human input text"))
+        Self::from_bytes(rest)
+            .map(|_| ())
+            .map_err(|_| CodecError::Invalid("invalid human input text"))
+    }
+
+    fn decode_validated_payload<'a>(input: Payload<'a>) -> Self::Decoded<'a> {
+        let bytes = input.as_bytes();
+        let len = usize::from(bytes[0]);
+        match Self::from_bytes(&bytes[1..1 + len]) {
+            Ok(value) => value,
+            Err(_) => panic!("validated human input text must decode"),
+        }
     }
 
     fn synthetic_payload<'a>(scratch: &'a mut [u8]) -> Result<Payload<'a>, CodecError> {

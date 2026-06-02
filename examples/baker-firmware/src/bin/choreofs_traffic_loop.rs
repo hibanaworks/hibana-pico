@@ -133,46 +133,32 @@ impl appkit::Capsule for ChoreoFsTrafficLoop {
     type Local = ChoreoFsTrafficLoopLocal;
     type Report = core::convert::Infallible;
 
-    fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
+    fn choreography() -> impl hibana::integration::program::Projectable {
         let path_open = || {
             g::seq(
-                g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>, 1>(),
-                g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>, 1>(),
+                g::send::<1, 0, g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>, 1>(),
+                g::send::<0, 1, g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>, 1>(),
             )
         };
         let open_leds = || g::seq(path_open(), g::seq(path_open(), path_open()));
         let write_wait = || {
             g::seq(
-                g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 1>(),
+                g::send::<1, 0, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 1>(),
                 g::seq(
-                    g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 1>(
-                    ),
+                    g::send::<0, 1, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 1>(),
                     g::seq(
-                        g::send::<
-                            g::Role<1>,
-                            g::Role<0>,
-                            g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>,
-                            1,
-                        >(),
-                        g::send::<
-                            g::Role<0>,
-                            g::Role<1>,
-                            g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>,
-                            1,
-                        >(),
+                        g::send::<1, 0, g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>, 1>(),
+                        g::send::<0, 1, g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>, 1>(),
                     ),
                 ),
             )
         };
         let admitted_cycle = || {
             g::route(
+                g::seq(g::send::<1, 1, WasiImportLoopContinue, 1>(), write_wait()),
                 g::seq(
-                    g::send::<g::Role<1>, g::Role<1>, WasiImportLoopContinue, 1>(),
-                    write_wait(),
-                ),
-                g::seq(
-                    g::send::<g::Role<1>, g::Role<1>, WasiImportLoopBreak, 1>(),
-                    g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 1>(),
+                    g::send::<1, 1, WasiImportLoopBreak, 1>(),
+                    g::send::<1, 0, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 1>(),
                 ),
             )
         };

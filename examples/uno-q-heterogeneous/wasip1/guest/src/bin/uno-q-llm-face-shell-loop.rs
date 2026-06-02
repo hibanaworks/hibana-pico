@@ -3,7 +3,7 @@ use hibana_wasip1_guest::{Result, choreofs};
 const PREOPEN_FD: u32 = 9;
 const SHELL_PROMPT: &[u8] = b"$ ";
 const SHELL_CATALOG: &[u8] = b"w /face/frame FaceFrame\n$ ";
-const SHELL_INVALID_COMMAND: &[u8] = b"err\n$ ";
+const SHELL_INVALID_COMMAND: &[u8] = b"err /face/frame h,a,s,u,mw\n$ ";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ShellCommand {
@@ -148,7 +148,7 @@ fn decode_face_code(face: &[u8]) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{ShellCommand, decode_echo_face_command, decode_face_code};
+    use crate::{SHELL_INVALID_COMMAND, ShellCommand, decode_echo_face_command, decode_face_code};
 
     #[test]
     fn catalog_discovery_accepts_ls_and_shell_find() {
@@ -187,5 +187,29 @@ mod tests {
             .map(ShellCommand::Face)
             .unwrap_or(ShellCommand::Invalid);
         assert_eq!(command, ShellCommand::Invalid);
+    }
+
+    #[test]
+    fn invalid_face_codes_are_shell_errors_not_face_frames() {
+        for command in [
+            b"echo c > /face/frame" as &[u8],
+            b"echo comfy > /face/frame",
+            b"echo cold_dark > /face/frame",
+        ] {
+            let command = decode_echo_face_command(command)
+                .map(ShellCommand::Face)
+                .unwrap_or(ShellCommand::Invalid);
+            assert_eq!(command, ShellCommand::Invalid);
+        }
+    }
+
+    #[test]
+    fn invalid_response_returns_available_commands_to_llm() {
+        let response = core::str::from_utf8(SHELL_INVALID_COMMAND).unwrap();
+        assert!(response.contains("err"));
+        assert!(response.contains("/face/frame"));
+        assert!(response.contains("h,a,s,u,mw"));
+        assert!(response.ends_with("$ "));
+        assert!(SHELL_INVALID_COMMAND.len() <= 30);
     }
 }

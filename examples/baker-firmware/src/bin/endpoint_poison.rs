@@ -14,8 +14,8 @@ impl appkit::Capsule for EndpointPoison {
     type Local = EndpointPoisonLocal;
     type Report = core::convert::Infallible;
 
-    fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
-        g::send::<g::Role<1>, g::Role<0>, EngineAbortBeginControl, 0>()
+    fn choreography() -> impl hibana::integration::program::Projectable {
+        g::send::<1, 0, EngineAbortBeginControl, 0>()
     }
 }
 

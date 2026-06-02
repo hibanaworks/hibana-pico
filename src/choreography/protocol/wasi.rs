@@ -4,99 +4,9 @@ pub type BudgetRunMsg = Msg<LABEL_ENGINE_RUN, BudgetRun>;
 pub type BudgetExpiredMsg = Msg<LABEL_ENGINE_BUDGET_EXPIRED, BudgetExpired>;
 pub type BudgetSuspendMsg = Msg<LABEL_ENGINE_SUSPEND, BudgetSuspend>;
 pub type BudgetRestartMsg = Msg<LABEL_ENGINE_RESTART, BudgetRestart>;
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MemReadLeaseKind;
 
-impl ResourceKind for MemReadLeaseKind {
-    type Handle = MemoryLeaseWireHandle;
-    const TAG: u8 = 0x31;
-    const NAME: &'static str = "MemReadLease";
-
-    fn encode_handle(handle: &Self::Handle) -> [u8; CAP_HANDLE_LEN] {
-        encode_memory_lease_handle(*handle)
-    }
-
-    fn decode_handle(data: [u8; CAP_HANDLE_LEN]) -> Result<Self::Handle, CapError> {
-        decode_memory_lease_handle(data)
-    }
-
-    fn zeroize(handle: &mut Self::Handle) {
-        *handle = (0, 0);
-    }
-}
-
-impl ControlResourceKind for MemReadLeaseKind {
-    const SCOPE: ControlScopeKind = ControlScopeKind::Policy;
-    const TAP_ID: u16 = 0x04d0;
-    const SHOT: CapShot = CapShot::One;
-    const PATH: ControlPath = ControlPath::Wire;
-    const OP: ControlOp = ControlOp::Fence;
-    const AUTO_MINT_WIRE: bool = true;
-
-    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
-        (
-            MemRights::Read.tag(),
-            ((sid.raw() as u64) << 32) | ((lane.raw() as u64) << 24) | scope.raw(),
-        )
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MemWriteLeaseKind;
-
-impl ResourceKind for MemWriteLeaseKind {
-    type Handle = MemoryLeaseWireHandle;
-    const TAG: u8 = 0x32;
-    const NAME: &'static str = "MemWriteLease";
-
-    fn encode_handle(handle: &Self::Handle) -> [u8; CAP_HANDLE_LEN] {
-        encode_memory_lease_handle(*handle)
-    }
-
-    fn decode_handle(data: [u8; CAP_HANDLE_LEN]) -> Result<Self::Handle, CapError> {
-        decode_memory_lease_handle(data)
-    }
-
-    fn zeroize(handle: &mut Self::Handle) {
-        *handle = (0, 0);
-    }
-}
-
-impl ControlResourceKind for MemWriteLeaseKind {
-    const SCOPE: ControlScopeKind = ControlScopeKind::Policy;
-    const TAP_ID: u16 = 0x04d1;
-    const SHOT: CapShot = CapShot::One;
-    const PATH: ControlPath = ControlPath::Wire;
-    const OP: ControlOp = ControlOp::Fence;
-    const AUTO_MINT_WIRE: bool = true;
-
-    fn mint_handle(sid: SessionId, lane: Lane, scope: ScopeId) -> <Self as ResourceKind>::Handle {
-        (
-            MemRights::Write.tag(),
-            ((sid.raw() as u64) << 32) | ((lane.raw() as u64) << 24) | scope.raw(),
-        )
-    }
-}
-
-pub type MemReadGrantControl =
-    Msg<LABEL_MEM_GRANT_READ_CONTROL, GenericCapToken<MemReadLeaseKind>, MemReadLeaseKind>;
-pub type MemWriteGrantControl =
-    Msg<LABEL_MEM_GRANT_WRITE_CONTROL, GenericCapToken<MemWriteLeaseKind>, MemWriteLeaseKind>;
-
-fn encode_memory_lease_handle(handle: MemoryLeaseWireHandle) -> [u8; CAP_HANDLE_LEN] {
-    let mut buf = [0u8; CAP_HANDLE_LEN];
-    buf[0] = handle.0;
-    buf[1..9].copy_from_slice(&handle.1.to_le_bytes());
-    buf
-}
-
-fn decode_memory_lease_handle(
-    data: [u8; CAP_HANDLE_LEN],
-) -> Result<MemoryLeaseWireHandle, CapError> {
-    let mut lease_bytes = [0u8; 8];
-    lease_bytes.copy_from_slice(&data[1..9]);
-    Ok((data[0], u64::from_le_bytes(lease_bytes)))
-}
+pub type MemReadGrantControl = Msg<LABEL_MEM_GRANT_READ_CONTROL, ()>;
+pub type MemWriteGrantControl = Msg<LABEL_MEM_GRANT_WRITE_CONTROL, ()>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemRights {
@@ -164,6 +74,8 @@ impl WireEncode for MemBorrow {
 
 impl WirePayload for MemBorrow {
     type Decoded<'a> = Self;
+
+    wire_payload_via_decode!();
 
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
@@ -244,6 +156,8 @@ impl WireEncode for MemGrant {
 impl WirePayload for MemGrant {
     type Decoded<'a> = Self;
 
+    wire_payload_via_decode!();
+
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
         if bytes.len() != 11 {
@@ -295,6 +209,8 @@ impl WireEncode for MemRelease {
 impl WirePayload for MemRelease {
     type Decoded<'a> = Self;
 
+    wire_payload_via_decode!();
+
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
         if bytes.len() != 1 {
@@ -341,6 +257,8 @@ impl WireEncode for MemCommit {
 
 impl WirePayload for MemCommit {
     type Decoded<'a> = Self;
+
+    wire_payload_via_decode!();
 
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
@@ -420,6 +338,8 @@ impl WireEncode for MemFence {
 
 impl WirePayload for MemFence {
     type Decoded<'a> = Self;
+
+    wire_payload_via_decode!();
 
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
@@ -505,6 +425,8 @@ impl WireEncode for BudgetRun {
 impl WirePayload for BudgetRun {
     type Decoded<'a> = Self;
 
+    wire_payload_via_decode!();
+
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         Self::decode(input.as_bytes())
     }
@@ -557,6 +479,8 @@ impl WireEncode for BudgetExpired {
 
 impl WirePayload for BudgetExpired {
     type Decoded<'a> = Self;
+
+    wire_payload_via_decode!();
 
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         Self::decode(input.as_bytes())
@@ -825,6 +749,8 @@ impl WireEncode for EngineReq {
 
 impl WirePayload for EngineReq {
     type Decoded<'a> = Self;
+
+    wire_payload_via_decode!();
 
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
@@ -1117,6 +1043,8 @@ impl WireEncode for EngineRet {
 
 impl WirePayload for EngineRet {
     type Decoded<'a> = Self;
+
+    wire_payload_via_decode!();
 
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
@@ -1556,6 +1484,8 @@ impl WireEncode for FdError {
 
 impl WirePayload for FdError {
     type Decoded<'a> = Self;
+
+    wire_payload_via_decode!();
 
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();

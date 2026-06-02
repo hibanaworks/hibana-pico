@@ -32,14 +32,14 @@ impl appkit::Capsule for PreviewProbe {
     type Local = PreviewProbeLocal;
     type Report = core::convert::Infallible;
 
-    fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
+    fn choreography() -> impl hibana::integration::program::Projectable {
         g::seq(
-            g::send::<g::Role<1>, g::Role<0>, EngineAbortBeginControl, 0>(),
+            g::send::<1, 0, EngineAbortBeginControl, 0>(),
             g::seq(
-                g::send::<g::Role<1>, g::Role<0>, EngineAbortMsg, 0>(),
+                g::send::<1, 0, EngineAbortMsg, 0>(),
                 g::seq(
-                    g::send::<g::Role<0>, g::Role<1>, EngineAbortFenceControl, 0>(),
-                    g::send::<g::Role<1>, g::Role<0>, EngineAbortAckControl, 0>(),
+                    g::send::<0, 1, EngineAbortFenceControl, 0>(),
+                    g::send::<1, 0, EngineAbortAckControl, 0>(),
                 ),
             ),
         )
@@ -67,7 +67,7 @@ impl appkit::Localside<PreviewProbe> for PreviewProbeLocal {
                 core::mem::drop(preview);
 
                 let begin = ctx.endpoint().flow::<EngineAbortBeginControl>()?;
-                begin.send(()).await?;
+                begin.send(&()).await?;
 
                 let abort = EngineAbort::new(EngineAbortReason::FuelExhausted, 1);
                 let abort_flow = ctx.endpoint().flow::<EngineAbortMsg>()?;
@@ -76,7 +76,7 @@ impl appkit::Localside<PreviewProbe> for PreviewProbeLocal {
                 ctx.endpoint().recv::<EngineAbortFenceControl>().await?;
 
                 let ack = ctx.endpoint().flow::<EngineAbortAckControl>()?;
-                ack.send(()).await?;
+                ack.send(&()).await?;
 
                 baker_firmware::mark_runtime_ready();
                 return ctx.pending().await;
@@ -100,7 +100,7 @@ impl appkit::Localside<PreviewProbe> for PreviewProbeLocal {
                 baker_firmware::mark_safe_state();
 
                 let fence = ctx.endpoint().flow::<EngineAbortFenceControl>()?;
-                fence.send(()).await?;
+                fence.send(&()).await?;
 
                 ctx.endpoint().recv::<EngineAbortAckControl>().await?;
 

@@ -1,17 +1,22 @@
 use hibana::{
     g::Msg,
     integration::{
-        cap::{
-            CapShot, ControlResourceKind, GenericCapToken, ResourceKind,
-            advanced::{
-                CAP_HANDLE_LEN, CapError, ControlOp, ControlPath, ControlScopeKind, LoopBreakKind,
-                LoopContinueKind, RouteDecisionKind, ScopeId,
-            },
-        },
-        ids::{Lane, SessionId},
+        cap::control::{LoopBreakKind, LoopContinueKind, RouteDecisionKind},
         wire::{CodecError, Payload, WireEncode, WirePayload},
     },
 };
+
+macro_rules! wire_payload_via_decode {
+    () => {
+        fn validate_payload(input: Payload<'_>) -> Result<(), CodecError> {
+            Self::decode_payload(input).map(|_| ())
+        }
+
+        fn decode_validated_payload<'a>(input: Payload<'a>) -> Self::Decoded<'a> {
+            Self::decode_payload(input).expect("validated payload")
+        }
+    };
+}
 
 mod labels;
 pub use labels::*;
@@ -24,13 +29,9 @@ pub use management::*;
 mod wasi;
 pub use wasi::*;
 
-pub type WasiImportLoopContinue = Msg<
-    { LABEL_WASI_IMPORT_LOOP_CONTINUE_CONTROL },
-    GenericCapToken<LoopContinueKind>,
-    LoopContinueKind,
->;
-pub type WasiImportLoopBreak =
-    Msg<{ LABEL_WASI_IMPORT_LOOP_BREAK_CONTROL }, GenericCapToken<LoopBreakKind>, LoopBreakKind>;
+pub type WasiImportLoopContinue =
+    Msg<{ LABEL_WASI_IMPORT_LOOP_CONTINUE_CONTROL }, (), LoopContinueKind>;
+pub type WasiImportLoopBreak = Msg<{ LABEL_WASI_IMPORT_LOOP_BREAK_CONTROL }, (), LoopBreakKind>;
 #[cfg(test)]
 mod tests {
     use super::{
@@ -44,14 +45,7 @@ mod tests {
         PathOpened, PollOneoff, PollReady, ProcExitStatus, RandomDone, RandomGet, RandomSeed,
         StderrChunk, StdinChunk, StdinRequest, StdoutChunk, Wasip1ExitStatus,
     };
-    use hibana::integration::{
-        cap::{
-            CapShot, ControlResourceKind, ResourceKind,
-            advanced::{ControlOp, ControlPath, ControlScopeKind, ScopeId},
-        },
-        ids::{Lane, SessionId},
-        wire::{CodecError, Payload, WireEncode, WirePayload},
-    };
+    use hibana::integration::wire::{CodecError, Payload, WireEncode, WirePayload};
 
     fn encode<T: WireEncode>(value: &T, out: &mut [u8]) -> usize {
         value.encode_into(out).expect("encode payload")
@@ -110,179 +104,6 @@ mod tests {
     }
 
     #[test]
-    fn route_control_arm_ids_are_distinct_and_scope_preserving() {
-        let scope = ScopeId::route(42);
-        let sid = SessionId::new(7);
-        let lane = Lane::new(17);
-
-        let remote_sensor =
-            <super::RemoteSensorRouteKind as ControlResourceKind>::mint_handle(sid, lane, scope);
-        let remote_actuator =
-            <super::RemoteActuatorRouteKind as ControlResourceKind>::mint_handle(sid, lane, scope);
-        let remote_management =
-            <super::RemoteManagementRouteKind as ControlResourceKind>::mint_handle(
-                sid, lane, scope,
-            );
-        let remote_telemetry =
-            <super::RemoteTelemetryRouteKind as ControlResourceKind>::mint_handle(sid, lane, scope);
-        let remote_reject =
-            <super::RemoteRejectRouteKind as ControlResourceKind>::mint_handle(sid, lane, scope);
-
-        assert_eq!(remote_sensor, (0, scope.raw()));
-        assert_eq!(remote_actuator, (1, scope.raw()));
-        assert_eq!(remote_management, (2, scope.raw()));
-        assert_eq!(remote_telemetry, (3, scope.raw()));
-        assert_eq!(remote_reject, (4, scope.raw()));
-
-        let network_datagram_send =
-            <super::NetworkDatagramSendRouteKind as ControlResourceKind>::mint_handle(
-                sid, lane, scope,
-            );
-        let network_datagram_recv =
-            <super::NetworkDatagramRecvRouteKind as ControlResourceKind>::mint_handle(
-                sid, lane, scope,
-            );
-        let network_stream_write =
-            <super::NetworkStreamWriteRouteKind as ControlResourceKind>::mint_handle(
-                sid, lane, scope,
-            );
-        let network_stream_read =
-            <super::NetworkStreamReadRouteKind as ControlResourceKind>::mint_handle(
-                sid, lane, scope,
-            );
-        let network_reject =
-            <super::NetworkRejectRouteKind as ControlResourceKind>::mint_handle(sid, lane, scope);
-        let network_accept =
-            <super::NetworkAcceptRouteKind as ControlResourceKind>::mint_handle(sid, lane, scope);
-
-        assert_eq!(network_datagram_send, (0, scope.raw()));
-        assert_eq!(network_datagram_recv, (1, scope.raw()));
-        assert_eq!(network_stream_write, (2, scope.raw()));
-        assert_eq!(network_stream_read, (3, scope.raw()));
-        assert_eq!(network_reject, (4, scope.raw()));
-        assert_eq!(network_accept, (5, scope.raw()));
-    }
-
-    #[test]
-    fn engine_abort_control_uses_hibana_abort_fence_ack_ops() {
-        let scope = ScopeId::generic(9);
-        let sid = SessionId::new(11);
-        let lane = Lane::new(1);
-
-        assert_eq!(
-            <super::EngineAbortBeginKind as ControlResourceKind>::SCOPE,
-            ControlScopeKind::Abort
-        );
-        assert_eq!(
-            <super::EngineAbortBeginKind as ControlResourceKind>::SHOT,
-            CapShot::One
-        );
-        assert_eq!(
-            <super::EngineAbortBeginKind as ControlResourceKind>::PATH,
-            ControlPath::Wire
-        );
-        assert_eq!(
-            <super::EngineAbortBeginKind as ControlResourceKind>::OP,
-            ControlOp::AbortBegin
-        );
-        assert_eq!(
-            <super::EngineAbortFenceKind as ControlResourceKind>::OP,
-            ControlOp::Fence
-        );
-        assert_eq!(
-            <super::EngineAbortAckKind as ControlResourceKind>::OP,
-            ControlOp::AbortAck
-        );
-
-        assert_eq!(
-            <super::EngineAbortBeginKind as ControlResourceKind>::mint_handle(sid, lane, scope),
-            (sid.raw(), lane.raw() as u16)
-        );
-        assert_eq!(
-            <super::EngineAbortFenceKind as ControlResourceKind>::mint_handle(sid, lane, scope),
-            (sid.raw(), lane.raw() as u16)
-        );
-        assert_eq!(
-            <super::EngineAbortAckKind as ControlResourceKind>::mint_handle(sid, lane, scope),
-            (sid.raw(), lane.raw() as u16)
-        );
-    }
-
-    #[test]
-    fn topology_transaction_and_state_controls_use_hibana_control_ops() {
-        let scope = ScopeId::generic(21);
-        let sid = SessionId::new(22);
-        let lane = Lane::new(1);
-
-        assert_eq!(
-            <super::TopologyBeginKind as ControlResourceKind>::SCOPE,
-            ControlScopeKind::Topology
-        );
-        assert_eq!(
-            <super::TopologyBeginKind as ControlResourceKind>::OP,
-            ControlOp::TopologyBegin
-        );
-        assert_eq!(
-            <super::TopologyAckKind as ControlResourceKind>::OP,
-            ControlOp::TopologyAck
-        );
-        assert_eq!(
-            <super::TopologyCommitKind as ControlResourceKind>::OP,
-            ControlOp::TopologyCommit
-        );
-        assert_eq!(
-            <super::TopologyBeginKind as ControlResourceKind>::mint_handle(sid, lane, scope),
-            (0, scope.raw())
-        );
-        assert_eq!(
-            <super::TopologyAckKind as ControlResourceKind>::mint_handle(sid, lane, scope),
-            (1, scope.raw())
-        );
-        assert_eq!(
-            <super::TopologyCommitKind as ControlResourceKind>::mint_handle(sid, lane, scope),
-            (2, scope.raw())
-        );
-
-        assert_eq!(
-            <super::TxCommitKind as ControlResourceKind>::OP,
-            ControlOp::TxCommit
-        );
-        assert_eq!(
-            <super::TxAbortKind as ControlResourceKind>::OP,
-            ControlOp::TxAbort
-        );
-        assert_eq!(
-            <super::TxCommitKind as ControlResourceKind>::mint_handle(sid, lane, scope),
-            (0, scope.raw())
-        );
-        assert_eq!(
-            <super::TxAbortKind as ControlResourceKind>::mint_handle(sid, lane, scope),
-            (1, scope.raw())
-        );
-
-        assert_eq!(
-            <super::StateSnapshotKind as ControlResourceKind>::SCOPE,
-            ControlScopeKind::State
-        );
-        assert_eq!(
-            <super::StateSnapshotKind as ControlResourceKind>::OP,
-            ControlOp::StateSnapshot
-        );
-        assert_eq!(
-            <super::StateRestoreKind as ControlResourceKind>::OP,
-            ControlOp::StateRestore
-        );
-        assert_eq!(
-            <super::StateSnapshotKind as ControlResourceKind>::mint_handle(sid, lane, scope),
-            (sid.raw(), lane.raw() as u16)
-        );
-        assert_eq!(
-            <super::StateRestoreKind as ControlResourceKind>::mint_handle(sid, lane, scope),
-            (sid.raw(), lane.raw() as u16)
-        );
-    }
-
-    #[test]
     fn engine_abort_payload_round_trips() {
         let abort = EngineAbort::new(EngineAbortReason::FuelExhausted, 17);
         let mut buf = [0u8; 3];
@@ -292,15 +113,6 @@ mod tests {
         assert_eq!(decoded.reason(), EngineAbortReason::FuelExhausted);
         assert_eq!(decoded.code(), 17);
         assert_eq!(decoded, abort);
-    }
-
-    #[test]
-    fn abort_control_handles_round_trip() {
-        let handle = (0x1122_3344u32, 7u16);
-        let encoded = <super::EngineAbortAckKind as ResourceKind>::encode_handle(&handle);
-        let decoded = <super::EngineAbortAckKind as ResourceKind>::decode_handle(encoded)
-            .expect("decode abort control handle");
-        assert_eq!(decoded, handle);
     }
 
     #[test]

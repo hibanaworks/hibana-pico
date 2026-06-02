@@ -48,6 +48,8 @@ impl WireEncode for MgmtImageBegin {
 impl WirePayload for MgmtImageBegin {
     type Decoded<'a> = Self;
 
+    wire_payload_via_decode!();
+
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
         if bytes.len() != 9 {
@@ -130,6 +132,8 @@ impl WireEncode for MgmtImageChunk {
 impl WirePayload for MgmtImageChunk {
     type Decoded<'a> = Self;
 
+    wire_payload_via_decode!();
+
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
         if bytes.len() < 6 {
@@ -183,6 +187,8 @@ impl WireEncode for MgmtImageEnd {
 impl WirePayload for MgmtImageEnd {
     type Decoded<'a> = Self;
 
+    wire_payload_via_decode!();
+
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
         if bytes.len() != 5 {
@@ -232,6 +238,8 @@ impl WireEncode for MgmtImageActivate {
 impl WirePayload for MgmtImageActivate {
     type Decoded<'a> = Self;
 
+    wire_payload_via_decode!();
+
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
         if bytes.len() != 5 {
@@ -274,6 +282,8 @@ impl WireEncode for MgmtImageRollback {
 
 impl WirePayload for MgmtImageRollback {
     type Decoded<'a> = Self;
+
+    wire_payload_via_decode!();
 
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();
@@ -374,6 +384,8 @@ impl WireEncode for MgmtStatus {
 
 impl WirePayload for MgmtStatus {
     type Decoded<'a> = Self;
+
+    wire_payload_via_decode!();
 
     fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
         let bytes = input.as_bytes();

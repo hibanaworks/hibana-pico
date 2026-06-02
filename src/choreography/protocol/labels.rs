@@ -167,14 +167,6 @@ pub const STDIN_CHUNK_CAPACITY: usize = WASIP1_STREAM_CHUNK_CAPACITY;
 pub const MGMT_IMAGE_CHUNK_CAPACITY: usize = 32;
 pub const MEM_LEASE_NONE: u8 = 0;
 
-pub type RouteWireHandle = (u8, u64);
-pub type MemoryLeaseWireHandle = (u8, u64);
-pub type AbortControlWireHandle = (u32, u16);
-pub type LifecycleControlWireHandle = (u8, u64);
-pub type TopologyControlWireHandle = (u8, u64);
-pub type TransactionControlWireHandle = (u8, u64);
-pub type StateControlWireHandle = (u32, u16);
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BuiltInLabelUniverse;
 

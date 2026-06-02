@@ -184,8 +184,10 @@ These variables override the default placement:
 - `UNO_Q_LOCAL_LLM_WORK_DIR=/path/to/bin`
 - `UNO_Q_HUMAN_INPUT_MODE=prompt` to run the prompt shell input role
 - `UNO_Q_HUMAN_INPUT_MODE=voice` to run the voice shell input role
+- `UNO_Q_HUMAN_INPUT_MODE=sensor-udp` to receive Pico 2 W sensor payloads over UDP
 - `UNO_Q_HUMAN_INPUT_TEXT="initial human request text"`
 - `UNO_Q_HUMAN_INPUT_VOICE_CMD="command that prints recognized utterances"`
+- `UNO_Q_SENSOR_UDP_BIND=0.0.0.0:8787`
 - `UNO_Q_LOCAL_LLM_SELF_MOOD=1`
 - `UNO_Q_LOCAL_LLM_SELF_MOOD_PROMPT="assistant mood instruction"`
 - `UNO_Q_LOCAL_LLM_SCRIPTED=1` for host-only scripted smoke checks
@@ -216,16 +218,19 @@ The hardware CLI can start the live input role directly:
 ```text
 uno-q-hardware-proof --prompt-shell
 uno-q-hardware-proof --voice-shell --voice-cmd "speech-to-text-command"
+uno-q-hardware-proof --sensor-bind 0.0.0.0:8787
+uno-q-sensor-face-demo --bind 0.0.0.0:8787 --serial /dev/ttyHS1
 ```
 
 The prompt shell reads terminal lines. The voice shell starts
 `UNO_Q_HUMAN_INPUT_VOICE_CMD` and reads recognized utterances from that process'
-stdout. In both modes the input role strips only the terminal line delimiter as
-transport framing, validates the fixed-capacity UTF-8 typed payload, and sends
-the remaining text unchanged to the local LLM role. The input role does not
-classify, rewrite, or convert the text into face commands. The local LLM receives
-the exact text as prompt context and remains the only component that chooses the
-next shell command.
+stdout. The sensor UDP mode binds `UNO_Q_SENSOR_UDP_BIND`, accepts the Pico 2 W
+text payload (`T:22.58C H:60%` plus `Light:2500`) or a small JSON/key-value
+variant, and converts it into one bounded `HumanInputText` line such as
+`Sensor T=22.6C H=60% L=2500`. In all modes the input role only performs transport framing
+and fixed-capacity UTF-8 validation. It does not classify, rewrite, or convert
+the text into face commands. The local LLM receives the exact text as prompt
+context and remains the only component that chooses the next shell command.
 
 The old prompt-file injection path is not
 part of the demo: human input is a live terminal interaction, not a file that a
@@ -239,10 +244,10 @@ command to emit, and the shell parser plus projected ChoreoFS write are the
 enforcement points.
 
 The face-choice LLM prompt uses few-shot terminal examples rather than a hard
-grammar: happy maps to `echo h > /face/frame`, frustrated maps to
-`echo a > /face/frame`, sad maps to `echo s > /face/frame`, and surprised maps
-to `echo u > /face/frame`. This is only prompt guidance; the executable
-authority is still the WASI shell parser plus hibana choreography.
+grammar: happy/comfy maps to `echo h > /face/frame`, frustrated/hot/wet maps to
+`echo a > /face/frame`, sad/cold/dark maps to `echo s > /face/frame`, and
+surprised/bright maps to `echo u > /face/frame`. This is only prompt guidance;
+the executable authority is still the WASI shell parser plus hibana choreography.
 
 For experiments, `UNO_Q_LOCAL_LLM_SELF_MOOD=1` lets the local LLM choose from the
 same finite face command set based on an assistant-mood instruction instead of a

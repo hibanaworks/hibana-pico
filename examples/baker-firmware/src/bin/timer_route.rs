@@ -5,11 +5,11 @@ use baker_firmware::{BakerArtifacts, BakerCapsuleFacts, BakerPlacement};
 use hibana::{
     g,
     integration::{
-        cap::{GenericCapToken, ResourceKind},
-        policy::{ResolverContext, ResolverError, ResolverRef, RouteResolution},
+        cap::control::RouteDecisionKind,
+        policy::{DecisionArm, DecisionResolution, ResolverError, ResolverRef},
     },
 };
-use hibana_pico::{appkit, choreography::protocol::RouteControl};
+use hibana_pico::appkit;
 
 const LABEL_RESPONSE_READY: u8 = 120;
 const LABEL_TIMER_EXPIRED: u8 = 121;
@@ -19,12 +19,8 @@ const LABEL_TIMER_ROUTE_DONE: u8 = 135;
 const LABEL_TIMER_ROUTE_ACK: u8 = 137;
 const TIMER_ROUTE_POLICY: u16 = 56;
 
-type ResponseRouteKind = RouteControl<LABEL_RESPONSE_READY, 0>;
-type TimerExpiredRouteKind = RouteControl<LABEL_TIMER_EXPIRED, 1>;
-type ResponseRoute =
-    g::Msg<LABEL_RESPONSE_READY, GenericCapToken<ResponseRouteKind>, ResponseRouteKind>;
-type TimerExpiredRoute =
-    g::Msg<LABEL_TIMER_EXPIRED, GenericCapToken<TimerExpiredRouteKind>, TimerExpiredRouteKind>;
+type ResponseRoute = g::Msg<LABEL_RESPONSE_READY, (), RouteDecisionKind>;
+type TimerExpiredRoute = g::Msg<LABEL_TIMER_EXPIRED, (), RouteDecisionKind>;
 type ResponseReady = g::Msg<LABEL_RESPONSE_MESSAGE, u8>;
 type TimerExpired = g::Msg<LABEL_TIMER_EXPIRED_MESSAGE, u8>;
 type TimerRouteDone = g::Msg<LABEL_TIMER_ROUTE_DONE, u8>;
@@ -56,20 +52,8 @@ impl From<hibana::integration::policy::ResolverError> for TimerRouteError {
     }
 }
 
-fn timer_route_resolver(context: ResolverContext) -> Result<RouteResolution, ResolverError> {
-    let route_tag = <TimerExpiredRouteKind as ResourceKind>::TAG;
-    if context
-        .attr(hibana::integration::policy::signals::core::TAG)
-        .map(|value| value.as_u8())
-        != Some(route_tag)
-    {
-        return Err(ResolverError::reject());
-    }
-
-    if !baker_firmware::baker_timer_route_resolver_ready(100) {
-        return Ok(RouteResolution::Defer);
-    }
-    Ok(RouteResolution::Arm(1))
+fn timer_route_resolver() -> Result<DecisionResolution, ResolverError> {
+    Ok(DecisionResolution::Arm(DecisionArm::Right))
 }
 
 impl appkit::Capsule for TimerRoute {
@@ -78,23 +62,21 @@ impl appkit::Capsule for TimerRoute {
     type Local = TimerRouteLocal;
     type Report = core::convert::Infallible;
 
-    fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
+    fn choreography() -> impl hibana::integration::program::Projectable {
         g::seq(
             g::route(
                 g::seq(
-                    g::send::<g::Role<1>, g::Role<1>, ResponseRoute, 1>()
-                        .policy::<TIMER_ROUTE_POLICY>(),
-                    g::send::<g::Role<1>, g::Role<0>, ResponseReady, 1>(),
+                    g::send::<1, 1, ResponseRoute, 1>().policy::<TIMER_ROUTE_POLICY>(),
+                    g::send::<1, 0, ResponseReady, 1>(),
                 ),
                 g::seq(
-                    g::send::<g::Role<1>, g::Role<1>, TimerExpiredRoute, 1>()
-                        .policy::<TIMER_ROUTE_POLICY>(),
-                    g::send::<g::Role<1>, g::Role<0>, TimerExpired, 1>(),
+                    g::send::<1, 1, TimerExpiredRoute, 1>().policy::<TIMER_ROUTE_POLICY>(),
+                    g::send::<1, 0, TimerExpired, 1>(),
                 ),
             ),
             g::seq(
-                g::send::<g::Role<0>, g::Role<1>, TimerRouteDone, 1>(),
-                g::send::<g::Role<1>, g::Role<0>, TimerRouteAck, 1>(),
+                g::send::<0, 1, TimerRouteDone, 1>(),
+                g::send::<1, 0, TimerRouteAck, 1>(),
             ),
         )
     }
@@ -104,8 +86,8 @@ impl appkit::Capsule for TimerRoute {
         R: appkit::ResolverRegistry<'cfg, Self>,
     {
         baker_firmware::record_choreofs_engine_status(0x5452_0200);
-        registry.policy::<TIMER_ROUTE_POLICY, 0>(ResolverRef::route_fn(timer_route_resolver));
-        registry.policy::<TIMER_ROUTE_POLICY, 1>(ResolverRef::route_fn(timer_route_resolver));
+        registry.policy::<TIMER_ROUTE_POLICY, 0>(ResolverRef::decision_fn(timer_route_resolver));
+        registry.policy::<TIMER_ROUTE_POLICY, 1>(ResolverRef::decision_fn(timer_route_resolver));
         baker_firmware::record_choreofs_engine_status(0x5452_0201);
     }
 }
@@ -129,8 +111,12 @@ impl appkit::Localside<TimerRoute> for TimerRouteLocal {
             if ROLE == 1 {
                 baker_firmware::record_choreofs_engine_status(0x5452_010f);
 
+                while !baker_firmware::baker_timer_route_resolver_ready(100) {
+                    baker_firmware::baker_poll_delay(1);
+                }
+
                 let route = ctx.endpoint().flow::<TimerExpiredRoute>()?;
-                route.send(()).await?;
+                route.send(&()).await?;
                 baker_firmware::record_choreofs_engine_status(0x5452_0111);
 
                 let expired = ctx.endpoint().flow::<TimerExpired>()?;

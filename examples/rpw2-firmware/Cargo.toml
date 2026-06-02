@@ -1,0 +1,26 @@
+[package]
+name = "rpw2-firmware"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+hibana = { version = "0.8.0", default-features = false }
+hibana-pico = { path = "../.." }
+hibana-wifi = { path = "../../../hibana-wifi", default-features = false }
+
+[features]
+default = []
+wasm-engine-core = ["hibana-pico/wasm-engine-core"]
+wasip1-sys-args-env = ["hibana-pico/wasip1-sys-args-env"]
+wasip1-sys-fd-write = ["hibana-pico/wasip1-sys-fd-write"]
+wasip1-sys-fd-read = ["hibana-pico/wasip1-sys-fd-read"]
+wasip1-sys-path-open = ["hibana-pico/wasip1-sys-path-open"]
+wasip1-sys-poll-oneoff = ["hibana-pico/wasip1-sys-poll-oneoff"]
+wasip1-sys-proc-exit = ["hibana-pico/wasip1-sys-proc-exit"]
+embed-wasip1-artifacts = []
+embed-cyw43-artifacts = []
+
+[[bin]]
+name = "rpw2-sensor-panel"
+path = "src/bin/sensor_panel.rs"

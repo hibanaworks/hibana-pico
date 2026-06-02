@@ -32,22 +32,22 @@ impl appkit::Capsule for ManyReentry {
     type Local = ManyReentryLocal;
     type Report = core::convert::Infallible;
 
-    fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
+    fn choreography() -> impl hibana::integration::program::Projectable {
         g::seq(
-            g::send::<g::Role<1>, g::Role<0>, EngineAbortBeginControl, 0>(),
+            g::send::<1, 0, EngineAbortBeginControl, 0>(),
             g::seq(
-                g::send::<g::Role<1>, g::Role<0>, EngineAbortMsg, 0>(),
+                g::send::<1, 0, EngineAbortMsg, 0>(),
                 g::seq(
-                    g::send::<g::Role<0>, g::Role<1>, EngineAbortFenceControl, 0>(),
+                    g::send::<0, 1, EngineAbortFenceControl, 0>(),
                     g::seq(
-                        g::send::<g::Role<1>, g::Role<0>, EngineAbortAckControl, 0>(),
+                        g::send::<1, 0, EngineAbortAckControl, 0>(),
                         g::seq(
-                            g::send::<g::Role<1>, g::Role<0>, EngineAbortBeginControl, 1>(),
+                            g::send::<1, 0, EngineAbortBeginControl, 1>(),
                             g::seq(
-                                g::send::<g::Role<1>, g::Role<0>, EngineAbortMsg, 1>(),
+                                g::send::<1, 0, EngineAbortMsg, 1>(),
                                 g::seq(
-                                    g::send::<g::Role<0>, g::Role<1>, EngineAbortFenceControl, 1>(),
-                                    g::send::<g::Role<1>, g::Role<0>, EngineAbortAckControl, 1>(),
+                                    g::send::<0, 1, EngineAbortFenceControl, 1>(),
+                                    g::send::<1, 0, EngineAbortAckControl, 1>(),
                                 ),
                             ),
                         ),
@@ -76,7 +76,7 @@ impl appkit::Localside<ManyReentry> for ManyReentryLocal {
         async move {
             if ROLE == 1 {
                 let begin = ctx.endpoint().flow::<EngineAbortBeginControl>()?;
-                begin.send(()).await?;
+                begin.send(&()).await?;
 
                 let first_abort = EngineAbort::new(EngineAbortReason::FuelExhausted, 1);
                 let first_abort_flow = ctx.endpoint().flow::<EngineAbortMsg>()?;
@@ -85,10 +85,10 @@ impl appkit::Localside<ManyReentry> for ManyReentryLocal {
                 ctx.endpoint().recv::<EngineAbortFenceControl>().await?;
 
                 let first_ack = ctx.endpoint().flow::<EngineAbortAckControl>()?;
-                first_ack.send(()).await?;
+                first_ack.send(&()).await?;
 
                 let second_begin = ctx.endpoint().flow::<EngineAbortBeginControl>()?;
-                second_begin.send(()).await?;
+                second_begin.send(&()).await?;
 
                 let second_abort = EngineAbort::new(EngineAbortReason::FuelExhausted, 2);
                 let second_abort_flow = ctx.endpoint().flow::<EngineAbortMsg>()?;
@@ -97,7 +97,7 @@ impl appkit::Localside<ManyReentry> for ManyReentryLocal {
                 ctx.endpoint().recv::<EngineAbortFenceControl>().await?;
 
                 let second_ack = ctx.endpoint().flow::<EngineAbortAckControl>()?;
-                second_ack.send(()).await?;
+                second_ack.send(&()).await?;
 
                 baker_firmware::mark_runtime_ready();
                 return ctx.pending().await;
@@ -121,7 +121,7 @@ impl appkit::Localside<ManyReentry> for ManyReentryLocal {
                 baker_firmware::mark_safe_state();
 
                 let abort_fence = ctx.endpoint().flow::<EngineAbortFenceControl>()?;
-                abort_fence.send(()).await?;
+                abort_fence.send(&()).await?;
 
                 ctx.endpoint().recv::<EngineAbortAckControl>().await?;
 
@@ -135,7 +135,7 @@ impl appkit::Localside<ManyReentry> for ManyReentryLocal {
                 baker_firmware::mark_safe_state();
 
                 let second_abort_fence = ctx.endpoint().flow::<EngineAbortFenceControl>()?;
-                second_abort_fence.send(()).await?;
+                second_abort_fence.send(&()).await?;
 
                 ctx.endpoint().recv::<EngineAbortAckControl>().await?;
 

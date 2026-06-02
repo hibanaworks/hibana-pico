@@ -67,11 +67,9 @@ const UART_CARRIER_MAGIC: [u8; 4] = *b"HBU1";
 const UART_CARRIER_CHECK: u8 = 0xa7;
 const UART_CARRIER_HEADER_BYTES: usize = 13;
 const UART_CARRIER_FRAME_BYTES: usize = UART_CARRIER_HEADER_BYTES + PROOF_CARRIER_FRAME_BYTES + 1;
-#[cfg(any(test, target_os = "none"))]
-const UNO_Q_M33_HINT_DRAIN_TICKS: u32 = 7_000_000;
 const HARDWARE_PEER_ROLE_BITS: u128 =
     (1u128 << ROLE_WASI_LLM_CELL) | (1u128 << ROLE_LOCAL_LLM) | (1u128 << ROLE_HUMAN_INPUT);
-#[cfg(any(test, not(target_os = "none")))]
+#[cfg(test)]
 const UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS: u32 = 300_000;
 #[cfg(any(test, target_os = "none"))]
 const UNO_Q_M33_UART_OPERATIONAL_DEADLINE_TICKS: u32 = 1_000_000_000;
@@ -265,71 +263,37 @@ impl appkit::Capsule for UnoQCapsule {
     type Local = UnoQLocal;
     type Report = Infallible;
 
-    fn choreography() -> impl Projectable<Self::Universe> {
+    fn choreography() -> impl Projectable {
         let stdout_write = || {
             g::seq(
-                g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_LOCAL_LLM>, WasiFdWriteReqMsg, 0>(
-                ),
-                g::send::<g::Role<ROLE_LOCAL_LLM>, g::Role<ROLE_WASI_LLM_CELL>, WasiFdWriteRetMsg, 0>(
-                ),
+                g::send::<ROLE_WASI_LLM_CELL, ROLE_LOCAL_LLM, WasiFdWriteReqMsg, 0>(),
+                g::send::<ROLE_LOCAL_LLM, ROLE_WASI_LLM_CELL, WasiFdWriteRetMsg, 0>(),
             )
         };
         let human_input_turn = || {
             g::seq(
-                g::send::<g::Role<ROLE_LOCAL_LLM>, g::Role<ROLE_HUMAN_INPUT>, HumanInputReqMsg, 0>(
-                ),
+                g::send::<ROLE_LOCAL_LLM, ROLE_HUMAN_INPUT, HumanInputReqMsg, 0>(),
                 g::seq(
-                    g::send::<
-                        g::Role<ROLE_HUMAN_INPUT>,
-                        g::Role<ROLE_LOCAL_LLM>,
-                        HumanInputTextMsg,
-                        0,
-                    >(),
-                    g::send::<
-                        g::Role<ROLE_LOCAL_LLM>,
-                        g::Role<ROLE_HUMAN_INPUT>,
-                        HumanInputAckMsg,
-                        0,
-                    >(),
+                    g::send::<ROLE_HUMAN_INPUT, ROLE_LOCAL_LLM, HumanInputTextMsg, 0>(),
+                    g::send::<ROLE_LOCAL_LLM, ROLE_HUMAN_INPUT, HumanInputAckMsg, 0>(),
                 ),
             )
         };
         let stdin_read = || {
             g::seq(
-                g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_LOCAL_LLM>, WasiFdReadReqMsg, 0>(
-                ),
+                g::send::<ROLE_WASI_LLM_CELL, ROLE_LOCAL_LLM, WasiFdReadReqMsg, 0>(),
                 g::seq(
                     human_input_turn(),
-                    g::send::<
-                        g::Role<ROLE_LOCAL_LLM>,
-                        g::Role<ROLE_WASI_LLM_CELL>,
-                        WasiFdReadRetMsg,
-                        0,
-                    >(),
+                    g::send::<ROLE_LOCAL_LLM, ROLE_WASI_LLM_CELL, WasiFdReadRetMsg, 0>(),
                 ),
             )
         };
         let face_frame_commit = g::seq(
-            g::send::<
-                g::Role<ROLE_WASI_LLM_CELL>,
-                g::Role<ROLE_M33_LED_KERNEL>,
-                WasiFdWriteReqMsg,
-                0,
-            >(),
-            g::send::<
-                g::Role<ROLE_M33_LED_KERNEL>,
-                g::Role<ROLE_WASI_LLM_CELL>,
-                WasiFdWriteRetMsg,
-                0,
-            >(),
+            g::send::<ROLE_WASI_LLM_CELL, ROLE_M33_LED_KERNEL, WasiFdWriteReqMsg, 0>(),
+            g::send::<ROLE_M33_LED_KERNEL, ROLE_WASI_LLM_CELL, WasiFdWriteRetMsg, 0>(),
         );
         let frame_cycle = g::seq(
-            g::send::<
-                g::Role<ROLE_WASI_LLM_CELL>,
-                g::Role<ROLE_WASI_LLM_CELL>,
-                WasiImportLoopContinue,
-                0,
-            >(),
+            g::send::<ROLE_WASI_LLM_CELL, ROLE_WASI_LLM_CELL, WasiImportLoopContinue, 0>(),
             g::seq(
                 stdin_read(),
                 g::seq(
@@ -341,71 +305,31 @@ impl appkit::Capsule for UnoQCapsule {
         let face_frame_loop = g::route(
             frame_cycle,
             g::seq(
-                g::send::<
-                    g::Role<ROLE_WASI_LLM_CELL>,
-                    g::Role<ROLE_WASI_LLM_CELL>,
-                    WasiImportLoopBreak,
-                    0,
-                >(),
+                g::send::<ROLE_WASI_LLM_CELL, ROLE_WASI_LLM_CELL, WasiImportLoopBreak, 0>(),
                 g::seq(
-                    g::send::<
-                        g::Role<ROLE_WASI_LLM_CELL>,
-                        g::Role<ROLE_LOCAL_LLM>,
-                        WasiProcExitReqMsg,
-                        0,
-                    >(),
+                    g::send::<ROLE_WASI_LLM_CELL, ROLE_LOCAL_LLM, WasiProcExitReqMsg, 0>(),
                     g::seq(
-                        g::send::<
-                            g::Role<ROLE_WASI_LLM_CELL>,
-                            g::Role<ROLE_M33_LED_KERNEL>,
-                            WasiProcExitReqMsg,
-                            0,
-                        >(),
-                        g::send::<
-                            g::Role<ROLE_WASI_LLM_CELL>,
-                            g::Role<ROLE_HUMAN_INPUT>,
-                            WasiProcExitReqMsg,
-                            0,
-                        >(),
+                        g::send::<ROLE_WASI_LLM_CELL, ROLE_M33_LED_KERNEL, WasiProcExitReqMsg, 0>(),
+                        g::send::<ROLE_WASI_LLM_CELL, ROLE_HUMAN_INPUT, WasiProcExitReqMsg, 0>(),
                     ),
                 ),
             ),
         );
         g::seq(
-            g::send::<g::Role<ROLE_WASI_LLM_CELL>, g::Role<ROLE_LOCAL_LLM>, WasiPathOpenReqMsg, 0>(
-            ),
+            g::send::<ROLE_WASI_LLM_CELL, ROLE_LOCAL_LLM, WasiPathOpenReqMsg, 0>(),
             g::seq(
-                g::send::<
-                    g::Role<ROLE_LOCAL_LLM>,
-                    g::Role<ROLE_WASI_LLM_CELL>,
-                    WasiPathOpenRetMsg,
-                    0,
-                >(),
+                g::send::<ROLE_LOCAL_LLM, ROLE_WASI_LLM_CELL, WasiPathOpenRetMsg, 0>(),
                 g::seq(
-                    g::send::<
-                        g::Role<ROLE_WASI_LLM_CELL>,
-                        g::Role<ROLE_LOCAL_LLM>,
-                        WasiPathOpenReqMsg,
-                        0,
-                    >(),
+                    g::send::<ROLE_WASI_LLM_CELL, ROLE_LOCAL_LLM, WasiPathOpenReqMsg, 0>(),
                     g::seq(
-                        g::send::<
-                            g::Role<ROLE_LOCAL_LLM>,
-                            g::Role<ROLE_WASI_LLM_CELL>,
-                            WasiPathOpenRetMsg,
-                            0,
-                        >(),
+                        g::send::<ROLE_LOCAL_LLM, ROLE_WASI_LLM_CELL, WasiPathOpenRetMsg, 0>(),
                         g::seq(
-                            g::send::<
-                                g::Role<ROLE_WASI_LLM_CELL>,
-                                g::Role<ROLE_M33_LED_KERNEL>,
-                                WasiPathOpenReqMsg,
-                                0,
-                            >(),
+                            g::send::<ROLE_WASI_LLM_CELL, ROLE_M33_LED_KERNEL, WasiPathOpenReqMsg, 0>(
+                            ),
                             g::seq(
                                 g::send::<
-                                    g::Role<ROLE_M33_LED_KERNEL>,
-                                    g::Role<ROLE_WASI_LLM_CELL>,
+                                    ROLE_M33_LED_KERNEL,
+                                    ROLE_WASI_LLM_CELL,
                                     WasiPathOpenRetMsg,
                                     0,
                                 >(),
@@ -768,19 +692,36 @@ async fn drive_face_frame_loop<const ROLE: u8>(
             LABEL_WASI_FD_WRITE => {
                 m33_role_step(0x0d22_0000 | u32::from(ordinal));
                 let write = match branch.decode::<WasiFdWriteReqMsg>().await {
-                    Ok(request) => expect_fd_write(request)?,
+                    Ok(request) => match expect_fd_write(request) {
+                        Ok(write) => write,
+                        Err(error) => {
+                            m33_role_step(0xed21_0000 | u32::from(ordinal));
+                            return Err(error);
+                        }
+                    },
                     Err(error) => {
                         m33_role_step(0xed22_0000 | u32::from(ordinal));
                         return Err(error.into());
                     }
                 };
-                expect_fd_object(
+                m33_role_step(0x0d22_0100 | u32::from(ordinal));
+                if let Err(error) = expect_fd_object(
                     &*ctx,
                     write.fd(),
                     FACE_FRAME_OBJECT.object(),
                     FD_WRITE_RIGHT,
-                )?;
-                let frame = FaceFrame::decode_payload(Payload::new(write.as_bytes()))?;
+                ) {
+                    m33_role_step(0xed24_0000 | u32::from(ordinal));
+                    return Err(error);
+                }
+                m33_role_step(0x0d22_0200 | u32::from(ordinal));
+                let frame = match FaceFrame::decode_payload(Payload::new(write.as_bytes())) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        m33_role_step(0xed25_0000 | u32::from(ordinal));
+                        return Err(error.into());
+                    }
+                };
                 m33_role_step(
                     0x0d23_0000 | (u32::from(frame.face()) << 8) | u32::from(frame.ordinal()),
                 );
@@ -844,6 +785,166 @@ const DEFAULT_UNO_Q_LOCAL_LLM_MODEL: &str =
     "/data/local/tmp/uno-q-local-llm/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf";
 #[cfg(not(target_os = "none"))]
 const DEFAULT_UNO_Q_LOCAL_LLM_SERVER_PORT: u16 = 18080;
+#[cfg(not(target_os = "none"))]
+pub const DEFAULT_UNO_Q_SENSOR_UDP_BIND: &str = "0.0.0.0:8787";
+#[cfg(not(target_os = "none"))]
+const DEFAULT_UNO_Q_SENSOR_UDP_STALE_MS: u64 = 5_000;
+#[cfg(not(target_os = "none"))]
+const SENSOR_LINK_PENDING_INPUT: &str = "Sensor link pending: no UDP sample yet";
+#[cfg(not(target_os = "none"))]
+const SENSOR_LINK_STALE_INPUT: &str = "Sensor link stale: no fresh UDP sample";
+
+#[cfg(not(target_os = "none"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnoQSensorReading {
+    temp_c: f32,
+    humidity_percent: f32,
+    light_raw: u32,
+}
+
+#[cfg(not(target_os = "none"))]
+impl UnoQSensorReading {
+    pub const fn new(temp_c: f32, humidity_percent: f32, light_raw: u32) -> Self {
+        Self {
+            temp_c,
+            humidity_percent,
+            light_raw,
+        }
+    }
+
+    pub const fn temp_c(&self) -> f32 {
+        self.temp_c
+    }
+
+    pub const fn humidity_percent(&self) -> f32 {
+        self.humidity_percent
+    }
+
+    pub const fn light_raw(&self) -> u32 {
+        self.light_raw
+    }
+
+    pub fn llm_input_line(&self) -> String {
+        format!(
+            "Sensor T={:.1}C H={:.0}% L={}",
+            self.temp_c, self.humidity_percent, self.light_raw
+        )
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+pub fn parse_uno_q_sensor_payload(input: &str) -> Option<UnoQSensorReading> {
+    parse_uno_q_sensor_json(input).or_else(|| parse_uno_q_sensor_tokens(input))
+}
+
+#[cfg(not(target_os = "none"))]
+pub fn uno_q_sensor_payload_to_human_input(input: &str) -> Option<String> {
+    parse_uno_q_sensor_payload(input).map(|reading| reading.llm_input_line())
+}
+
+#[cfg(not(target_os = "none"))]
+fn parse_uno_q_sensor_json(input: &str) -> Option<UnoQSensorReading> {
+    let temp_c = uno_q_sensor_json_number(input, &["temp_c", "temperature", "temp"])?;
+    let humidity_percent =
+        uno_q_sensor_json_number(input, &["humidity", "humidity_percent", "rh"])?;
+    let light_raw = uno_q_sensor_json_number(input, &["light", "light_raw", "lux"])?.round();
+    if !light_raw.is_finite() || light_raw < 0.0 {
+        return None;
+    }
+    Some(UnoQSensorReading::new(
+        temp_c,
+        humidity_percent,
+        light_raw as u32,
+    ))
+}
+
+#[cfg(not(target_os = "none"))]
+fn parse_uno_q_sensor_tokens(input: &str) -> Option<UnoQSensorReading> {
+    let mut temp_c = None;
+    let mut humidity_percent = None;
+    let mut light_raw = None;
+
+    for token in input.split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';') {
+        let token =
+            token.trim_matches(|ch: char| ch == '"' || ch == '\'' || ch == '{' || ch == '}');
+        if token.is_empty() {
+            continue;
+        }
+        if temp_c.is_none() {
+            temp_c = uno_q_sensor_prefixed_number(
+                token,
+                &["t:", "t=", "temp:", "temp=", "temp_c:", "temp_c="],
+            );
+        }
+        if humidity_percent.is_none() {
+            humidity_percent = uno_q_sensor_prefixed_number(
+                token,
+                &["h:", "h=", "rh:", "rh=", "humidity:", "humidity="],
+            );
+        }
+        if light_raw.is_none() {
+            light_raw = uno_q_sensor_prefixed_number(token, &["l:", "l=", "light:", "light="])
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .map(|value| value.round() as u32);
+        }
+    }
+
+    Some(UnoQSensorReading::new(
+        temp_c?,
+        humidity_percent?,
+        light_raw?,
+    ))
+}
+
+#[cfg(not(target_os = "none"))]
+fn uno_q_sensor_prefixed_number(token: &str, prefixes: &[&str]) -> Option<f32> {
+    let lower = token.to_ascii_lowercase();
+    for prefix in prefixes {
+        if lower.starts_with(prefix) {
+            return uno_q_sensor_leading_number(&token[prefix.len()..]);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "none"))]
+fn uno_q_sensor_json_number(input: &str, keys: &[&str]) -> Option<f32> {
+    for key in keys {
+        let needle = format!("\"{key}\"");
+        let Some((prefix, rest)) = input.split_once(&needle) else {
+            continue;
+        };
+        if !prefix.is_empty() && !prefix.ends_with(['{', ',', ' ', '\n', '\r', '\t']) {
+            continue;
+        }
+        let Some((colon_prefix, rest)) = rest.split_once(':') else {
+            continue;
+        };
+        if !colon_prefix.trim().is_empty() {
+            continue;
+        }
+        if let Some(value) = uno_q_sensor_leading_number(rest.trim_start()) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "none"))]
+fn uno_q_sensor_leading_number(input: &str) -> Option<f32> {
+    let mut len = 0usize;
+    for ch in input.chars() {
+        if ch.is_ascii_digit() || ch == '-' || ch == '+' || ch == '.' {
+            len += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if len == 0 {
+        return None;
+    }
+    input[..len].parse::<f32>().ok()
+}
 
 struct LocalLlmShellSource {
     transcript: [u8; LOCAL_LLM_TRANSCRIPT_BYTES],
@@ -952,29 +1053,102 @@ impl LocalLlmShellSource {
 
 #[cfg(not(target_os = "none"))]
 struct HumanInputSource {
-    receiver: Option<std::sync::mpsc::Receiver<Vec<u8>>>,
+    stream: Option<HumanInputStream>,
     latest: HumanInputText,
+    latest_at: Option<std::time::Instant>,
+    mode: HumanInputMode,
+    stale_reported: bool,
+}
+
+#[cfg(not(target_os = "none"))]
+struct HumanInputStream {
+    receiver: std::sync::mpsc::Receiver<Vec<u8>>,
+    shutdown: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(not(target_os = "none"))]
+impl HumanInputStream {
+    fn new(receiver: std::sync::mpsc::Receiver<Vec<u8>>) -> Self {
+        Self {
+            receiver,
+            shutdown: None,
+            handle: None,
+        }
+    }
+
+    fn with_shutdown(
+        receiver: std::sync::mpsc::Receiver<Vec<u8>>,
+        shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        handle: std::thread::JoinHandle<()>,
+    ) -> Self {
+        Self {
+            receiver,
+            shutdown: Some(shutdown),
+            handle: Some(handle),
+        }
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+impl Drop for HumanInputStream {
+    fn drop(&mut self) {
+        if let Some(shutdown) = &self.shutdown {
+            shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 #[cfg(not(target_os = "none"))]
 impl HumanInputSource {
     fn from_env() -> Self {
-        let receiver = match human_input_mode_from_env() {
+        let mode = human_input_mode_from_env();
+        let stream = match mode {
             HumanInputMode::Prompt => spawn_prompt_human_input(),
             HumanInputMode::Voice => spawn_voice_human_input(),
+            HumanInputMode::SensorUdp => spawn_sensor_udp_human_input(),
             HumanInputMode::Off => None,
         };
         let latest = std::env::var("UNO_Q_HUMAN_INPUT_TEXT")
             .ok()
             .and_then(|text| HumanInputText::new(&text).ok())
             .unwrap_or_else(HumanInputText::empty);
-        Self { receiver, latest }
+        let latest_at = if !latest.is_empty() && matches!(mode, HumanInputMode::SensorUdp) {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        Self {
+            stream,
+            latest,
+            latest_at,
+            mode,
+            stale_reported: false,
+        }
     }
 
     fn next_input(&mut self) -> Result<HumanInputText, UnoQRuntimeError> {
-        if let Some(receiver) = &self.receiver {
-            while let Ok(bytes) = receiver.try_recv() {
+        if let Some(stream) = &self.stream {
+            while let Ok(bytes) = stream.receiver.try_recv() {
                 self.latest = HumanInputText::from_bytes(&bytes)?;
+                self.latest_at = Some(std::time::Instant::now());
+                self.stale_reported = false;
+            }
+        }
+        if matches!(self.mode, HumanInputMode::SensorUdp) {
+            let Some(latest_at) = self.latest_at else {
+                return sensor_link_pending_human_input();
+            };
+            let age = latest_at.elapsed();
+            if age > sensor_udp_stale_timeout() {
+                if !self.stale_reported && std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+                    eprintln!("uno-q sensor UDP stale after {} ms", age.as_millis());
+                }
+                self.stale_reported = true;
+                return sensor_link_stale_human_input();
             }
         }
         Ok(self.latest)
@@ -996,9 +1170,11 @@ impl HumanInputSource {
 }
 
 #[cfg(not(target_os = "none"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HumanInputMode {
     Prompt,
     Voice,
+    SensorUdp,
     Off,
 }
 
@@ -1007,6 +1183,7 @@ fn human_input_mode_from_env() -> HumanInputMode {
     match std::env::var("UNO_Q_HUMAN_INPUT_MODE").as_deref() {
         Ok("prompt") | Ok("prompt-shell") => HumanInputMode::Prompt,
         Ok("voice") | Ok("voice-shell") => HumanInputMode::Voice,
+        Ok("sensor-udp") | Ok("udp") | Ok("rpw2-sensor") => HumanInputMode::SensorUdp,
         Ok("off") | Ok("none") | Ok("0") => HumanInputMode::Off,
         Ok(_) => HumanInputMode::Off,
         Err(_) => HumanInputMode::Off,
@@ -1014,7 +1191,27 @@ fn human_input_mode_from_env() -> HumanInputMode {
 }
 
 #[cfg(not(target_os = "none"))]
-fn spawn_prompt_human_input() -> Option<std::sync::mpsc::Receiver<Vec<u8>>> {
+fn sensor_udp_stale_timeout() -> std::time::Duration {
+    let ms = std::env::var("UNO_Q_SENSOR_UDP_STALE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_UNO_Q_SENSOR_UDP_STALE_MS);
+    std::time::Duration::from_millis(ms)
+}
+
+#[cfg(not(target_os = "none"))]
+fn sensor_link_pending_human_input() -> Result<HumanInputText, UnoQRuntimeError> {
+    HumanInputText::new(SENSOR_LINK_PENDING_INPUT).map_err(Into::into)
+}
+
+#[cfg(not(target_os = "none"))]
+fn sensor_link_stale_human_input() -> Result<HumanInputText, UnoQRuntimeError> {
+    HumanInputText::new(SENSOR_LINK_STALE_INPUT).map_err(Into::into)
+}
+
+#[cfg(not(target_os = "none"))]
+fn spawn_prompt_human_input() -> Option<HumanInputStream> {
     use std::io::BufRead as _;
 
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -1048,11 +1245,11 @@ fn spawn_prompt_human_input() -> Option<std::sync::mpsc::Receiver<Vec<u8>>> {
             }
         })
         .ok()?;
-    Some(receiver)
+    Some(HumanInputStream::new(receiver))
 }
 
 #[cfg(not(target_os = "none"))]
-fn spawn_voice_human_input() -> Option<std::sync::mpsc::Receiver<Vec<u8>>> {
+fn spawn_voice_human_input() -> Option<HumanInputStream> {
     use std::io::BufRead as _;
 
     let command = std::env::var("UNO_Q_HUMAN_INPUT_VOICE_CMD").ok()?;
@@ -1099,7 +1296,60 @@ fn spawn_voice_human_input() -> Option<std::sync::mpsc::Receiver<Vec<u8>>> {
             let _ = child.wait();
         })
         .ok()?;
-    Some(receiver)
+    Some(HumanInputStream::new(receiver))
+}
+
+#[cfg(not(target_os = "none"))]
+fn spawn_sensor_udp_human_input() -> Option<HumanInputStream> {
+    let bind = std::env::var("UNO_Q_SENSOR_UDP_BIND")
+        .unwrap_or_else(|_| DEFAULT_UNO_Q_SENSOR_UDP_BIND.to_owned());
+    let socket = match std::net::UdpSocket::bind(&bind) {
+        Ok(socket) => socket,
+        Err(error) => {
+            eprintln!("uno-q sensor UDP input failed to bind {bind}: {error}");
+            return None;
+        }
+    };
+    let _ = socket.set_read_timeout(Some(std::time::Duration::from_millis(250)));
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let thread_shutdown = shutdown.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::Builder::new()
+        .name("uno-q-human-sensor-udp".to_owned())
+        .spawn(move || {
+            eprintln!("uno-q input role sensor UDP listening on {bind}");
+            let mut packet = [0u8; 256];
+            while !thread_shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                match socket.recv_from(&mut packet) {
+                    Ok((len, peer)) => {
+                        let payload = String::from_utf8_lossy(&packet[..len]);
+                        let Some(line) = uno_q_sensor_payload_to_human_input(&payload) else {
+                            if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+                                eprintln!(
+                                    "uno-q sensor UDP ignored malformed packet from {peer}: {payload:?}"
+                                );
+                            }
+                            continue;
+                        };
+                        if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+                            eprintln!("uno-q sensor UDP from {peer}: {line}");
+                        }
+                        if sender.send(line.into_bytes()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            || error.kind() == std::io::ErrorKind::TimedOut => {}
+                    Err(error) => {
+                        eprintln!("uno-q sensor UDP receive error: {error}");
+                        break;
+                    }
+                }
+            }
+        })
+        .ok()?;
+    Some(HumanInputStream::with_shutdown(receiver, shutdown, handle))
 }
 
 #[cfg(not(target_os = "none"))]
@@ -1230,7 +1480,15 @@ impl LocalLlmCommandSource {
             Self::External(command) => {
                 command.next_command(transcript, phase, ordinal, human_request, out)
             }
-            Self::Scripted => scripted_local_llm_shell_command(phase, ordinal, out),
+            Self::Scripted => {
+                if phase != 0
+                    && let Some(request) = human_request
+                    && let Some(len) = scripted_human_request_shell_command(request, out)?
+                {
+                    return Ok(len);
+                }
+                scripted_local_llm_shell_command(phase, ordinal, out)
+            }
             Self::Missing => Err(UnoQRuntimeError::RuntimeViolation),
         }
     }
@@ -1296,7 +1554,7 @@ impl LocalLlmServer {
             "-t".to_owned(),
             "4".to_owned(),
             "-c".to_owned(),
-            "512".to_owned(),
+            "1024".to_owned(),
             "-np".to_owned(),
             "1".to_owned(),
             "--no-warmup".to_owned(),
@@ -1305,7 +1563,7 @@ impl LocalLlmServer {
             "--temp".to_owned(),
             "0".to_owned(),
             "-n".to_owned(),
-            "8".to_owned(),
+            "24".to_owned(),
         ];
         if let Ok(extra) = std::env::var("UNO_Q_LOCAL_LLM_SERVER_ARGS") {
             args.extend(split_local_llm_args(&extra));
@@ -1361,15 +1619,101 @@ impl LocalLlmServer {
         human_request: Option<&str>,
         out: &mut [u8; LOCAL_LLM_COMMAND_BYTES],
     ) -> Result<usize, UnoQRuntimeError> {
-        let prompt = local_llm_prompt_for_server(transcript, phase, ordinal, human_request)?;
-        let response = self.complete(&prompt)?;
-        if let Some(len) = copy_llm_terminal_input_from_output(&response, out) {
+        let mut retry_transcript = transcript.to_vec();
+        for attempt in 0..3 {
+            let response = self
+                .chat_complete(&retry_transcript, phase, ordinal, human_request)
+                .or_else(|_| {
+                    let prompt = local_llm_prompt_for_server(
+                        &retry_transcript,
+                        phase,
+                        ordinal,
+                        human_request,
+                    )?;
+                    self.complete(&prompt)
+                })?;
+            if let Some(len) = copy_llm_terminal_input_from_output(&response, out) {
+                if local_llm_terminal_command_admitted_for_phase(phase, &out[..len]) {
+                    return Ok(len);
+                }
+                if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+                    eprintln!(
+                        "uno-q local LLM server shell retry attempt={} phase={} rejected={:?}",
+                        attempt + 1,
+                        phase,
+                        core::str::from_utf8(&out[..len]).unwrap_or("<binary>")
+                    );
+                }
+                append_local_llm_shell_error(&mut retry_transcript, &out[..len]);
+                continue;
+            }
+            if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+                eprintln!("uno-q local LLM server produced no terminal input: {response}");
+            }
+            break;
+        }
+        if let Some(len) = copy_watchdog_local_llm_command(phase, out)? {
+            if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+                eprintln!(
+                    "uno-q local LLM server watchdog fallback phase={} text={:?}",
+                    phase,
+                    core::str::from_utf8(&out[..len]).unwrap_or("<binary>")
+                );
+            }
             return Ok(len);
         }
-        if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
-            eprintln!("uno-q local LLM server produced no terminal input: {response}");
-        }
         Err(UnoQRuntimeError::RuntimeViolation)
+    }
+
+    fn chat_complete(
+        &mut self,
+        transcript: &[u8],
+        phase: u8,
+        ordinal: u8,
+        human_request: Option<&str>,
+    ) -> Result<String, UnoQRuntimeError> {
+        use std::io::{Read, Write};
+
+        let (host, port) = local_llm_http_endpoint_parts(&self.endpoint)
+            .ok_or(UnoQRuntimeError::RuntimeViolation)?;
+        let system = local_llm_chat_system_prompt();
+        let user = local_llm_chat_user_prompt(transcript, phase, ordinal, human_request)?;
+        let body = format!(
+            "{{\"model\":\"local\",\"messages\":[{{\"role\":\"system\",\"content\":{}}},{{\"role\":\"user\",\"content\":{}}}],\"max_tokens\":24,\"temperature\":0}}",
+            local_llm_json_string(system),
+            local_llm_json_string(&user)
+        );
+        let mut stream = std::net::TcpStream::connect((host.as_str(), port))
+            .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
+        let timeout = Some(std::time::Duration::from_secs(120));
+        stream
+            .set_read_timeout(timeout)
+            .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
+        stream
+            .set_write_timeout(timeout)
+            .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
+        write!(
+            stream,
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
+        if !response.starts_with("HTTP/1.1 200") && !response.starts_with("HTTP/1.0 200") {
+            if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
+                eprintln!("uno-q local LLM server chat HTTP failure: {response}");
+            }
+            return Err(UnoQRuntimeError::RuntimeViolation);
+        }
+        let body = response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or(response.as_str());
+        local_llm_json_string_field(body, "content").ok_or(UnoQRuntimeError::RuntimeViolation)
     }
 
     fn complete(&mut self, prompt: &str) -> Result<String, UnoQRuntimeError> {
@@ -1633,11 +1977,83 @@ fn local_llm_prompt_for_server(
     if phase != 0 || transcript.is_empty() {
         return Ok(prompt);
     }
-    let transcript = String::from_utf8_lossy(transcript);
+    let transcript = local_llm_transcript_tail(transcript);
     Ok(format!(
         "You are controlling the same WASI shell. Shell transcript so far:\n\
 {transcript}\n\nReturn one next terminal input line.\n{prompt}"
     ))
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_chat_system_prompt() -> &'static str {
+    "You infer Uno Q's mood from sensor values, then control its WASI shell. \
+Output exactly one command, no prose. Valid commands: ls; echo h > /face/frame; \
+echo a > /face/frame; echo s > /face/frame; echo u > /face/frame; \
+echo mc > /face/frame; echo ms > /face/frame; echo mw > /face/frame; \
+echo mr > /face/frame. Use ls only for initial discovery. \
+Bare commands like echo h or w /face/frame are invalid; include > /face/frame. \
+For sensor turns, infer comfort, heat, humidity, darkness, and brightness from T, H, and L. \
+If the sensor link is pending or stale, output echo s > /face/frame. \
+For sensor turns, use only echo h > /face/frame, echo a > /face/frame, \
+echo s > /face/frame, or echo u > /face/frame. \
+Choose h for comfortable/happy, a for hot or very humid irritation, \
+s for cold/dark/tired, u for unusually bright or surprising. \
+Use mc/ms/mw/mr only when the human input explicitly asks for mouth or speaking animation."
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_chat_user_prompt(
+    transcript: &[u8],
+    phase: u8,
+    ordinal: u8,
+    human_request: Option<&str>,
+) -> Result<String, UnoQRuntimeError> {
+    if phase == 0 {
+        return Ok("Output exactly: ls".to_owned());
+    }
+    let feedback = local_llm_shell_feedback_line(transcript);
+    if let Some(request) = human_request {
+        if request.starts_with("Sensor link pending") || request.starts_with("Sensor link stale") {
+            return Ok(format!(
+                "{feedback}Do not output ls.\n\
+The Pico sensor UDP link is not fresh. Hold the tired/sad face until fresh samples return.\n\
+Output exactly: echo s > /face/frame\n\
+Status: {request}"
+            ));
+        }
+        return Ok(format!(
+            "{feedback}Do not output ls.\n\
+Infer the mood from this sensor sample and output one valid /face/frame command.\n\
+For sensor input choose only h, a, s, or u.\n\
+Use the exact full form, for example: echo h > /face/frame\n\
+Sensor: {request}"
+        ));
+    }
+    let label = core::str::from_utf8(local_llm_face_label_for_ordinal(ordinal)?)
+        .map_err(|_| UnoQRuntimeError::RuntimeViolation)?;
+    Ok(format!(
+        "{feedback}Do not output ls.\nOutput exactly: echo {label} > /face/frame"
+    ))
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_transcript_tail(transcript: &[u8]) -> String {
+    let start = transcript.len().saturating_sub(96);
+    String::from_utf8_lossy(&transcript[start..])
+        .trim()
+        .to_owned()
+}
+
+#[cfg(not(target_os = "none"))]
+fn local_llm_shell_feedback_line(transcript: &[u8]) -> String {
+    let tail = local_llm_transcript_tail(transcript);
+    if tail.contains("err ") {
+        format!(
+            "Shell feedback: {tail}\nCorrection: use the full redirect form, e.g. echo h > /face/frame.\n"
+        )
+    } else {
+        String::new()
+    }
 }
 
 #[cfg(not(target_os = "none"))]
@@ -1785,6 +2201,82 @@ fn face_hold_us(face: u8) -> u64 {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LocalLlmTerminalCommand {
+    Catalog,
+    Face,
+    Other,
+}
+
+fn classify_local_llm_terminal_command(command: &[u8]) -> LocalLlmTerminalCommand {
+    let command = trim_terminal_command(command);
+    if command == b"ls" {
+        return LocalLlmTerminalCommand::Catalog;
+    }
+    if decode_local_face_echo_command(command) {
+        return LocalLlmTerminalCommand::Face;
+    }
+    LocalLlmTerminalCommand::Other
+}
+
+fn trim_terminal_command(command: &[u8]) -> &[u8] {
+    let mut start = 0usize;
+    let mut end = command.len();
+    while start < end && command[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && command[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    &command[start..end]
+}
+
+fn decode_local_face_echo_command(command: &[u8]) -> bool {
+    let prefix = b"echo ";
+    let redirect = b" > /face/frame";
+    if command.len() <= prefix.len() + redirect.len()
+        || &command[..prefix.len()] != prefix
+        || &command[command.len() - redirect.len()..] != redirect
+    {
+        return false;
+    }
+    matches!(
+        &command[prefix.len()..command.len() - redirect.len()],
+        b"h" | b"s" | b"a" | b"u" | b"v" | b"mc" | b"ms" | b"mw" | b"mr"
+    )
+}
+
+fn local_llm_terminal_command_admitted_for_phase(phase: u8, command: &[u8]) -> bool {
+    match classify_local_llm_terminal_command(command) {
+        LocalLlmTerminalCommand::Face => phase != 0,
+        LocalLlmTerminalCommand::Catalog | LocalLlmTerminalCommand::Other => phase == 0,
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+fn append_local_llm_shell_error(transcript: &mut Vec<u8>, command: &[u8]) {
+    transcript.extend_from_slice(command);
+    if !command.ends_with(b"\n") {
+        transcript.push(b'\n');
+    }
+    transcript.extend_from_slice(b"err /face/frame h,a,s,u,mw\n$ ");
+    if transcript.len() > LOCAL_LLM_TRANSCRIPT_BYTES {
+        let excess = transcript.len() - LOCAL_LLM_TRANSCRIPT_BYTES;
+        transcript.drain(..excess);
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+fn copy_watchdog_local_llm_command(
+    phase: u8,
+    out: &mut [u8; LOCAL_LLM_COMMAND_BYTES],
+) -> Result<Option<usize>, UnoQRuntimeError> {
+    if phase == 0 {
+        return copy_command_bytes(b"ls\n", out).map(Some);
+    }
+    copy_command_str_line("echo h > /face/frame", out).map(Some)
+}
+
 fn scripted_local_llm_shell_command(
     phase: u8,
     ordinal: u8,
@@ -1794,6 +2286,38 @@ fn scripted_local_llm_shell_command(
         return copy_command_bytes(b"ls\n", out);
     }
     let label = local_llm_face_label_for_ordinal(ordinal)?;
+    copy_face_echo_command(label, out)
+}
+
+#[cfg(not(target_os = "none"))]
+fn scripted_human_request_shell_command(
+    request: &str,
+    out: &mut [u8; LOCAL_LLM_COMMAND_BYTES],
+) -> Result<Option<usize>, UnoQRuntimeError> {
+    if request.starts_with("Sensor link pending") || request.starts_with("Sensor link stale") {
+        return copy_face_echo_command(b"s", out).map(Some);
+    }
+    for (needle, label) in [
+        ("echo h > /face/frame", b"h" as &[u8]),
+        ("echo a > /face/frame", b"a" as &[u8]),
+        ("echo s > /face/frame", b"s" as &[u8]),
+        ("echo u > /face/frame", b"u" as &[u8]),
+        ("echo mc > /face/frame", b"mc" as &[u8]),
+        ("echo ms > /face/frame", b"ms" as &[u8]),
+        ("echo mw > /face/frame", b"mw" as &[u8]),
+        ("echo mr > /face/frame", b"mr" as &[u8]),
+    ] {
+        if request.contains(needle) {
+            return copy_face_echo_command(label, out).map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn copy_face_echo_command(
+    label: &[u8],
+    out: &mut [u8; LOCAL_LLM_COMMAND_BYTES],
+) -> Result<usize, UnoQRuntimeError> {
     let mut len = 0usize;
     for bytes in [b"echo " as &[u8], label, b" > /face/frame\n"] {
         if len + bytes.len() > out.len() {
@@ -1803,6 +2327,20 @@ fn scripted_local_llm_shell_command(
         len += bytes.len();
     }
     Ok(len)
+}
+
+#[cfg(not(target_os = "none"))]
+fn copy_command_str_line(
+    command: &str,
+    out: &mut [u8; LOCAL_LLM_COMMAND_BYTES],
+) -> Result<usize, UnoQRuntimeError> {
+    let bytes = command.as_bytes();
+    if bytes.is_empty() || bytes.len() + 1 > out.len() {
+        return Err(UnoQRuntimeError::RuntimeViolation);
+    }
+    out[..bytes.len()].copy_from_slice(bytes);
+    out[bytes.len()] = b'\n';
+    Ok(bytes.len() + 1)
 }
 
 fn local_llm_face_label_for_ordinal(ordinal: u8) -> Result<&'static [u8], UnoQRuntimeError> {
@@ -1901,14 +2439,19 @@ fn local_llm_discovery_prompt() -> String {
 #[cfg(not(target_os = "none"))]
 fn local_llm_human_face_prompt(request: &str) -> String {
     format!(
-        "You are controlling a WASI shell. The latest human request or assistant mood is:\n\
-{request}\n\nReturn only one shell command. Choose the face by typing a ChoreoFS \
-write command. Examples:\nInput: happy or cheerful\nCommand: echo h > \
-/face/frame\nInput: laugh, smile, happy, or cheerful\nCommand: echo h > \
-/face/frame\nInput: angry, frustrated, or upset\nCommand: echo a > /face/frame\n\
-Input: sad or tired\nCommand: echo s > /face/frame\nInput: surprised or curious\n\
-Command: echo u > /face/frame\nInput: speaking or talking\nCommand: echo mw > \
-/face/frame\nCommand:"
+        "System prompt: You control Uno Q's face through a WASI ChoreoFS shell.\n\
+Latest input:\n{request}\n\n\
+Infer Uno Q's mood from sensor values when they are present: comfort, heat, humidity, \
+darkness, and brightness may all matter.\n\
+If the latest input says the sensor link is pending or stale, return echo s > /face/frame.\n\
+Valid commands are echo h > /face/frame, echo a > /face/frame, echo s > /face/frame, \
+echo u > /face/frame, echo mc > /face/frame, echo ms > /face/frame, \
+echo mw > /face/frame, and echo mr > /face/frame.\n\
+Bare commands like echo h are invalid; include > /face/frame.\n\
+For sensor input choose only h, a, s, or u. Use mouth commands only for explicit speaking animation.\n\
+For plain text, choose the closest valid face command from the user's requested mood.\n\
+Return exactly one shell command and no explanation.\n\
+Command:"
     )
 }
 
@@ -2406,9 +2949,21 @@ unsafe extern "C" {
     fn uno_q_m33_carrier_write(byte: u8);
     fn uno_q_m33_carrier_read() -> i16;
     fn uno_q_m33_carrier_observe_frame(source: u8, peer: u8, label: u8, len: u8);
+    fn uno_q_m33_carrier_observe_open(role: u8, lane: u8, session_id: u32);
+    fn uno_q_m33_carrier_observe_parsed(session_id: u32, source: u8, peer: u8, label: u8, len: u8);
+    fn uno_q_m33_carrier_observe_reject(
+        reason: u8,
+        expected_session_id: u32,
+        frame_session_id: u32,
+        source: u8,
+        peer: u8,
+        label: u8,
+        len: u8,
+    );
     fn uno_q_m33_carrier_observe_payload(label: u8, len: u8, byte0: u8, byte1: u8);
     fn uno_q_m33_carrier_observe_tx(peer: u8, label: u8, len: u8);
     fn uno_q_m33_carrier_observe_hint(lane: u8);
+    fn uno_q_m33_carrier_observe_deadline(op: u8, role: u8, lane: u8, elapsed: u32);
     fn uno_q_m33_board_poll();
     fn uno_q_m33_timer_ticks() -> u32;
 }
@@ -2424,6 +2979,7 @@ pub struct UnoQUartTx {
     local_role: u8,
     session_id: u32,
     lane: u8,
+    deadline_start_ticks: u32,
 }
 
 #[cfg(target_os = "none")]
@@ -2435,6 +2991,7 @@ pub struct UnoQUartRx {
     hint_frame_label: Cell<Option<hibana::integration::transport::FrameLabel>>,
     len: usize,
     bytes: [u8; PROOF_CARRIER_FRAME_BYTES],
+    deadline_start_ticks: u32,
 }
 
 #[cfg(target_os = "none")]
@@ -2456,6 +3013,25 @@ impl UnoQUartCarrier {
         }
     }
 
+    fn timer_ticks(&self) -> u32 {
+        unsafe { uno_q_m33_timer_ticks() }
+    }
+
+    fn deadline_elapsed(&self, start_ticks: u32) -> Option<u32> {
+        let elapsed = self.timer_ticks().wrapping_sub(start_ticks);
+        if elapsed >= UNO_Q_M33_UART_OPERATIONAL_DEADLINE_TICKS {
+            Some(elapsed)
+        } else {
+            None
+        }
+    }
+
+    fn observe_deadline(&self, op: u8, role: u8, lane: u8, elapsed: u32) {
+        unsafe {
+            uno_q_m33_carrier_observe_deadline(op, role, lane, elapsed);
+        }
+    }
+
     fn drain_uart(&self, session_id: u32) {
         loop {
             self.service_board();
@@ -2467,11 +3043,38 @@ impl UnoQUartCarrier {
             let Some(frame) = frame else {
                 continue;
             };
-            if frame.session_id != session_id
-                || frame.peer as usize >= PROOF_CARRIER_ROLES
-                || frame.source as usize >= PROOF_CARRIER_ROLES
-                || frame.source == frame.peer
-            {
+            unsafe {
+                uno_q_m33_carrier_observe_parsed(
+                    frame.session_id,
+                    frame.source,
+                    frame.peer,
+                    frame.frame_label.raw(),
+                    frame.len as u8,
+                );
+            }
+            let reject_reason = if frame.session_id != session_id {
+                Some(1)
+            } else if frame.peer as usize >= PROOF_CARRIER_ROLES {
+                Some(2)
+            } else if frame.source as usize >= PROOF_CARRIER_ROLES {
+                Some(3)
+            } else if frame.source == frame.peer {
+                Some(4)
+            } else {
+                None
+            };
+            if let Some(reason) = reject_reason {
+                unsafe {
+                    uno_q_m33_carrier_observe_reject(
+                        reason,
+                        session_id,
+                        frame.session_id,
+                        frame.source,
+                        frame.peer,
+                        frame.frame_label.raw(),
+                        frame.len as u8,
+                    );
+                }
                 continue;
             }
             unsafe {
@@ -2495,7 +3098,7 @@ impl UnoQUartCarrier {
 }
 
 #[cfg(target_os = "none")]
-impl hibana::integration::Transport for UnoQUartCarrier {
+impl hibana::integration::transport::Transport for UnoQUartCarrier {
     type Error = hibana::integration::transport::TransportError;
     type Tx<'a>
         = UnoQUartTx
@@ -2505,19 +3108,23 @@ impl hibana::integration::Transport for UnoQUartCarrier {
         = UnoQUartRx
     where
         Self: 'a;
-    type Metrics = ();
-
     fn open<'a>(
         &'a self,
-        local_role: u8,
-        session_id: u32,
-        lane: u8,
+        port: hibana::integration::transport::PortOpen,
     ) -> (Self::Tx<'a>, Self::Rx<'a>) {
+        let local_role = port.local_role();
+        let session_id = port.session_id().raw();
+        let lane = port.lane().as_wire();
+        let deadline_start_ticks = self.timer_ticks();
+        unsafe {
+            uno_q_m33_carrier_observe_open(local_role, lane, session_id);
+        }
         (
             UnoQUartTx {
                 local_role,
                 session_id,
                 lane,
+                deadline_start_ticks,
             },
             UnoQUartRx {
                 local_role,
@@ -2527,12 +3134,13 @@ impl hibana::integration::Transport for UnoQUartCarrier {
                 hint_frame_label: Cell::new(None),
                 len: 0,
                 bytes: [0; PROOF_CARRIER_FRAME_BYTES],
+                deadline_start_ticks,
             },
         )
     }
 
     fn poll_send<'a, 'f>(
-        &'a self,
+        &self,
         tx: &'a mut Self::Tx<'a>,
         outgoing: hibana::integration::transport::Outgoing<'f>,
         task_context: &mut core::task::Context<'_>,
@@ -2565,12 +3173,17 @@ impl hibana::integration::Transport for UnoQUartCarrier {
             unsafe {
                 uno_q_m33_carrier_write(byte);
             }
+            if let Some(elapsed) = self.deadline_elapsed(tx.deadline_start_ticks) {
+                self.observe_deadline(1, tx.local_role, tx.lane, elapsed);
+                return Poll::Ready(Err(hibana::integration::transport::TransportError::Failed));
+            }
         }
+        tx.deadline_start_ticks = self.timer_ticks();
         task_context.waker().wake_by_ref();
         Poll::Ready(Ok(()))
     }
 
-    fn cancel_send<'a>(&'a self, tx: &'a mut Self::Tx<'a>) {
+    fn cancel_send<'a>(&self, tx: &'a mut Self::Tx<'a>) {
         core::hint::black_box(tx);
     }
 
@@ -2585,9 +3198,14 @@ impl hibana::integration::Transport for UnoQUartCarrier {
             return Poll::Ready(Err(hibana::integration::transport::TransportError::Failed));
         }
         let Some(frame) = self.edit(|queues| queues.by_role[local_role].pop_front(rx.lane)) else {
+            if let Some(elapsed) = self.deadline_elapsed(rx.deadline_start_ticks) {
+                self.observe_deadline(2, rx.local_role, rx.lane, elapsed);
+                return Poll::Ready(Err(hibana::integration::transport::TransportError::Failed));
+            }
             task_context.waker().wake_by_ref();
             return Poll::Pending;
         };
+        rx.deadline_start_ticks = self.timer_ticks();
         rx.frame_label = Some(frame.frame_label);
         rx.hint_frame_label.set(Some(frame.frame_label));
         rx.len = frame.len;
@@ -2606,7 +3224,7 @@ impl hibana::integration::Transport for UnoQUartCarrier {
         Poll::Ready(Ok(Payload::new(&rx.bytes[..rx.len])))
     }
 
-    fn requeue<'a>(&'a self, rx: &'a mut Self::Rx<'a>) {
+    fn requeue<'a>(&self, rx: &mut Self::Rx<'a>) -> Result<(), Self::Error> {
         if let Some(frame_label) = rx.frame_label.take() {
             let local_role = rx.local_role as usize;
             if local_role < PROOF_CARRIER_ROLES {
@@ -2616,25 +3234,12 @@ impl hibana::integration::Transport for UnoQUartCarrier {
             }
         }
         rx.hint_frame_label.set(None);
-    }
-
-    fn drain_events(
-        &self,
-        emit: &mut dyn FnMut(hibana::integration::transport::advanced::TransportEvent),
-    ) {
-        emit(
-            hibana::integration::transport::advanced::TransportEvent::new(
-                hibana::integration::transport::advanced::TransportEventKind::Ack,
-                0,
-                0,
-                0,
-            ),
-        );
+        Ok(())
     }
 
     fn recv_frame_hint<'a>(
-        &'a self,
-        rx: &'a Self::Rx<'a>,
+        &self,
+        rx: &mut Self::Rx<'a>,
     ) -> Option<hibana::integration::transport::FrameLabel> {
         if let Some(frame_label) = rx.hint_frame_label.take() {
             return Some(frame_label);
@@ -2646,31 +3251,7 @@ impl hibana::integration::Transport for UnoQUartCarrier {
         if local_role >= PROOF_CARRIER_ROLES {
             return None;
         }
-        let start_ticks = unsafe { uno_q_m33_timer_ticks() };
-        loop {
-            self.drain_uart(rx.session_id);
-            if let Some(frame_label) =
-                self.edit(|queues| queues.by_role[local_role].front_label(rx.lane))
-            {
-                return Some(frame_label);
-            }
-            let elapsed = unsafe { uno_q_m33_timer_ticks() }.wrapping_sub(start_ticks);
-            if elapsed >= UNO_Q_M33_HINT_DRAIN_TICKS {
-                break;
-            }
-            core::hint::spin_loop();
-        }
-        None
-    }
-
-    fn metrics(&self) -> Self::Metrics {}
-
-    fn operational_deadline_ticks(&self) -> Option<u32> {
-        Some(UNO_Q_M33_UART_OPERATIONAL_DEADLINE_TICKS)
-    }
-
-    fn apply_pacing_update(&self, interval_us: u32, burst_bytes: u16) {
-        core::hint::black_box((interval_us, burst_bytes));
+        self.edit(|queues| queues.by_role[local_role].front_label(rx.lane))
     }
 }
 
@@ -2787,7 +3368,7 @@ impl HardwarePeerCarrier {
 }
 
 #[cfg(not(target_os = "none"))]
-impl hibana::integration::Transport for HardwarePeerCarrier {
+impl hibana::integration::transport::Transport for HardwarePeerCarrier {
     type Error = hibana::integration::transport::TransportError;
     type Tx<'a>
         = HardwarePeerTx
@@ -2797,14 +3378,13 @@ impl hibana::integration::Transport for HardwarePeerCarrier {
         = HardwarePeerRx
     where
         Self: 'a;
-    type Metrics = ();
-
     fn open<'a>(
         &'a self,
-        local_role: u8,
-        session_id: u32,
-        lane: u8,
+        port: hibana::integration::transport::PortOpen,
     ) -> (Self::Tx<'a>, Self::Rx<'a>) {
+        let local_role = port.local_role();
+        let session_id = port.session_id().raw();
+        let lane = port.lane().as_wire();
         (
             HardwarePeerTx {
                 local_role,
@@ -2824,7 +3404,7 @@ impl hibana::integration::Transport for HardwarePeerCarrier {
     }
 
     fn poll_send<'a, 'f>(
-        &'a self,
+        &self,
         tx: &'a mut Self::Tx<'a>,
         outgoing: hibana::integration::transport::Outgoing<'f>,
         task_context: &mut core::task::Context<'_>,
@@ -2918,7 +3498,7 @@ impl hibana::integration::Transport for HardwarePeerCarrier {
         Poll::Ready(Ok(()))
     }
 
-    fn cancel_send<'a>(&'a self, tx: &'a mut Self::Tx<'a>) {
+    fn cancel_send<'a>(&self, tx: &'a mut Self::Tx<'a>) {
         core::hint::black_box(tx);
     }
 
@@ -2947,7 +3527,7 @@ impl hibana::integration::Transport for HardwarePeerCarrier {
         Poll::Ready(Ok(Payload::new(&rx.bytes[..rx.len])))
     }
 
-    fn requeue<'a>(&'a self, rx: &'a mut Self::Rx<'a>) {
+    fn requeue<'a>(&self, rx: &mut Self::Rx<'a>) -> Result<(), Self::Error> {
         if let Some(frame_label) = rx.frame_label.take() {
             let local_role = rx.local_role as usize;
             if local_role < PROOF_CARRIER_ROLES {
@@ -2957,30 +3537,16 @@ impl hibana::integration::Transport for HardwarePeerCarrier {
             }
         }
         rx.hint_frame_label.set(None);
-    }
-
-    fn drain_events(
-        &self,
-        emit: &mut dyn FnMut(hibana::integration::transport::advanced::TransportEvent),
-    ) {
-        emit(
-            hibana::integration::transport::advanced::TransportEvent::new(
-                hibana::integration::transport::advanced::TransportEventKind::Ack,
-                0,
-                0,
-                0,
-            ),
-        );
+        Ok(())
     }
 
     fn recv_frame_hint<'a>(
-        &'a self,
-        rx: &'a Self::Rx<'a>,
+        &self,
+        rx: &mut Self::Rx<'a>,
     ) -> Option<hibana::integration::transport::FrameLabel> {
         if let Some(frame_label) = rx.hint_frame_label.take() {
             return Some(frame_label);
         }
-        let _ = self.drain_serial(rx.session_id);
         let local_role = rx.local_role as usize;
         if local_role >= PROOF_CARRIER_ROLES {
             return None;
@@ -2988,19 +3554,9 @@ impl hibana::integration::Transport for HardwarePeerCarrier {
         self.local
             .edit(|queues| queues.by_role[local_role].front_label(rx.lane))
     }
-
-    fn metrics(&self) -> Self::Metrics {}
-
-    fn operational_deadline_ticks(&self) -> Option<u32> {
-        Some(UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS)
-    }
-
-    fn apply_pacing_update(&self, interval_us: u32, burst_bytes: u16) {
-        core::hint::black_box((interval_us, burst_bytes));
-    }
 }
 
-impl hibana::integration::Transport for ProofCarrier {
+impl hibana::integration::transport::Transport for ProofCarrier {
     type Error = hibana::integration::transport::TransportError;
     type Tx<'a>
         = ProofTx
@@ -3010,14 +3566,13 @@ impl hibana::integration::Transport for ProofCarrier {
         = ProofRx
     where
         Self: 'a;
-    type Metrics = ();
-
     fn open<'a>(
         &'a self,
-        local_role: u8,
-        session_id: u32,
-        lane: u8,
+        port: hibana::integration::transport::PortOpen,
     ) -> (Self::Tx<'a>, Self::Rx<'a>) {
+        let local_role = port.local_role();
+        let session_id = port.session_id().raw();
+        let lane = port.lane().as_wire();
         (
             ProofTx {
                 local_role,
@@ -3037,7 +3592,7 @@ impl hibana::integration::Transport for ProofCarrier {
     }
 
     fn poll_send<'a, 'f>(
-        &'a self,
+        &self,
         tx: &'a mut Self::Tx<'a>,
         outgoing: hibana::integration::transport::Outgoing<'f>,
         task_context: &mut core::task::Context<'_>,
@@ -3075,7 +3630,7 @@ impl hibana::integration::Transport for ProofCarrier {
         Poll::Ready(Ok(()))
     }
 
-    fn cancel_send<'a>(&'a self, tx: &'a mut Self::Tx<'a>) {
+    fn cancel_send<'a>(&self, tx: &'a mut Self::Tx<'a>) {
         core::hint::black_box(tx);
     }
 
@@ -3114,7 +3669,7 @@ impl hibana::integration::Transport for ProofCarrier {
         Poll::Ready(Ok(Payload::new(&rx.bytes[..rx.len])))
     }
 
-    fn requeue<'a>(&'a self, rx: &'a mut Self::Rx<'a>) {
+    fn requeue<'a>(&self, rx: &mut Self::Rx<'a>) -> Result<(), Self::Error> {
         if let Some(frame_label) = rx.frame_label.take() {
             let local_role = rx.local_role as usize;
             if local_role < PROOF_CARRIER_ROLES {
@@ -3124,25 +3679,12 @@ impl hibana::integration::Transport for ProofCarrier {
             }
         }
         rx.hint_frame_label.set(None);
-    }
-
-    fn drain_events(
-        &self,
-        emit: &mut dyn FnMut(hibana::integration::transport::advanced::TransportEvent),
-    ) {
-        emit(
-            hibana::integration::transport::advanced::TransportEvent::new(
-                hibana::integration::transport::advanced::TransportEventKind::Ack,
-                0,
-                0,
-                0,
-            ),
-        );
+        Ok(())
     }
 
     fn recv_frame_hint<'a>(
-        &'a self,
-        rx: &'a Self::Rx<'a>,
+        &self,
+        rx: &mut Self::Rx<'a>,
     ) -> Option<hibana::integration::transport::FrameLabel> {
         if let Some(frame_label) = rx.hint_frame_label.take() {
             return Some(frame_label);
@@ -3152,12 +3694,6 @@ impl hibana::integration::Transport for ProofCarrier {
             return None;
         }
         self.edit(|queues| queues.by_role[local_role].front_label(rx.lane))
-    }
-
-    fn metrics(&self) -> Self::Metrics {}
-
-    fn apply_pacing_update(&self, interval_us: u32, burst_bytes: u16) {
-        core::hint::black_box((interval_us, burst_bytes));
     }
 }
 
@@ -3440,7 +3976,10 @@ mod tests {
             UNO_Q_M33_UART_OPERATIONAL_DEADLINE_TICKS
                 > UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS * 10
         );
-        assert!(UNO_Q_M33_HINT_DRAIN_TICKS > UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS * 20);
+        assert!(
+            UNO_Q_M33_UART_OPERATIONAL_DEADLINE_TICKS
+                > UNO_Q_HOST_UART_OPERATIONAL_DEADLINE_TICKS * 20
+        );
         assert!(UNO_Q_M33_UART_OPERATIONAL_DEADLINE_TICKS > full_frame_bytes * 10_000);
     }
 
@@ -3563,38 +4102,34 @@ mod tests {
             'H', 'u', 'm', 'a', 'n', 'I', 'n', 'p', 'u', 't', 'A', 'c', 'k', 'M', 's', 'g',
         ]);
         assert!(
-            compact.contains(&format!("g::Role<{wasi}>,g::Role<{local_llm}>,{read_req}")),
+            compact.contains(&format!("{wasi},{local_llm},{read_req}")),
             "WASI shell must read terminal commands from the local LLM role through ChoreoFS"
         );
         assert!(
-            compact.contains(&format!("g::Role<{local_llm}>,g::Role<{wasi}>,{read_ret}")),
+            compact.contains(&format!("{local_llm},{wasi},{read_ret}")),
             "local LLM must answer only the WASI fd_read reply"
         );
         assert!(
-            compact.contains(&format!("g::Role<{wasi}>,g::Role<{local_llm}>,{proc_exit}")),
+            compact.contains(&format!("{wasi},{local_llm},{proc_exit}")),
             "bounded WASI proc_exit must be visible to the local LLM role"
         );
         assert!(
-            compact.contains(&format!("g::Role<{wasi}>,g::Role<{m33}>,{proc_exit}")),
+            compact.contains(&format!("{wasi},{m33},{proc_exit}")),
             "bounded WASI proc_exit must be visible to the M33 role"
         );
         assert!(
-            compact.contains(&format!(
-                "g::Role<{human_input}>,g::Role<{local_llm}>,{human_text}"
-            )),
+            compact.contains(&format!("{human_input},{local_llm},{human_text}")),
             "input role must pass arbitrary human text to the local LLM role as one typed message"
         );
         assert!(
-            compact.contains(&format!(
-                "g::Role<{local_llm}>,g::Role<{human_input}>,{human_ack}"
-            )),
+            compact.contains(&format!("{local_llm},{human_input},{human_ack}")),
             "local LLM must acknowledge the input turn as one projected typed message"
         );
         for forbidden in [
-            format!("g::Role<{m33}>,g::Role<{local_llm}>"),
-            format!("g::Role<{local_llm}>,g::Role<{m33}>"),
-            format!("g::Role<{human_input}>,g::Role<{m33}>"),
-            format!("g::Role<{m33}>,g::Role<{human_input}>"),
+            format!("{m33},{local_llm}"),
+            format!("{local_llm},{m33}"),
+            format!("{human_input},{m33}"),
+            format!("{m33},{human_input}"),
         ] {
             assert!(
                 !compact.contains(&forbidden),
@@ -3864,6 +4399,7 @@ mod tests {
         assert!(source.contains("llama-server"));
         assert!(source.contains("LocalLlmServer"));
         assert!(source.contains("Self::Server(server)"));
+        assert!(source.contains("POST /v1/chat/completions"));
         assert!(source.contains("POST /completion"));
         assert!(source.contains("GET /health"));
         assert!(source.contains("UNO_Q_LOCAL_LLM_SERVER_ENDPOINT"));
@@ -3877,6 +4413,9 @@ mod tests {
         assert!(source.contains("UNO_Q_HUMAN_INPUT_MODE"));
         assert!(source.contains("UNO_Q_HUMAN_INPUT_TEXT"));
         assert!(source.contains("UNO_Q_HUMAN_INPUT_VOICE_CMD"));
+        assert!(source.contains("UNO_Q_SENSOR_UDP_BIND"));
+        assert!(source.contains("spawn_sensor_udp_human_input"));
+        assert!(source.contains("uno_q_sensor_payload_to_human_input"));
         assert!(source.contains("HumanInputText::from_bytes"));
         assert!(source.contains("strip_terminal_line_delimiter"));
         assert!(source.contains("observe_human_input"));
@@ -3935,13 +4474,89 @@ mod tests {
         assert!(local_llm_discovery_prompt().contains("Command: ls"));
         assert!(
             local_llm_human_face_prompt("悲しい感じで")
-                .contains("Input: sad or tired\nCommand: echo s > /face/frame")
+                .contains("choose the closest valid face command")
+        );
+        assert!(
+            local_llm_human_face_prompt("T=23.0C H=50% L=1500; face happy=comfy")
+                .contains("Infer Uno Q's mood from sensor values")
         );
         assert!(
             local_llm_default_face_prompt("h")
                 .contains("Answer with exactly: echo h > /face/frame\nAnswer:")
         );
         assert!(local_llm_default_face_prompt("h").contains("Valid shell syntax"));
+        assert!(local_llm_chat_system_prompt().contains("infer Uno Q's mood"));
+        assert!(local_llm_chat_system_prompt().contains("echo h > /face/frame"));
+        assert!(local_llm_chat_system_prompt().contains("Use ls only for initial discovery"));
+        assert!(local_llm_chat_system_prompt().contains("Bare commands like echo h"));
+        assert!(local_llm_chat_system_prompt().contains("For sensor turns, use only"));
+        assert!(local_llm_chat_system_prompt().contains("comfort, heat, humidity"));
+        assert!(local_llm_chat_system_prompt().contains("pending or stale"));
+        assert_eq!(
+            local_llm_chat_user_prompt(b"w /face/frame FaceFrame\n$ ", 0, 0, None).unwrap(),
+            "Output exactly: ls"
+        );
+        let chat_user = local_llm_chat_user_prompt(
+            b"echo c > /face/frame\nerr /face/frame h,a,s,u,mw\n$ ",
+            1,
+            0,
+            Some("Sensor T=23.0C H=60% L=42"),
+        )
+        .unwrap();
+        assert!(chat_user.contains("Sensor:"));
+        assert!(chat_user.contains("Sensor T=23.0C H=60% L=42"));
+        assert!(chat_user.contains("Infer the mood from this sensor sample"));
+        assert!(chat_user.contains("choose only h, a, s, or u"));
+        assert!(chat_user.contains("exact full form"));
+        assert!(chat_user.contains("Do not output ls"));
+        assert!(chat_user.contains("err /face/frame"));
+        assert!(chat_user.contains("full redirect form"));
+        assert!(chat_user.contains("h,a,s,u,mw"));
+        let stale_user =
+            local_llm_chat_user_prompt(b"$ ", 1, 0, Some(SENSOR_LINK_STALE_INPUT)).unwrap();
+        assert!(stale_user.contains("Output exactly: echo s > /face/frame"));
+        assert!(stale_user.contains("not fresh"));
+        assert!(!stale_user.contains("Infer the mood from this sensor sample"));
+        assert!(
+            local_llm_human_face_prompt(SENSOR_LINK_PENDING_INPUT)
+                .contains("sensor link is pending or stale")
+        );
+        let mut scripted = [0u8; LOCAL_LLM_COMMAND_BYTES];
+        let len = scripted_human_request_shell_command(SENSOR_LINK_STALE_INPUT, &mut scripted)
+            .unwrap()
+            .unwrap();
+        assert_eq!(&scripted[..len], b"echo s > /face/frame\n");
+    }
+
+    #[test]
+    fn local_llm_terminal_command_state_distinguishes_catalog_from_face() {
+        assert_eq!(
+            classify_local_llm_terminal_command(b"ls\n"),
+            LocalLlmTerminalCommand::Catalog
+        );
+        assert_eq!(
+            classify_local_llm_terminal_command(b"echo h > /face/frame\n"),
+            LocalLlmTerminalCommand::Face
+        );
+        assert_eq!(
+            classify_local_llm_terminal_command(b"echo c > /face/frame\n"),
+            LocalLlmTerminalCommand::Other
+        );
+        assert!(local_llm_terminal_command_admitted_for_phase(0, b"ls\n"));
+        assert!(!local_llm_terminal_command_admitted_for_phase(
+            0,
+            b"echo h > /face/frame\n"
+        ));
+        assert!(local_llm_terminal_command_admitted_for_phase(
+            1,
+            b"echo h > /face/frame\n"
+        ));
+        assert!(!local_llm_terminal_command_admitted_for_phase(1, b"ls\n"));
+
+        let mut transcript = b"w /face/frame FaceFrame\n$ ".to_vec();
+        append_local_llm_shell_error(&mut transcript, b"ls\n");
+        let transcript = core::str::from_utf8(&transcript).unwrap();
+        assert!(transcript.contains("ls\nerr /face/frame h,a,s,u,mw\n$ "));
     }
 
     #[cfg(not(target_os = "none"))]
@@ -3992,6 +4607,42 @@ mod tests {
 
     #[cfg(not(target_os = "none"))]
     #[test]
+    fn sensor_udp_payload_becomes_bounded_human_input_text() {
+        let reading = parse_uno_q_sensor_payload("T:22.58C H:60%\r\nLight:2500\r\n").unwrap();
+        assert!((reading.temp_c() - 22.58).abs() < 0.01);
+        assert!((reading.humidity_percent() - 60.0).abs() < 0.01);
+        assert_eq!(reading.light_raw(), 2500);
+
+        let reading =
+            parse_uno_q_sensor_payload("{\"temperature\":21.5,\"rh\":45.0,\"lux\":900}").unwrap();
+        assert!((reading.temp_c() - 21.5).abs() < 0.01);
+        assert!((reading.humidity_percent() - 45.0).abs() < 0.01);
+        assert_eq!(reading.light_raw(), 900);
+
+        let line = uno_q_sensor_payload_to_human_input("T:-12.3C H:100%\nLight:4095").unwrap();
+        assert!(line.len() <= protocol::HUMAN_INPUT_TEXT_BYTES);
+        assert!(line.contains("Sensor T=-12.3C H=100% L=4095"));
+
+        let line = uno_q_sensor_payload_to_human_input("T:22.0C H:50%\nLight:900").unwrap();
+        assert!(line.contains("Sensor T=22.0C H=50% L=900"));
+
+        let line = uno_q_sensor_payload_to_human_input("T:22.0C H:50%\nLight:3000").unwrap();
+        assert!(line.contains("Sensor T=22.0C H=50% L=3000"));
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
+    fn scripted_llm_does_not_replace_sensor_mood_inference() {
+        let mut source = LocalLlmCommandSource::Scripted;
+        let mut out = [0u8; LOCAL_LLM_COMMAND_BYTES];
+        let len = source
+            .next_command(b"", 1, 9, Some("Sensor T=23.8C H=61% L=643"), &mut out)
+            .unwrap();
+        assert_eq!(&out[..len], b"echo a > /face/frame\n");
+    }
+
+    #[cfg(not(target_os = "none"))]
+    #[test]
     fn self_mood_mode_is_prompt_guidance_only() {
         let prompt = local_llm_self_mood_prompt(1);
         assert!(prompt.contains("simulated assistant mood"));
@@ -3999,8 +4650,8 @@ mod tests {
         assert!(prompt.contains("return only"));
 
         let face_prompt = local_llm_human_face_prompt(&prompt);
-        assert!(face_prompt.contains("latest human request or assistant mood"));
-        assert!(face_prompt.contains("Command: echo a > /face/frame"));
+        assert!(face_prompt.contains("Latest input:"));
+        assert!(face_prompt.contains("Infer Uno Q's mood"));
         assert!(face_prompt.ends_with("Command:"));
     }
 

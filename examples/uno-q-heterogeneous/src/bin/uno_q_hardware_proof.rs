@@ -14,9 +14,20 @@ fn main() {
     set_env_default("UNO_Q_HIBANA_UART_TURNAROUND_US", "200000");
     set_env_default("UNO_Q_HIBANA_UART_BYTE_US", "50000");
     let face_loop_forever = env::var_os("UNO_Q_FACE_LOOP_FOREVER").is_some();
+    let proof_human_input_mode = if face_loop_forever {
+        take_env("UNO_Q_HUMAN_INPUT_MODE")
+    } else {
+        None
+    };
+    let proof_local_llm_scripted = if face_loop_forever {
+        take_env("UNO_Q_LOCAL_LLM_SCRIPTED")
+    } else {
+        None
+    };
     if face_loop_forever {
         unsafe {
             env::remove_var("UNO_Q_FACE_LOOP_FOREVER");
+            env::set_var("UNO_Q_LOCAL_LLM_SCRIPTED", "1");
         }
     }
     run_choreography_proof();
@@ -24,6 +35,8 @@ fn main() {
         unsafe {
             env::set_var("UNO_Q_FACE_LOOP_FOREVER", "1");
         }
+        restore_env("UNO_Q_LOCAL_LLM_SCRIPTED", proof_local_llm_scripted);
+        restore_env("UNO_Q_HUMAN_INPUT_MODE", proof_human_input_mode);
         eprintln!(
             "uno-q face loop mode: local LLM drives the WASI ChoreoFS shell into /face/frame forever"
         );
@@ -113,6 +126,18 @@ fn apply_cli_args() {
                 set_env("UNO_Q_HUMAN_INPUT_MODE", "voice");
                 set_env("UNO_Q_FACE_LOOP_FOREVER", "1");
             }
+            "--sensor-udp" => {
+                set_env("UNO_Q_HUMAN_INPUT_MODE", "sensor-udp");
+                set_env("UNO_Q_FACE_LOOP_FOREVER", "1");
+            }
+            "--sensor-bind" => {
+                let Some(bind) = args.next() else {
+                    panic!("--sensor-bind requires ADDRESS:PORT");
+                };
+                set_env("UNO_Q_SENSOR_UDP_BIND", &bind);
+                set_env("UNO_Q_HUMAN_INPUT_MODE", "sensor-udp");
+                set_env("UNO_Q_FACE_LOOP_FOREVER", "1");
+            }
             "--serial" => {
                 let Some(serial) = args.next() else {
                     panic!("--serial requires a device path");
@@ -125,7 +150,8 @@ fn apply_cli_args() {
             "--help" | "-h" => {
                 println!(
                     "usage: uno-q-hardware-proof [--prompt-shell | --voice-shell] \
-[--voice-cmd CMD] [--serial PATH] [--trace] [--face-loop-forever] [--scripted-llm]"
+[--voice-cmd CMD] [--sensor-udp] [--sensor-bind ADDRESS:PORT] [--serial PATH] \
+[--trace] [--face-loop-forever] [--scripted-llm]"
                 );
                 std::process::exit(0);
             }
@@ -143,6 +169,28 @@ fn set_env(key: &str, value: &str) {
 fn set_env_default(key: &str, value: &str) {
     if env::var_os(key).is_none() {
         set_env(key, value);
+    }
+}
+
+fn take_env(key: &str) -> Option<std::ffi::OsString> {
+    let value = env::var_os(key);
+    if value.is_some() {
+        unsafe {
+            env::remove_var(key);
+        }
+    }
+    value
+}
+
+fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
+    if let Some(value) = value {
+        unsafe {
+            env::set_var(key, value);
+        }
+    } else {
+        unsafe {
+            env::remove_var(key);
+        }
     }
 }
 

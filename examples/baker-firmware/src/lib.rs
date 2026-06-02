@@ -562,11 +562,15 @@ mod rp2040_sio {
             rx.delivered = true;
 
             assert_eq!(
-                <SioTransport as hibana::integration::Transport>::recv_frame_hint(&transport, &rx,),
+                <SioTransport as hibana::integration::transport::Transport>::recv_frame_hint(
+                    &transport, &mut rx,
+                ),
                 Some(label)
             );
             assert_eq!(
-                <SioTransport as hibana::integration::Transport>::recv_frame_hint(&transport, &rx,),
+                <SioTransport as hibana::integration::transport::Transport>::recv_frame_hint(
+                    &transport, &mut rx,
+                ),
                 None
             );
         }
@@ -581,17 +585,21 @@ mod rp2040_sio {
             rx.delivered = false;
 
             assert_eq!(
-                <SioTransport as hibana::integration::Transport>::recv_frame_hint(&transport, &rx,),
+                <SioTransport as hibana::integration::transport::Transport>::recv_frame_hint(
+                    &transport, &mut rx,
+                ),
                 Some(label)
             );
             assert_eq!(
-                <SioTransport as hibana::integration::Transport>::recv_frame_hint(&transport, &rx,),
+                <SioTransport as hibana::integration::transport::Transport>::recv_frame_hint(
+                    &transport, &mut rx,
+                ),
                 None
             );
         }
     }
 
-    impl hibana::integration::Transport for SioTransport {
+    impl hibana::integration::transport::Transport for SioTransport {
         type Error = hibana::integration::transport::TransportError;
         type Tx<'a>
             = SioTx
@@ -601,14 +609,13 @@ mod rp2040_sio {
             = SioRx
         where
             Self: 'a;
-        type Metrics = ();
-
         fn open<'a>(
             &'a self,
-            local_role: u8,
-            session_id: u32,
-            lane: u8,
+            port: hibana::integration::transport::PortOpen,
         ) -> (Self::Tx<'a>, Self::Rx<'a>) {
+            let local_role = port.local_role();
+            let session_id = port.session_id().raw();
+            let lane = port.lane().as_wire();
             fifo::clear_errors();
             (
                 SioTx {
@@ -622,7 +629,7 @@ mod rp2040_sio {
         }
 
         fn poll_send<'a, 'f>(
-            &'a self,
+            &self,
             tx: &'a mut Self::Tx<'a>,
             outgoing: hibana::integration::transport::Outgoing<'f>,
             context: &mut core::task::Context<'_>,
@@ -718,7 +725,7 @@ mod rp2040_sio {
             core::task::Poll::Ready(Ok(()))
         }
 
-        fn cancel_send<'a>(&'a self, tx: &'a mut Self::Tx<'a>) {
+        fn cancel_send<'a>(&self, tx: &'a mut Self::Tx<'a>) {
             tx.sent_frames = 0;
             tx.pending = None;
         }
@@ -895,7 +902,7 @@ mod rp2040_sio {
             }
         }
 
-        fn requeue<'a>(&'a self, rx: &'a mut Self::Rx<'a>) {
+        fn requeue<'a>(&self, rx: &mut Self::Rx<'a>) -> Result<(), Self::Error> {
             rx.requeued = rx.frame_label.is_some();
             if rx.requeued {
                 rx.delivered = false;
@@ -907,18 +914,12 @@ mod rp2040_sio {
                 rx.len,
                 rx.frame_label.map(|label| label.raw()).unwrap_or(0),
             ));
-        }
-
-        fn drain_events(
-            &self,
-            emit: &mut dyn FnMut(hibana::integration::transport::advanced::TransportEvent),
-        ) {
-            core::hint::black_box(emit);
+            Ok(())
         }
 
         fn recv_frame_hint<'a>(
-            &'a self,
-            rx: &'a Self::Rx<'a>,
+            &self,
+            rx: &mut Self::Rx<'a>,
         ) -> Option<hibana::integration::transport::FrameLabel> {
             let hint = rx.hint_frame_label.take();
             if let Some(frame_label) = hint {
@@ -931,15 +932,6 @@ mod rp2040_sio {
                 ));
             }
             hint
-        }
-
-        fn metrics(&self) -> Self::Metrics {}
-
-        fn apply_pacing_update(&self, interval_us: u32, burst_bytes: u16) {
-            assert!(
-                interval_us > 0 || burst_bytes == 0,
-                "zero interval may only disable burst pacing"
-            );
         }
     }
 }
@@ -1464,7 +1456,7 @@ pub trait BakerCapsuleFacts: appkit::Capsule<Placement = BakerPlacement> {
 
 pub struct BakerSioTransport<C>
 where
-    C: BakerCapsuleFacts,
+    C: BakerCapsuleFacts + 'static,
 {
     inner: rp2040_sio::SioTransport,
     capsule: core::marker::PhantomData<fn() -> C>,
@@ -1472,7 +1464,7 @@ where
 
 impl<C> BakerSioTransport<C>
 where
-    C: BakerCapsuleFacts,
+    C: BakerCapsuleFacts + 'static,
 {
     pub const fn new() -> Self {
         Self {
@@ -1493,32 +1485,28 @@ where
 
 impl<C> Copy for BakerSioTransport<C> where C: BakerCapsuleFacts {}
 
-impl<C> hibana::integration::Transport for BakerSioTransport<C>
+impl<C> hibana::integration::transport::Transport for BakerSioTransport<C>
 where
     C: BakerCapsuleFacts,
 {
-    type Error = <rp2040_sio::SioTransport as hibana::integration::Transport>::Error;
+    type Error = <rp2040_sio::SioTransport as hibana::integration::transport::Transport>::Error;
     type Tx<'a>
-        = <rp2040_sio::SioTransport as hibana::integration::Transport>::Tx<'a>
+        = <rp2040_sio::SioTransport as hibana::integration::transport::Transport>::Tx<'a>
     where
         Self: 'a;
     type Rx<'a>
-        = <rp2040_sio::SioTransport as hibana::integration::Transport>::Rx<'a>
+        = <rp2040_sio::SioTransport as hibana::integration::transport::Transport>::Rx<'a>
     where
         Self: 'a;
-    type Metrics = <rp2040_sio::SioTransport as hibana::integration::Transport>::Metrics;
-
     fn open<'a>(
         &'a self,
-        local_role: u8,
-        session_id: u32,
-        lane: u8,
+        port: hibana::integration::transport::PortOpen,
     ) -> (Self::Tx<'a>, Self::Rx<'a>) {
-        hibana::integration::Transport::open(&self.inner, local_role, session_id, lane)
+        hibana::integration::transport::Transport::open(&self.inner, port)
     }
 
     fn poll_send<'a, 'f>(
-        &'a self,
+        &self,
         tx: &'a mut Self::Tx<'a>,
         outgoing: hibana::integration::transport::Outgoing<'f>,
         context: &mut core::task::Context<'_>,
@@ -1526,11 +1514,11 @@ where
     where
         'a: 'f,
     {
-        hibana::integration::Transport::poll_send(&self.inner, tx, outgoing, context)
+        hibana::integration::transport::Transport::poll_send(&self.inner, tx, outgoing, context)
     }
 
-    fn cancel_send<'a>(&'a self, tx: &'a mut Self::Tx<'a>) {
-        hibana::integration::Transport::cancel_send(&self.inner, tx);
+    fn cancel_send<'a>(&self, tx: &'a mut Self::Tx<'a>) {
+        hibana::integration::transport::Transport::cancel_send(&self.inner, tx);
     }
 
     fn poll_recv<'a>(
@@ -1538,40 +1526,18 @@ where
         rx: &'a mut Self::Rx<'a>,
         context: &mut core::task::Context<'_>,
     ) -> core::task::Poll<Result<hibana::integration::wire::Payload<'a>, Self::Error>> {
-        hibana::integration::Transport::poll_recv(&self.inner, rx, context)
+        hibana::integration::transport::Transport::poll_recv(&self.inner, rx, context)
     }
 
-    fn requeue<'a>(&'a self, rx: &'a mut Self::Rx<'a>) {
-        hibana::integration::Transport::requeue(&self.inner, rx);
-    }
-
-    fn drain_events(
-        &self,
-        emit: &mut dyn FnMut(hibana::integration::transport::advanced::TransportEvent),
-    ) {
-        hibana::integration::Transport::drain_events(&self.inner, emit);
+    fn requeue<'a>(&self, rx: &mut Self::Rx<'a>) -> Result<(), Self::Error> {
+        hibana::integration::transport::Transport::requeue(&self.inner, rx)
     }
 
     fn recv_frame_hint<'a>(
-        &'a self,
-        rx: &'a Self::Rx<'a>,
+        &self,
+        rx: &mut Self::Rx<'a>,
     ) -> Option<hibana::integration::transport::FrameLabel> {
-        hibana::integration::Transport::recv_frame_hint(&self.inner, rx)
-    }
-
-    fn metrics(&self) -> Self::Metrics {
-        hibana::integration::Transport::metrics(&self.inner)
-    }
-
-    fn operational_deadline_ticks(&self) -> Option<u32> {
-        match C::SIO_OPERATIONAL_DEADLINE_TICKS {
-            0 => None,
-            ticks => Some(ticks),
-        }
-    }
-
-    fn apply_pacing_update(&self, interval_us: u32, burst_bytes: u16) {
-        hibana::integration::Transport::apply_pacing_update(&self.inner, interval_us, burst_bytes);
+        hibana::integration::transport::Transport::recv_frame_hint(&self.inner, rx)
     }
 }
 
@@ -2273,7 +2239,7 @@ fn check_report<R, I>(report: &appkit::RunReport<R, I>, required_role: u8) {
 
 impl<C> appkit::LogicalImage<C> for DriverImage
 where
-    C: BakerCapsuleFacts,
+    C: BakerCapsuleFacts + 'static,
 {
     type Artifact = C::DriverArtifact;
     type Exit<R> = appkit::RunReport<R, Self>;
@@ -2315,7 +2281,7 @@ where
 
 impl<C> appkit::LogicalImage<C> for EngineImage
 where
-    C: BakerCapsuleFacts,
+    C: BakerCapsuleFacts + 'static,
 {
     type Artifact = C::EngineArtifact;
     type Exit<R> = appkit::RunReport<R, Self>;
@@ -2354,7 +2320,7 @@ where
 #[cfg(feature = "wasm-engine-core")]
 impl<C> appkit::WasiGuestImage<C> for EngineImage
 where
-    C: BakerCapsuleFacts,
+    C: BakerCapsuleFacts + 'static,
 {
     fn wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
         baker_engine_wasi_guest_lease::<ROLE>()
@@ -2365,7 +2331,7 @@ static ARTIFACTS: BakerArtifacts = BakerArtifacts;
 
 pub fn run<C>() -> !
 where
-    C: BakerCapsuleFacts,
+    C: BakerCapsuleFacts + 'static,
     C::DriverArtifact: appkit::ArtifactGuestStorage<C, DriverImage>,
     C::EngineArtifact: appkit::ArtifactGuestStorage<C, EngineImage>,
     BakerArtifacts:

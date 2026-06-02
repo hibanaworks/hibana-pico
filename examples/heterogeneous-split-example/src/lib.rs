@@ -225,7 +225,7 @@ pub struct ExampleRx {
     bytes: [u8; EXAMPLE_FRAME_BYTES],
 }
 
-impl hibana::integration::Transport for ExampleCarrier {
+impl hibana::integration::transport::Transport for ExampleCarrier {
     type Error = hibana::integration::transport::TransportError;
     type Tx<'a>
         = ExampleTx
@@ -235,14 +235,13 @@ impl hibana::integration::Transport for ExampleCarrier {
         = ExampleRx
     where
         Self: 'a;
-    type Metrics = ();
-
     fn open<'a>(
         &'a self,
-        local_role: u8,
-        session_id: u32,
-        lane: u8,
+        port: hibana::integration::transport::PortOpen,
     ) -> (Self::Tx<'a>, Self::Rx<'a>) {
+        let local_role = port.local_role();
+        let session_id = port.session_id().raw();
+        let lane = port.lane().as_wire();
         assert!(lane < EXAMPLE_LANE_SLOTS);
         (
             ExampleTx {
@@ -260,7 +259,7 @@ impl hibana::integration::Transport for ExampleCarrier {
     }
 
     fn poll_send<'a, 'f>(
-        &'a self,
+        &self,
         tx: &'a mut Self::Tx<'a>,
         outgoing: hibana::integration::transport::Outgoing<'f>,
         cx: &mut core::task::Context<'_>,
@@ -318,7 +317,7 @@ impl hibana::integration::Transport for ExampleCarrier {
         core::task::Poll::Ready(Ok(()))
     }
 
-    fn cancel_send<'a>(&'a self, tx: &'a mut Self::Tx<'a>) {
+    fn cancel_send<'a>(&self, tx: &'a mut Self::Tx<'a>) {
         assert_ne!(tx.session_id, 0);
     }
 
@@ -367,40 +366,21 @@ impl hibana::integration::Transport for ExampleCarrier {
         }
     }
 
-    fn requeue<'a>(&'a self, rx: &'a mut Self::Rx<'a>) {
+    fn requeue<'a>(&self, rx: &mut Self::Rx<'a>) -> Result<(), Self::Error> {
         assert_ne!(rx.session_id, 0);
         core::hint::black_box(rx.local_role);
         core::hint::black_box(rx.lane);
-    }
-
-    fn drain_events(
-        &self,
-        emit: &mut dyn FnMut(hibana::integration::transport::advanced::TransportEvent),
-    ) {
-        emit(
-            hibana::integration::transport::advanced::TransportEvent::new(
-                hibana::integration::transport::advanced::TransportEventKind::Ack,
-                0,
-                0,
-                0,
-            ),
-        );
+        Ok(())
     }
 
     fn recv_frame_hint<'a>(
-        &'a self,
-        rx: &'a Self::Rx<'a>,
+        &self,
+        rx: &mut Self::Rx<'a>,
     ) -> Option<hibana::integration::transport::FrameLabel> {
         let edge = edge_slots_for_recv(rx.local_role)?;
         let edge = unsafe { &*edge };
         let slot = edge.slot(rx.lane)?;
         slot.frame_label(rx.session_id, rx.local_role)
-    }
-
-    fn metrics(&self) -> Self::Metrics {}
-
-    fn apply_pacing_update(&self, interval_us: u32, burst_bytes: u16) {
-        assert!(interval_us > 0 || burst_bytes == 0);
     }
 }
 
@@ -410,12 +390,12 @@ impl appkit::Capsule for Control {
     type Local = ControlLocal;
     type Report = core::convert::Infallible;
 
-    fn choreography() -> impl Projectable<Self::Universe> {
+    fn choreography() -> impl Projectable {
         g::seq(
-            g::send::<g::Role<0>, g::Role<1>, g::Msg<31, ()>, 0>(),
+            g::send::<0, 1, g::Msg<31, ()>, 0>(),
             g::seq(
-                g::send::<g::Role<1>, g::Role<2>, g::Msg<32, ()>, 1>(),
-                g::send::<g::Role<2>, g::Role<0>, g::Msg<33, ()>, 2>(),
+                g::send::<1, 2, g::Msg<32, ()>, 1>(),
+                g::send::<2, 0, g::Msg<33, ()>, 2>(),
             ),
         )
     }

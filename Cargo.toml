@@ -10,12 +10,14 @@ members = [
     ".",
     "examples/baker-firmware",
     "examples/heterogeneous-split-example",
+    "examples/rpw2-firmware",
     "examples/uno-q-heterogeneous",
     "examples/pico-nod",
     "examples/xbot",
 ]
 exclude = [
     "examples/baker-firmware/wasip1/guest",
+    "examples/rpw2-firmware/wasip1/guest",
     "examples/uno-q-heterogeneous/wasip1/guest",
     "examples/xbot/wasip1/guest",
     "guest/hibana-wasip1-guest",
@@ -24,7 +26,7 @@ exclude = [
 resolver = "3"
 
 [dependencies]
-hibana = { version = "0.6.2", default-features = false }
+hibana = { version = "0.8.0", default-features = false }
 
 [features]
 default = []

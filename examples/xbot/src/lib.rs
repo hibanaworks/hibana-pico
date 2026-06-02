@@ -14,15 +14,15 @@ use core::task::Poll;
 
 use hibana::g;
 use hibana::integration::{
-    cap::{GenericCapToken, ResourceKind},
-    policy::{ResolverContext, ResolverError, ResolverRef, RouteResolution},
+    cap::control::RouteDecisionKind,
+    policy::{DecisionArm, DecisionResolution, ResolverError, ResolverRef},
     program::Projectable,
     runtime::LabelUniverse,
 };
 use hibana_pico::choreography::protocol::{
     EngineReq, EngineRet, FdReadDone, FdWriteDone, LABEL_WASI_FD_READ, LABEL_WASI_FD_READ_RET,
     LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET, LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET,
-    LABEL_WASI_PROC_EXIT, PathOpened, RouteControl,
+    LABEL_WASI_PROC_EXIT, PathOpened,
 };
 use hibana_pico::{appkit, site};
 
@@ -57,7 +57,8 @@ const PROOF_CARRIER_ROLES: usize = 8;
 const PROOF_CARRIER_QUEUE_DEPTH: usize = 16;
 const PROOF_CARRIER_FRAME_BYTES: usize = 256;
 const PROOF_CODEX_PROPOSAL: &[u8] = b"safe";
-const XBOT_APPROVAL_ROUTE_POLICY: u16 = 70;
+const XBOT_APPROVAL_LEFT_POLICY: u16 = 70;
+const XBOT_APPROVAL_RIGHT_POLICY: u16 = 71;
 
 pub const CODEX_PROPOSAL_OBJECT: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
     b"xbot/codex-proposal.txt",
@@ -78,35 +79,17 @@ static XBOT_DRIVER_FACTS: appkit::ChoreoFsObjectSet<4> = appkit::ChoreoFsObjectS
     REPLY_DRAFT_OBJECT,
 ]);
 
-type NotApprovedRouteKind = RouteControl<LABEL_NOT_APPROVED_ROUTE, 1>;
-type ApproveRouteKind = RouteControl<LABEL_APPROVE_ROUTE, 0>;
-type RejectRouteKind = RouteControl<LABEL_REJECT_ROUTE, 0>;
-type FenceRouteKind = RouteControl<LABEL_FENCE_ROUTE, 1>;
-type NotApprovedRouteMsg =
-    g::Msg<LABEL_NOT_APPROVED_ROUTE, GenericCapToken<NotApprovedRouteKind>, NotApprovedRouteKind>;
-type ApproveRouteMsg =
-    g::Msg<LABEL_APPROVE_ROUTE, GenericCapToken<ApproveRouteKind>, ApproveRouteKind>;
-type RejectRouteMsg = g::Msg<LABEL_REJECT_ROUTE, GenericCapToken<RejectRouteKind>, RejectRouteKind>;
-type FenceRouteMsg = g::Msg<LABEL_FENCE_ROUTE, GenericCapToken<FenceRouteKind>, FenceRouteKind>;
+type NotApprovedRouteMsg = g::Msg<LABEL_NOT_APPROVED_ROUTE, (), RouteDecisionKind>;
+type ApproveRouteMsg = g::Msg<LABEL_APPROVE_ROUTE, (), RouteDecisionKind>;
+type RejectRouteMsg = g::Msg<LABEL_REJECT_ROUTE, (), RouteDecisionKind>;
+type FenceRouteMsg = g::Msg<LABEL_FENCE_ROUTE, (), RouteDecisionKind>;
 
-fn xbot_approval_route_resolver(ctx: ResolverContext) -> Result<RouteResolution, ResolverError> {
-    let Some(route_tag) = ctx
-        .attr(hibana::integration::policy::signals::core::TAG)
-        .map(|value| value.as_u8())
-    else {
-        return Err(ResolverError::reject());
-    };
-    if route_tag == <ApproveRouteKind as ResourceKind>::TAG
-        || route_tag == <RejectRouteKind as ResourceKind>::TAG
-    {
-        return Ok(RouteResolution::Arm(0));
-    }
-    if route_tag == <NotApprovedRouteKind as ResourceKind>::TAG
-        || route_tag == <FenceRouteKind as ResourceKind>::TAG
-    {
-        return Ok(RouteResolution::Arm(1));
-    }
-    Err(ResolverError::reject())
+fn xbot_approval_left_resolver() -> Result<DecisionResolution, ResolverError> {
+    Ok(DecisionResolution::Arm(DecisionArm::Left))
+}
+
+fn xbot_approval_right_resolver() -> Result<DecisionResolution, ResolverError> {
+    Ok(DecisionResolution::Arm(DecisionArm::Right))
 }
 
 #[cfg(feature = "embed-wasip1-artifacts")]
@@ -143,157 +126,91 @@ impl appkit::Capsule for XBotCapsule {
     type Local = XBotLocal;
     type Report = Infallible;
 
-    fn choreography() -> impl Projectable<Self::Universe> {
+    fn choreography() -> impl Projectable {
         let auto_post = g::seq(
-            g::send::<
-                g::Role<ROLE_DRIVER>,
-                g::Role<ROLE_X_BOUNDARY>,
-                g::Msg<LABEL_AUTO_X_POST, u8>,
-                0,
-            >(),
-            g::send::<
-                g::Role<ROLE_X_BOUNDARY>,
-                g::Role<ROLE_AUDIT>,
-                g::Msg<LABEL_X_POST_COMMITTED, u8>,
-                0,
-            >(),
+            g::send::<ROLE_DRIVER, ROLE_X_BOUNDARY, g::Msg<LABEL_AUTO_X_POST, u8>, 0>(),
+            g::send::<ROLE_X_BOUNDARY, ROLE_AUDIT, g::Msg<LABEL_X_POST_COMMITTED, u8>, 0>(),
         );
 
         let reply_action_rejected = || {
             g::seq(
-                g::send::<
-                    g::Role<ROLE_APPROVAL_BOUNDARY>,
-                    g::Role<ROLE_APPROVAL_BOUNDARY>,
-                    RejectRouteMsg,
-                    0,
-                >()
-                .policy::<XBOT_APPROVAL_ROUTE_POLICY>(),
-                g::send::<
-                    g::Role<ROLE_APPROVAL_BOUNDARY>,
-                    g::Role<ROLE_AUDIT>,
-                    g::Msg<LABEL_REJECTED_DRAFT, u8>,
-                    0,
-                >(),
+                g::send::<ROLE_APPROVAL_BOUNDARY, ROLE_APPROVAL_BOUNDARY, RejectRouteMsg, 0>()
+                    .policy::<XBOT_APPROVAL_LEFT_POLICY>(),
+                g::send::<ROLE_APPROVAL_BOUNDARY, ROLE_AUDIT, g::Msg<LABEL_REJECTED_DRAFT, u8>, 0>(
+                ),
             )
         };
         let reply_action_fenced = || {
             g::seq(
-                g::send::<
-                    g::Role<ROLE_APPROVAL_BOUNDARY>,
-                    g::Role<ROLE_APPROVAL_BOUNDARY>,
-                    FenceRouteMsg,
-                    0,
-                >()
-                .policy::<XBOT_APPROVAL_ROUTE_POLICY>(),
-                g::send::<
-                    g::Role<ROLE_APPROVAL_BOUNDARY>,
-                    g::Role<ROLE_AUDIT>,
-                    g::Msg<LABEL_SAFE_STOP, u8>,
-                    0,
-                >(),
+                g::send::<ROLE_APPROVAL_BOUNDARY, ROLE_APPROVAL_BOUNDARY, FenceRouteMsg, 0>()
+                    .policy::<XBOT_APPROVAL_RIGHT_POLICY>(),
+                g::send::<ROLE_APPROVAL_BOUNDARY, ROLE_AUDIT, g::Msg<LABEL_SAFE_STOP, u8>, 0>(),
             )
         };
         let reply_action_approved = g::seq(
-            g::send::<
-                g::Role<ROLE_APPROVAL_BOUNDARY>,
-                g::Role<ROLE_APPROVAL_BOUNDARY>,
-                ApproveRouteMsg,
-                0,
-            >()
-            .policy::<XBOT_APPROVAL_ROUTE_POLICY>(),
+            g::send::<ROLE_APPROVAL_BOUNDARY, ROLE_APPROVAL_BOUNDARY, ApproveRouteMsg, 0>()
+                .policy::<XBOT_APPROVAL_LEFT_POLICY>(),
             g::seq(
                 g::send::<
-                    g::Role<ROLE_APPROVAL_BOUNDARY>,
-                    g::Role<ROLE_DRIVER>,
+                    ROLE_APPROVAL_BOUNDARY,
+                    ROLE_DRIVER,
                     g::Msg<LABEL_APPROVED_REPLY_DRAFT, u8>,
                     0,
                 >(),
                 g::seq(
-                    g::send::<
-                        g::Role<ROLE_DRIVER>,
-                        g::Role<ROLE_X_BOUNDARY>,
-                        g::Msg<LABEL_APPROVED_X_REPLY, u8>,
-                        0,
-                    >(),
-                    g::send::<
-                        g::Role<ROLE_X_BOUNDARY>,
-                        g::Role<ROLE_AUDIT>,
-                        g::Msg<LABEL_X_REPLY_COMMITTED, u8>,
-                        0,
-                    >(),
+                    g::send::<ROLE_DRIVER, ROLE_X_BOUNDARY, g::Msg<LABEL_APPROVED_X_REPLY, u8>, 0>(
+                    ),
+                    g::send::<ROLE_X_BOUNDARY, ROLE_AUDIT, g::Msg<LABEL_X_REPLY_COMMITTED, u8>, 0>(
+                    ),
                 ),
             ),
         );
         let reply_action_not_approved = g::seq(
-            g::send::<
-                g::Role<ROLE_APPROVAL_BOUNDARY>,
-                g::Role<ROLE_APPROVAL_BOUNDARY>,
-                NotApprovedRouteMsg,
-                0,
-            >()
-            .policy::<XBOT_APPROVAL_ROUTE_POLICY>(),
+            g::send::<ROLE_APPROVAL_BOUNDARY, ROLE_APPROVAL_BOUNDARY, NotApprovedRouteMsg, 0>()
+                .policy::<XBOT_APPROVAL_RIGHT_POLICY>(),
             g::route(reply_action_rejected(), reply_action_fenced()),
         );
         let wasi_reply_read_prefix = g::seq(
-            g::send::<
-                g::Role<ROLE_WASI_AGENT>,
-                g::Role<ROLE_DRIVER>,
-                g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>,
-                0,
-            >(),
+            g::send::<ROLE_WASI_AGENT, ROLE_DRIVER, g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>, 0>(),
             g::seq(
                 g::send::<
-                    g::Role<ROLE_DRIVER>,
-                    g::Role<ROLE_WASI_AGENT>,
+                    ROLE_DRIVER,
+                    ROLE_WASI_AGENT,
                     g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>,
                     0,
                 >(),
-                g::send::<
-                    g::Role<ROLE_WASI_AGENT>,
-                    g::Role<ROLE_DRIVER>,
-                    g::Msg<LABEL_WASI_FD_READ, EngineReq>,
-                    0,
-                >(),
+                g::send::<ROLE_WASI_AGENT, ROLE_DRIVER, g::Msg<LABEL_WASI_FD_READ, EngineReq>, 0>(),
             ),
         );
         let wasi_reply_finish_path = g::seq(
-            g::send::<
-                g::Role<ROLE_DRIVER>,
-                g::Role<ROLE_WASI_AGENT>,
-                g::Msg<LABEL_WASI_FD_READ_RET, EngineRet>,
-                0,
-            >(),
+            g::send::<ROLE_DRIVER, ROLE_WASI_AGENT, g::Msg<LABEL_WASI_FD_READ_RET, EngineRet>, 0>(),
             g::seq(
-                g::send::<
-                    g::Role<ROLE_WASI_AGENT>,
-                    g::Role<ROLE_DRIVER>,
-                    g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>,
-                    1,
-                >(),
+                g::send::<ROLE_WASI_AGENT, ROLE_DRIVER, g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>, 1>(
+                ),
                 g::seq(
                     g::send::<
-                        g::Role<ROLE_DRIVER>,
-                        g::Role<ROLE_WASI_AGENT>,
+                        ROLE_DRIVER,
+                        ROLE_WASI_AGENT,
                         g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>,
                         1,
                     >(),
                     g::seq(
                         g::send::<
-                            g::Role<ROLE_WASI_AGENT>,
-                            g::Role<ROLE_DRIVER>,
+                            ROLE_WASI_AGENT,
+                            ROLE_DRIVER,
                             g::Msg<LABEL_WASI_FD_WRITE, EngineReq>,
                             1,
                         >(),
                         g::seq(
                             g::send::<
-                                g::Role<ROLE_DRIVER>,
-                                g::Role<ROLE_WASI_AGENT>,
+                                ROLE_DRIVER,
+                                ROLE_WASI_AGENT,
                                 g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>,
                                 1,
                             >(),
                             g::send::<
-                                g::Role<ROLE_WASI_AGENT>,
-                                g::Role<ROLE_DRIVER>,
+                                ROLE_WASI_AGENT,
+                                ROLE_DRIVER,
                                 g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>,
                                 1,
                             >(),
@@ -306,22 +223,22 @@ impl appkit::Capsule for XBotCapsule {
             wasi_reply_finish_path,
             g::seq(
                 g::send::<
-                    g::Role<ROLE_DRIVER>,
-                    g::Role<ROLE_APPROVAL_BOUNDARY>,
+                    ROLE_DRIVER,
+                    ROLE_APPROVAL_BOUNDARY,
                     g::Msg<LABEL_REPLY_APPROVAL_REQUEST, u8>,
                     0,
                 >(),
                 g::seq(
                     g::send::<
-                        g::Role<ROLE_APPROVAL_BOUNDARY>,
-                        g::Role<ROLE_HUMAN_APPROVAL_DEVICE>,
+                        ROLE_APPROVAL_BOUNDARY,
+                        ROLE_HUMAN_APPROVAL_DEVICE,
                         g::Msg<LABEL_HUMAN_APPROVAL_REQUEST, u8>,
                         0,
                     >(),
                     g::seq(
                         g::send::<
-                            g::Role<ROLE_HUMAN_APPROVAL_DEVICE>,
-                            g::Role<ROLE_APPROVAL_BOUNDARY>,
+                            ROLE_HUMAN_APPROVAL_DEVICE,
+                            ROLE_APPROVAL_BOUNDARY,
                             g::Msg<LABEL_HUMAN_APPROVAL_RESPONSE, u8>,
                             0,
                         >(),
@@ -332,53 +249,39 @@ impl appkit::Capsule for XBotCapsule {
         );
 
         let codex_reply_proposal_path = g::seq(
+            g::send::<ROLE_DRIVER, ROLE_LLM_BOUNDARY, g::Msg<LABEL_CODEX_REPLY_REQUEST, u8>, 0>(),
             g::send::<
-                g::Role<ROLE_DRIVER>,
-                g::Role<ROLE_LLM_BOUNDARY>,
-                g::Msg<LABEL_CODEX_REPLY_REQUEST, u8>,
-                0,
-            >(),
-            g::send::<
-                g::Role<ROLE_LLM_BOUNDARY>,
-                g::Role<ROLE_DRIVER>,
+                ROLE_LLM_BOUNDARY,
+                ROLE_DRIVER,
                 g::Msg<LABEL_CODEX_REPLY_PROPOSAL, CodexProposalObject>,
                 0,
             >(),
         );
         let reply_input_admitted = g::seq(
-            g::send::<
-                g::Role<ROLE_APPROVAL_BOUNDARY>,
-                g::Role<ROLE_DRIVER>,
-                g::Msg<LABEL_REPLY_INPUT_ADMITTED, u8>,
-                0,
-            >(),
+            g::send::<ROLE_APPROVAL_BOUNDARY, ROLE_DRIVER, g::Msg<LABEL_REPLY_INPUT_ADMITTED, u8>, 0>(
+            ),
             g::seq(codex_reply_proposal_path, reply_action_path),
         );
         let reply_input_path = g::seq(
-            g::send::<
-                g::Role<ROLE_X_BOUNDARY>,
-                g::Role<ROLE_DRIVER>,
-                g::Msg<LABEL_UNTRUSTED_REPLY, u8>,
-                0,
-            >(),
+            g::send::<ROLE_X_BOUNDARY, ROLE_DRIVER, g::Msg<LABEL_UNTRUSTED_REPLY, u8>, 0>(),
             g::seq(
                 g::send::<
-                    g::Role<ROLE_DRIVER>,
-                    g::Role<ROLE_APPROVAL_BOUNDARY>,
+                    ROLE_DRIVER,
+                    ROLE_APPROVAL_BOUNDARY,
                     g::Msg<LABEL_REPLY_INPUT_REQUEST, u8>,
                     0,
                 >(),
                 g::seq(
                     g::send::<
-                        g::Role<ROLE_APPROVAL_BOUNDARY>,
-                        g::Role<ROLE_HUMAN_APPROVAL_DEVICE>,
+                        ROLE_APPROVAL_BOUNDARY,
+                        ROLE_HUMAN_APPROVAL_DEVICE,
                         g::Msg<LABEL_HUMAN_APPROVAL_REQUEST, u8>,
                         0,
                     >(),
                     g::seq(
                         g::send::<
-                            g::Role<ROLE_HUMAN_APPROVAL_DEVICE>,
-                            g::Role<ROLE_APPROVAL_BOUNDARY>,
+                            ROLE_HUMAN_APPROVAL_DEVICE,
+                            ROLE_APPROVAL_BOUNDARY,
                             g::Msg<LABEL_HUMAN_APPROVAL_RESPONSE, u8>,
                             0,
                         >(),
@@ -394,8 +297,11 @@ impl appkit::Capsule for XBotCapsule {
     where
         R: appkit::ResolverRegistry<'cfg, Self>,
     {
-        registry.policy::<XBOT_APPROVAL_ROUTE_POLICY, ROLE_APPROVAL_BOUNDARY>(
-            ResolverRef::route_fn(xbot_approval_route_resolver),
+        registry.policy::<XBOT_APPROVAL_LEFT_POLICY, ROLE_APPROVAL_BOUNDARY>(
+            ResolverRef::decision_fn(xbot_approval_left_resolver),
+        );
+        registry.policy::<XBOT_APPROVAL_RIGHT_POLICY, ROLE_APPROVAL_BOUNDARY>(
+            ResolverRef::decision_fn(xbot_approval_right_resolver),
         );
     }
 }
@@ -663,7 +569,7 @@ async fn run_xbot_boundary<const ROLE: u8>(
                 .send(&1)
                 .await?;
             accept_marker(ctx.endpoint().recv::<HumanApprovalResponseMsg>().await?)?;
-            ctx.endpoint().flow::<ApproveRouteMsg>()?.send(()).await?;
+            ctx.endpoint().flow::<ApproveRouteMsg>()?.send(&()).await?;
             ctx.endpoint()
                 .flow::<ApprovedReplyDraftMsg>()?
                 .send(&1)
@@ -921,7 +827,7 @@ impl ProofCarrier {
     }
 }
 
-impl hibana::integration::Transport for ProofCarrier {
+impl hibana::integration::transport::Transport for ProofCarrier {
     type Error = hibana::integration::transport::TransportError;
     type Tx<'a>
         = ProofTx
@@ -931,14 +837,13 @@ impl hibana::integration::Transport for ProofCarrier {
         = ProofRx
     where
         Self: 'a;
-    type Metrics = ();
-
     fn open<'a>(
         &'a self,
-        local_role: u8,
-        session_id: u32,
-        lane: u8,
+        port: hibana::integration::transport::PortOpen,
     ) -> (Self::Tx<'a>, Self::Rx<'a>) {
+        let local_role = port.local_role();
+        let session_id = port.session_id().raw();
+        let lane = port.lane().as_wire();
         (
             ProofTx {
                 local_role,
@@ -958,7 +863,7 @@ impl hibana::integration::Transport for ProofCarrier {
     }
 
     fn poll_send<'a, 'f>(
-        &'a self,
+        &self,
         tx: &'a mut Self::Tx<'a>,
         outgoing: hibana::integration::transport::Outgoing<'f>,
         task_context: &mut core::task::Context<'_>,
@@ -1013,7 +918,7 @@ impl hibana::integration::Transport for ProofCarrier {
         )))
     }
 
-    fn requeue<'a>(&'a self, rx: &'a mut Self::Rx<'a>) {
+    fn requeue<'a>(&self, rx: &mut Self::Rx<'a>) -> Result<(), Self::Error> {
         if let Some(frame_label) = rx.frame_label.take() {
             let local_role = rx.local_role as usize;
             if local_role < PROOF_CARRIER_ROLES {
@@ -1023,25 +928,12 @@ impl hibana::integration::Transport for ProofCarrier {
             }
         }
         rx.hint_frame_label.set(None);
-    }
-
-    fn drain_events(
-        &self,
-        emit: &mut dyn FnMut(hibana::integration::transport::advanced::TransportEvent),
-    ) {
-        emit(
-            hibana::integration::transport::advanced::TransportEvent::new(
-                hibana::integration::transport::advanced::TransportEventKind::Ack,
-                0,
-                0,
-                0,
-            ),
-        );
+        Ok(())
     }
 
     fn recv_frame_hint<'a>(
-        &'a self,
-        rx: &'a Self::Rx<'a>,
+        &self,
+        rx: &mut Self::Rx<'a>,
     ) -> Option<hibana::integration::transport::FrameLabel> {
         if let Some(frame_label) = rx.hint_frame_label.take() {
             return Some(frame_label);
@@ -1051,12 +943,6 @@ impl hibana::integration::Transport for ProofCarrier {
             return None;
         }
         self.edit(|queues| queues.by_role[local_role].front_label(rx.lane))
-    }
-
-    fn metrics(&self) -> Self::Metrics {}
-
-    fn apply_pacing_update(&self, interval_us: u32, burst_bytes: u16) {
-        core::hint::black_box((interval_us, burst_bytes));
     }
 }
 

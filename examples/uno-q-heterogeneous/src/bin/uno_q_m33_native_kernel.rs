@@ -44,13 +44,17 @@ mod animation_timing_tests {
     }
 
     #[test]
-    fn normal_and_speaking_eyes_are_two_by_three_rectangles() {
+    fn happy_normal_and_speaking_eyes_are_two_by_three_rectangles() {
         let source = include_str!("uno_q_m33_native_kernel.rs");
         assert!(source.contains(
             "const FACE_NEUTRAL: [&[u8; 13]; 8] = [\n        b\".............\",\n        b\"..##.....##..\",\n        b\"..##.....##..\",\n        b\"..##.....##..\","
         ));
+        assert!(source.contains(
+            "const FACE_HAPPY: [&[u8; 13]; 8] = [\n        b\".............\",\n        b\"..##.....##..\",\n        b\"..##.....##..\",\n        b\"..##.....##..\","
+        ));
         for forbidden in [
             "const FACE_NEUTRAL: [&[u8; 13]; 8] = [\n        b\".............\",\n        b\"..###...###..\"",
+            "const FACE_HAPPY: [&[u8; 13]; 8] = [\n        b\".###.....###.\",",
             "const FACE_NEUTRAL: [&[u8; 13]; 8] = [\n        b\".............\",\n        b\".####...####.\"",
             "const FACE_SPEAK_1: [&[u8; 13]; 8] = [\n        b\".............\",\n        b\"..###...###..\"",
             "const FACE_SPEAK_2: [&[u8; 13]; 8] = [\n        b\".............\",\n        b\"..###...###..\"",
@@ -139,13 +143,13 @@ mod firmware {
         b".............",
     ];
     const FACE_HAPPY: [&[u8; 13]; 8] = [
-        b".###.....###.",
-        b"..###...###..",
-        b"...##...##...",
+        b".............",
+        b"..##.....##..",
+        b"..##.....##..",
+        b"..##.....##..",
         b".............",
         b"..#.......#..",
-        b"...#.....#...",
-        b".....###.....",
+        b"...#######...",
         b".............",
     ];
     const FACE_SAD: [&[u8; 13]; 8] = [
@@ -282,6 +286,8 @@ mod firmware {
     #[unsafe(no_mangle)]
     pub static mut HIBANA_M33_RX_FRAMES: u32 = 0;
     #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_PARSED_FRAMES: u32 = 0;
+    #[unsafe(no_mangle)]
     pub static mut HIBANA_M33_TX_FRAMES: u32 = 0;
     #[unsafe(no_mangle)]
     pub static mut HIBANA_M33_LAST_RX: u32 = 0;
@@ -289,6 +295,22 @@ mod firmware {
     pub static mut HIBANA_M33_LAST_RX_PAYLOAD01: u32 = 0;
     #[unsafe(no_mangle)]
     pub static mut HIBANA_M33_LAST_TX: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_OPEN_SESSION: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_OPEN_PORT: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_REJECT_REASON: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_REJECT_EXPECT_SESSION: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_REJECT_FRAME_SESSION: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_REJECT_META: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_TRANSPORT_DEADLINE: u32 = 0;
+    #[unsafe(no_mangle)]
+    pub static mut HIBANA_M33_TRANSPORT_DEADLINE_TICKS: u32 = 0;
 
     static mut RX_RING: [u16; RX_RING_CAP] = [0; RX_RING_CAP];
     static mut RX_RING_HEAD: usize = 0;
@@ -468,6 +490,68 @@ mod firmware {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "C" fn uno_q_m33_carrier_observe_open(role: u8, lane: u8, session_id: u32) {
+        marker_store(ptr::addr_of_mut!(HIBANA_M33_OPEN_SESSION), session_id);
+        marker_store(
+            ptr::addr_of_mut!(HIBANA_M33_OPEN_PORT),
+            (u32::from(role) << 16) | (u32::from(lane) << 8),
+        );
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn uno_q_m33_carrier_observe_parsed(
+        session_id: u32,
+        source: u8,
+        peer: u8,
+        label: u8,
+        len: u8,
+    ) {
+        marker_add(ptr::addr_of_mut!(HIBANA_M33_PARSED_FRAMES), 1);
+        marker_store(
+            ptr::addr_of_mut!(HIBANA_M33_REJECT_FRAME_SESSION),
+            session_id,
+        );
+        marker_store(
+            ptr::addr_of_mut!(HIBANA_M33_REJECT_META),
+            (u32::from(source) << 24)
+                | (u32::from(peer) << 16)
+                | (u32::from(label) << 8)
+                | u32::from(len),
+        );
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn uno_q_m33_carrier_observe_reject(
+        reason: u8,
+        expected_session_id: u32,
+        frame_session_id: u32,
+        source: u8,
+        peer: u8,
+        label: u8,
+        len: u8,
+    ) {
+        marker_store(
+            ptr::addr_of_mut!(HIBANA_M33_REJECT_REASON),
+            u32::from(reason),
+        );
+        marker_store(
+            ptr::addr_of_mut!(HIBANA_M33_REJECT_EXPECT_SESSION),
+            expected_session_id,
+        );
+        marker_store(
+            ptr::addr_of_mut!(HIBANA_M33_REJECT_FRAME_SESSION),
+            frame_session_id,
+        );
+        marker_store(
+            ptr::addr_of_mut!(HIBANA_M33_REJECT_META),
+            (u32::from(source) << 24)
+                | (u32::from(peer) << 16)
+                | (u32::from(label) << 8)
+                | u32::from(len),
+        );
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "C" fn uno_q_m33_carrier_observe_payload(label: u8, len: u8, byte0: u8, byte1: u8) {
         marker_store(
             ptr::addr_of_mut!(HIBANA_M33_LAST_RX_PAYLOAD01),
@@ -491,6 +575,19 @@ mod firmware {
             ptr::addr_of_mut!(HIBANA_M33_LAST_HINT_LANE),
             u32::from(lane),
         );
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn uno_q_m33_carrier_observe_deadline(op: u8, role: u8, lane: u8, elapsed: u32) {
+        marker_store(
+            ptr::addr_of_mut!(HIBANA_M33_TRANSPORT_DEADLINE),
+            (u32::from(op) << 24) | (u32::from(role) << 16) | (u32::from(lane) << 8),
+        );
+        marker_store(
+            ptr::addr_of_mut!(HIBANA_M33_TRANSPORT_DEADLINE_TICKS),
+            elapsed,
+        );
+        mark_stage(0xffff_0002);
     }
 
     #[unsafe(no_mangle)]

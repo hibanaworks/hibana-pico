@@ -147,7 +147,7 @@ impl WireEncode for CodexProposalObject {
 impl WirePayload for CodexProposalObject {
     type Decoded<'a> = Self;
 
-    fn decode_payload<'a>(input: Payload<'a>) -> Result<Self::Decoded<'a>, CodecError> {
+    fn validate_payload(input: Payload<'_>) -> Result<(), CodecError> {
         let bytes = input.as_bytes();
         if bytes.len() < 2 {
             return Err(CodecError::Truncated);
@@ -161,9 +161,17 @@ impl WirePayload for CodexProposalObject {
         if bytes.len() != 2 + len {
             return Err(CodecError::Invalid("codex proposal length mismatch"));
         }
-        match Self::new(&bytes[2..]) {
-            Ok(value) => Ok(value),
-            Err(_) => Err(CodecError::Invalid("invalid codex proposal")),
+        Self::new(&bytes[2..])
+            .map(|_| ())
+            .map_err(|_| CodecError::Invalid("invalid codex proposal"))
+    }
+
+    fn decode_validated_payload<'a>(input: Payload<'a>) -> Self::Decoded<'a> {
+        let bytes = input.as_bytes();
+        let len = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
+        match Self::new(&bytes[2..2 + len]) {
+            Ok(value) => value,
+            Err(_) => panic!("validated codex proposal must decode"),
         }
     }
 

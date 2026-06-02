@@ -9,22 +9,23 @@ use core::task::{RawWaker, RawWakerVTable};
 use core::{
     convert::Infallible,
     fmt::Debug,
+    future::Future,
     marker::PhantomData,
-    mem::{MaybeUninit, align_of, size_of},
+    mem::{align_of, size_of},
     pin::Pin,
-    slice,
     task::{Context, Poll, Waker},
 };
+
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+use core::mem::MaybeUninit;
 
 #[cfg(feature = "wasm-engine-core")]
 use core::mem::ManuallyDrop;
 
-#[cfg(any(test, not(target_os = "none")))]
-use core::future::Future;
-
 #[cfg(any(feature = "wasm-engine-core", all(not(test), target_os = "none")))]
 use core::cell::UnsafeCell;
 
+#[cfg(feature = "wasm-engine-core")]
 use crate::choreography::protocol::{
     LABEL_WASI_ARGS_GET, LABEL_WASI_ARGS_GET_RET, LABEL_WASI_ARGS_SIZES_GET,
     LABEL_WASI_ARGS_SIZES_GET_RET, LABEL_WASI_CLOCK_RES_GET, LABEL_WASI_CLOCK_RES_GET_RET,
@@ -33,13 +34,9 @@ use crate::choreography::protocol::{
     LABEL_WASI_FD_CLOSE, LABEL_WASI_FD_CLOSE_RET, LABEL_WASI_FD_FDSTAT_GET,
     LABEL_WASI_FD_FDSTAT_GET_RET, LABEL_WASI_FD_READ, LABEL_WASI_FD_READ_RET,
     LABEL_WASI_FD_READDIR, LABEL_WASI_FD_READDIR_RET, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET,
-    LABEL_WASI_IMPORT_LOOP_BREAK_CONTROL, LABEL_WASI_IMPORT_LOOP_CONTINUE_CONTROL,
     LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF,
     LABEL_WASI_POLL_ONEOFF_RET, LABEL_WASI_PROC_EXIT, LABEL_WASI_RANDOM_GET,
-    LABEL_WASI_RANDOM_GET_RET, LABEL_WASIP1_CLOCK_NOW, LABEL_WASIP1_CLOCK_NOW_RET,
-    LABEL_WASIP1_EXIT, LABEL_WASIP1_RANDOM_SEED, LABEL_WASIP1_RANDOM_SEED_RET, LABEL_WASIP1_STDERR,
-    LABEL_WASIP1_STDERR_RET, LABEL_WASIP1_STDIN, LABEL_WASIP1_STDIN_RET, LABEL_WASIP1_STDOUT,
-    LABEL_WASIP1_STDOUT_RET,
+    LABEL_WASI_RANDOM_GET_RET,
 };
 
 #[cfg(feature = "wasm-engine-core")]
@@ -68,6 +65,11 @@ const APPKIT_ROLE_FUTURE_BYTES: usize = 8 * 1024;
 const APPKIT_EMBEDDED_FUTURE_ALIGN: usize = 16;
 #[cfg(all(not(test), target_os = "none"))]
 const APPKIT_EMBEDDED_ROLE_FUTURE_BYTES: usize = 4 * 1024;
+#[cfg(all(not(test), target_os = "none"))]
+const APPKIT_EMBEDDED_ROLE_SLOTS: usize = 4;
+#[cfg(all(not(test), target_os = "none"))]
+const APPKIT_EMBEDDED_FUTURE_BYTES: usize =
+    APPKIT_EMBEDDED_ROLE_FUTURE_BYTES * APPKIT_EMBEDDED_ROLE_SLOTS;
 #[cfg(feature = "wasm-engine-core")]
 const APPKIT_WASI_GUEST_ARENA_ALIGN: usize = 16;
 #[cfg(feature = "wasm-engine-core")]
@@ -243,15 +245,15 @@ impl<const N: usize> EmbeddedFutureArena<N> {
 #[cfg(all(not(test), target_os = "none"))]
 #[repr(C, align(16))]
 pub struct EmbeddedAttachStorage<const SLAB_BYTES: usize> {
-    tap: UnsafeCell<[hibana::integration::tap::TapEvent; APPKIT_ATTACH_TAP_EVENTS]>,
+    tap: UnsafeCell<[hibana::integration::runtime::TapEvent; APPKIT_ATTACH_TAP_EVENTS]>,
     slab: UnsafeCell<[u8; SLAB_BYTES]>,
-    future: EmbeddedFutureArena<APPKIT_EMBEDDED_ROLE_FUTURE_BYTES>,
+    future: EmbeddedFutureArena<APPKIT_EMBEDDED_FUTURE_BYTES>,
 }
 
 #[cfg(all(not(test), target_os = "none"))]
 #[derive(Clone, Copy)]
 pub struct EmbeddedAttachStorageRef<'a> {
-    tap: *mut [hibana::integration::tap::TapEvent; APPKIT_ATTACH_TAP_EVENTS],
+    tap: *mut [hibana::integration::runtime::TapEvent; APPKIT_ATTACH_TAP_EVENTS],
     slab: *mut [u8],
     future: *mut u8,
     future_bytes: usize,
@@ -263,7 +265,7 @@ impl<const SLAB_BYTES: usize> EmbeddedAttachStorage<SLAB_BYTES> {
     pub const fn empty() -> Self {
         Self {
             tap: UnsafeCell::new(
-                [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS],
+                [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS],
             ),
             slab: UnsafeCell::new([0; SLAB_BYTES]),
             future: EmbeddedFutureArena::EMPTY,
@@ -273,13 +275,13 @@ impl<const SLAB_BYTES: usize> EmbeddedAttachStorage<SLAB_BYTES> {
     pub fn lease(&'static self) -> EmbeddedAttachStorageRef<'static> {
         let tap = unsafe { &mut *self.tap.get() };
         let slab = unsafe { &mut *self.slab.get() };
-        tap.fill(hibana::integration::tap::TapEvent::zero());
+        tap.fill(hibana::integration::runtime::TapEvent::zero());
         slab.fill(0);
         EmbeddedAttachStorageRef {
             tap,
             slab,
             future: self.future.as_mut_ptr(),
-            future_bytes: APPKIT_EMBEDDED_ROLE_FUTURE_BYTES,
+            future_bytes: APPKIT_EMBEDDED_FUTURE_BYTES,
             marker: PhantomData,
         }
     }
@@ -287,55 +289,6 @@ impl<const SLAB_BYTES: usize> EmbeddedAttachStorage<SLAB_BYTES> {
 
 #[cfg(all(not(test), target_os = "none"))]
 unsafe impl<const SLAB_BYTES: usize> Sync for EmbeddedAttachStorage<SLAB_BYTES> {}
-
-fn align_storage_up(value: usize, align: usize) -> usize {
-    let mask = align.saturating_sub(1);
-    (value + mask) & !mask
-}
-
-fn carve_session_kit_storage<'a, TransportTy, UniverseTy, ClockTy, const MAX_RV: usize>(
-    slab: &'a mut [u8],
-) -> (
-    &'a mut MaybeUninit<
-        hibana::integration::SessionKit<'a, TransportTy, UniverseTy, ClockTy, MAX_RV>,
-    >,
-    &'a mut [u8],
-)
-where
-    TransportTy: hibana::integration::Transport + 'a,
-    UniverseTy: hibana::integration::runtime::LabelUniverse + 'a,
-    ClockTy: hibana::integration::runtime::Clock + 'a,
-{
-    type Kit<'a, TransportTy, UniverseTy, ClockTy, const MAX_RV: usize> =
-        hibana::integration::SessionKit<'a, TransportTy, UniverseTy, ClockTy, MAX_RV>;
-
-    let base = slab.as_mut_ptr() as usize;
-    let len = slab.len();
-    let end = base
-        .checked_add(len)
-        .expect("appkit attach slab address range overflow");
-    let kit_start = align_storage_up(
-        base,
-        align_of::<Kit<'a, TransportTy, UniverseTy, ClockTy, MAX_RV>>(),
-    );
-    let kit_end = kit_start
-        .checked_add(size_of::<Kit<'a, TransportTy, UniverseTy, ClockTy, MAX_RV>>())
-        .expect("appkit SessionKit storage address range overflow");
-    assert!(
-        kit_end <= end,
-        "appkit attach slab cannot fit in-place SessionKit"
-    );
-    let kit_offset = kit_start - base;
-    let rest_offset = kit_end - base;
-    unsafe {
-        let kit_storage = &mut *slab
-            .as_mut_ptr()
-            .add(kit_offset)
-            .cast::<MaybeUninit<Kit<'a, TransportTy, UniverseTy, ClockTy, MAX_RV>>>();
-        let rest = slice::from_raw_parts_mut(slab.as_mut_ptr().add(rest_offset), len - rest_offset);
-        (kit_storage, rest)
-    }
-}
 
 #[repr(C, align(16))]
 #[cfg(feature = "wasm-engine-core")]
@@ -474,84 +427,6 @@ fn embedded_pending_forever<T>(context: T) -> ! {
         core::hint::black_box(&context);
         embedded_wait_for_event();
     }
-}
-
-#[cfg(all(not(test), target_os = "none"))]
-fn embedded_future_arena(storage: EmbeddedAttachStorageRef<'static>) -> (*mut u8, usize) {
-    (storage.future, storage.future_bytes)
-}
-
-#[cfg(all(not(test), target_os = "none"))]
-#[inline(never)]
-unsafe fn poll_embedded_stored_task<F, E>(ptr: *mut u8, cx: &mut Context<'_>) -> Poll<RoleResult<E>>
-where
-    F: core::future::Future<Output = RoleResult<E>>,
-{
-    let future = unsafe {
-        // SAFETY: `poll_localside_forever` wrote an initialized `F` into the
-        // role arena and polls it in place for the lifetime of the image.
-        &mut *ptr.cast::<F>()
-    };
-    let mut pinned = unsafe {
-        // SAFETY: The future remains in the fixed arena and is never moved
-        // after initialization.
-        Pin::new_unchecked(future)
-    };
-    pinned.as_mut().poll(cx)
-}
-
-#[cfg(all(not(test), target_os = "none"))]
-fn poll_localside_forever<F, E>(storage: EmbeddedAttachStorageRef<'static>, future: F) -> !
-where
-    F: core::future::Future<Output = RoleResult<E>>,
-    E: Debug,
-{
-    let (future_arena, future_arena_bytes) = embedded_future_arena(storage);
-
-    assert!(
-        size_of::<F>() <= future_arena_bytes,
-        "appkit role future exceeds embedded future arena"
-    );
-    assert!(
-        align_of::<F>() <= APPKIT_EMBEDDED_FUTURE_ALIGN,
-        "appkit role future alignment exceeds embedded future arena"
-    );
-
-    unsafe {
-        let future_ptr = future_arena.cast::<F>();
-        future_ptr.write(future);
-        loop {
-            let task_poll = {
-                let task_waker = embedded_task_waker();
-                let mut task_context = Context::from_waker(task_waker);
-                poll_embedded_stored_task::<F, E>(future_arena, &mut task_context)
-            };
-            match task_poll {
-                Poll::Pending => embedded_wait_for_event(),
-                Poll::Ready(Ok(done)) => match done {},
-                Poll::Ready(Err(error)) => {
-                    core::hint::black_box(&error);
-                    panic!("appkit embedded role task failed: {error:?}")
-                }
-            }
-        }
-    }
-}
-
-#[cfg(all(not(test), target_os = "none"))]
-fn poll_embedded_role_future<F, E>(
-    requested_roles: RoleSet,
-    storage: EmbeddedAttachStorageRef<'static>,
-    future: F,
-) where
-    F: core::future::Future<Output = RoleResult<E>>,
-    E: Debug,
-{
-    assert!(
-        requested_roles.count() == 1,
-        "bare-metal logical images attach exactly one role; split peer roles into separate logical images"
-    );
-    poll_localside_forever::<F, E>(storage, future);
 }
 
 /// Compact logical image identifier.
@@ -783,6 +658,9 @@ pub struct LaneSet {
 
 impl LaneSet {
     pub const EMPTY: Self = Self { words: [0; 4] };
+    pub const ALL: Self = Self {
+        words: [u64::MAX, u64::MAX, u64::MAX, u64::MAX],
+    };
 
     pub const fn single(lane: u8) -> Self {
         let word = (lane / 64) as usize;
@@ -915,7 +793,7 @@ pub trait Capsule: Sized {
     type Local: Localside<Self>;
     type Report;
 
-    fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe>;
+    fn choreography() -> impl hibana::integration::program::Projectable;
 
     fn register_resolvers<'cfg, R>(_: &mut R)
     where
@@ -951,7 +829,7 @@ pub trait ArtifactForImage<C: Capsule, I: LogicalImage<C>> {
 pub trait LogicalImage<C: Capsule>: Sized {
     type Artifact;
     type Exit<R>: FromRunReport<R, Self>;
-    type Carrier<'a>: hibana::integration::Transport + 'a
+    type Carrier<'a>: hibana::integration::transport::Transport + 'a
     where
         Self: 'a,
         C: 'a;
@@ -1030,17 +908,17 @@ where
 }
 
 fn visit_projected_role<C, V, const ROLE: u8>(
-    program: &impl hibana::integration::program::Projectable<C::Universe>,
+    program: &impl hibana::integration::program::Projectable,
     visitor: &mut V,
 ) where
     C: Capsule,
     V: ProjectedRoleVisitor<C>,
 {
-    visitor.visit::<ROLE>(program.project::<ROLE>());
+    visitor.visit::<ROLE>(hibana::integration::program::project::<ROLE, _>(program));
 }
 
 fn visit_requested_projected_roles<C, V>(
-    program: &impl hibana::integration::program::Projectable<C::Universe>,
+    program: &impl hibana::integration::program::Projectable,
     requested_roles: RoleSet,
     visitor: &mut V,
 ) where
@@ -1097,7 +975,7 @@ fn visit_requested_projected_roles<C, V>(
     }
 }
 fn collect_projected_roles<C, I>(
-    program: &impl hibana::integration::program::Projectable<C::Universe>,
+    program: &impl hibana::integration::program::Projectable,
 ) -> ProjectedRoles
 where
     C: Capsule,
@@ -1164,10 +1042,6 @@ pub struct EndpointCarrierFacts {
     carrier: CarrierKind,
     wasi_imports: WasiImports,
     wasi_completion_pair_count: u8,
-    wasi_loop_continue_head_labels: [u8; 16],
-    wasi_loop_continue_head_count: u8,
-    wasi_loop_break_head_labels: [u8; 16],
-    wasi_loop_break_head_count: u8,
 }
 
 #[cfg(feature = "wasm-engine-core")]
@@ -1233,21 +1107,18 @@ impl EndpointCarrierFacts {
         requested_roles: RoleSet,
         carrier: CarrierKind,
         projection: ProjectionCaps,
+        session_id: u32,
     ) -> Self {
         Self {
             image_id,
             site_id,
-            session_id: session_id_from_projection(projection),
+            session_id,
             requested_roles,
             projected_roles: projection.roles,
             lanes: projection.lanes,
             carrier,
             wasi_imports: projection.wasi_imports,
             wasi_completion_pair_count: projection.wasi_completion_pair_count,
-            wasi_loop_continue_head_labels: projection.wasi_loop_continue_head_labels,
-            wasi_loop_continue_head_count: projection.wasi_loop_continue_head_count,
-            wasi_loop_break_head_labels: projection.wasi_loop_break_head_labels,
-            wasi_loop_break_head_count: projection.wasi_loop_break_head_count,
         }
     }
 
@@ -1288,119 +1159,15 @@ impl EndpointCarrierFacts {
     }
 
     #[cfg(feature = "wasm-engine-core")]
-    const fn requires_wasi_loop_continue_for_label(self, label: u8) -> bool {
-        label_array_contains(
-            self.wasi_loop_continue_head_labels,
-            self.wasi_loop_continue_head_count,
-            label,
-        )
-    }
-
-    #[cfg(feature = "wasm-engine-core")]
-    const fn requires_wasi_loop_break_for_label(self, label: u8) -> bool {
-        label_array_contains(
-            self.wasi_loop_break_head_labels,
-            self.wasi_loop_break_head_count,
-            label,
-        )
-    }
-
-    #[cfg(feature = "wasm-engine-core")]
     const fn expects_wasi_proc_exit_terminal_event(self) -> bool {
         self.wasi_imports.contains(WasiImports::PROC_EXIT)
     }
-}
-
-#[cfg(feature = "wasm-engine-core")]
-const fn label_array_contains(labels: [u8; 16], count: u8, label: u8) -> bool {
-    let mut idx = 0usize;
-    while idx < count as usize {
-        if labels[idx] == label {
-            return true;
-        }
-        idx += 1;
-    }
-    false
 }
 
 const fn session_id_from_projection(projection: ProjectionCaps) -> u32 {
     let mixed = projection.fingerprint[0] ^ projection.fingerprint[1].rotate_left(17);
     let folded = (mixed as u32) ^ ((mixed >> 32) as u32);
     if folded == 0 { 1 } else { folded }
-}
-
-fn wasi_import_for_engine_req_label(label: u8) -> Option<WasiImports> {
-    match label {
-        LABEL_WASIP1_STDOUT | LABEL_WASIP1_STDERR | LABEL_WASI_FD_WRITE => {
-            Some(WasiImports::FD_WRITE)
-        }
-        LABEL_WASIP1_STDIN | LABEL_WASI_FD_READ => Some(WasiImports::FD_READ),
-        LABEL_WASI_FD_FDSTAT_GET => Some(WasiImports::FD_FDSTAT_GET),
-        LABEL_WASI_FD_CLOSE => Some(WasiImports::FD_CLOSE),
-        LABEL_WASI_CLOCK_RES_GET => Some(WasiImports::CLOCK_RES_GET),
-        LABEL_WASIP1_CLOCK_NOW | LABEL_WASI_CLOCK_TIME_GET => Some(WasiImports::CLOCK_TIME_GET),
-        LABEL_WASI_POLL_ONEOFF => Some(WasiImports::POLL_ONEOFF),
-        LABEL_WASIP1_RANDOM_SEED | LABEL_WASI_RANDOM_GET => Some(WasiImports::RANDOM_GET),
-        LABEL_WASIP1_EXIT | LABEL_WASI_PROC_EXIT => Some(WasiImports::PROC_EXIT),
-        LABEL_WASI_ARGS_SIZES_GET => Some(WasiImports::ARGS_SIZES_GET),
-        LABEL_WASI_ARGS_GET => Some(WasiImports::ARGS_GET),
-        LABEL_WASI_ENVIRON_SIZES_GET => Some(WasiImports::ENVIRON_SIZES_GET),
-        LABEL_WASI_ENVIRON_GET => Some(WasiImports::ENVIRON_GET),
-        LABEL_WASI_PATH_OPEN => Some(WasiImports::PATH_OPEN),
-        LABEL_WASI_FD_READDIR => Some(WasiImports::FD_READDIR),
-        _ => None,
-    }
-}
-
-fn wasi_completion_label_for_engine_req_label(label: u8) -> Option<u8> {
-    match label {
-        LABEL_WASIP1_STDOUT => Some(LABEL_WASIP1_STDOUT_RET),
-        LABEL_WASIP1_STDERR => Some(LABEL_WASIP1_STDERR_RET),
-        LABEL_WASIP1_STDIN => Some(LABEL_WASIP1_STDIN_RET),
-        LABEL_WASIP1_CLOCK_NOW => Some(LABEL_WASIP1_CLOCK_NOW_RET),
-        LABEL_WASIP1_RANDOM_SEED => Some(LABEL_WASIP1_RANDOM_SEED_RET),
-        LABEL_WASI_FD_WRITE => Some(LABEL_WASI_FD_WRITE_RET),
-        LABEL_WASI_FD_READ => Some(LABEL_WASI_FD_READ_RET),
-        LABEL_WASI_FD_FDSTAT_GET => Some(LABEL_WASI_FD_FDSTAT_GET_RET),
-        LABEL_WASI_FD_CLOSE => Some(LABEL_WASI_FD_CLOSE_RET),
-        LABEL_WASI_CLOCK_RES_GET => Some(LABEL_WASI_CLOCK_RES_GET_RET),
-        LABEL_WASI_CLOCK_TIME_GET => Some(LABEL_WASI_CLOCK_TIME_GET_RET),
-        LABEL_WASI_POLL_ONEOFF => Some(LABEL_WASI_POLL_ONEOFF_RET),
-        LABEL_WASI_RANDOM_GET => Some(LABEL_WASI_RANDOM_GET_RET),
-        LABEL_WASI_ARGS_SIZES_GET => Some(LABEL_WASI_ARGS_SIZES_GET_RET),
-        LABEL_WASI_ARGS_GET => Some(LABEL_WASI_ARGS_GET_RET),
-        LABEL_WASI_ENVIRON_SIZES_GET => Some(LABEL_WASI_ENVIRON_SIZES_GET_RET),
-        LABEL_WASI_ENVIRON_GET => Some(LABEL_WASI_ENVIRON_GET_RET),
-        LABEL_WASI_PATH_OPEN => Some(LABEL_WASI_PATH_OPEN_RET),
-        LABEL_WASI_FD_READDIR => Some(LABEL_WASI_FD_READDIR_RET),
-        LABEL_WASIP1_EXIT | LABEL_WASI_PROC_EXIT => None,
-        _ => None,
-    }
-}
-
-fn is_engine_ret_label(label: u8) -> bool {
-    matches!(
-        label,
-        LABEL_WASIP1_STDOUT_RET
-            | LABEL_WASIP1_STDERR_RET
-            | LABEL_WASIP1_STDIN_RET
-            | LABEL_WASIP1_CLOCK_NOW_RET
-            | LABEL_WASIP1_RANDOM_SEED_RET
-            | LABEL_WASI_FD_WRITE_RET
-            | LABEL_WASI_FD_READ_RET
-            | LABEL_WASI_FD_FDSTAT_GET_RET
-            | LABEL_WASI_FD_CLOSE_RET
-            | LABEL_WASI_CLOCK_RES_GET_RET
-            | LABEL_WASI_CLOCK_TIME_GET_RET
-            | LABEL_WASI_POLL_ONEOFF_RET
-            | LABEL_WASI_RANDOM_GET_RET
-            | LABEL_WASI_ARGS_SIZES_GET_RET
-            | LABEL_WASI_ARGS_GET_RET
-            | LABEL_WASI_ENVIRON_SIZES_GET_RET
-            | LABEL_WASI_ENVIRON_GET_RET
-            | LABEL_WASI_PATH_OPEN_RET
-            | LABEL_WASI_FD_READDIR_RET
-    )
 }
 
 impl ArtifactEvidence for WasiImage<'_> {
@@ -1475,10 +1242,6 @@ pub struct ProjectionCaps {
     pub control_count: u16,
     pub wasi_imports: WasiImports,
     pub wasi_completion_pair_count: u8,
-    pub wasi_loop_continue_head_labels: [u8; 16],
-    pub wasi_loop_continue_head_count: u8,
-    pub wasi_loop_break_head_labels: [u8; 16],
-    pub wasi_loop_break_head_count: u8,
     pub role_count: u8,
     pub eff_count: u16,
     pub scope_count: u16,
@@ -1491,303 +1254,30 @@ pub struct ProjectionCaps {
     pub capacity_overflow: bool,
 }
 
-struct ProjectionCapsVisitor {
-    caps: ProjectionCaps,
-    import_roles: Option<RoleSet>,
-    engine_req_labels: [u8; 32],
-    engine_req_label_count: u8,
-    engine_ret_labels: [u8; 32],
-    engine_ret_label_count: u8,
-    loop_continue_eff_indices: [u16; 16],
-    loop_continue_eff_count: u8,
-    loop_break_eff_indices: [u16; 16],
-    loop_break_eff_count: u8,
-}
-
-impl ProjectionCapsVisitor {
-    const fn new() -> Self {
+impl ProjectionCaps {
+    const fn empty() -> Self {
         Self {
-            caps: ProjectionCaps {
-                roles: RoleSet::EMPTY,
-                lanes: LaneSet::EMPTY,
-                labels: [0; 32],
-                label_count: 0,
-                policies: [0; 16],
-                control_ops: [0; 16],
-                control_tap_ids: [0; 16],
-                control_count: 0,
-                wasi_imports: WasiImports::EMPTY,
-                wasi_completion_pair_count: 0,
-                wasi_loop_continue_head_labels: [0; 16],
-                wasi_loop_continue_head_count: 0,
-                wasi_loop_break_head_labels: [0; 16],
-                wasi_loop_break_head_count: 0,
-                role_count: 0,
-                eff_count: 0,
-                scope_count: 0,
-                route_scope_count: 0,
-                fingerprint: [0; 2],
-                policy_count: 0,
-                has_parallel: false,
-                has_policy: false,
-                has_control: false,
-                capacity_overflow: false,
-            },
-            import_roles: None,
-            engine_req_labels: [0; 32],
-            engine_req_label_count: 0,
-            engine_ret_labels: [0; 32],
-            engine_ret_label_count: 0,
-            loop_continue_eff_indices: [0; 16],
-            loop_continue_eff_count: 0,
-            loop_break_eff_indices: [0; 16],
-            loop_break_eff_count: 0,
+            roles: RoleSet::EMPTY,
+            lanes: LaneSet::EMPTY,
+            labels: [0; 32],
+            label_count: 0,
+            policies: [0; 16],
+            control_ops: [0; 16],
+            control_tap_ids: [0; 16],
+            control_count: 0,
+            wasi_imports: WasiImports::EMPTY,
+            wasi_completion_pair_count: 0,
+            role_count: 0,
+            eff_count: 0,
+            scope_count: 0,
+            route_scope_count: 0,
+            fingerprint: [0; 2],
+            policy_count: 0,
+            has_parallel: false,
+            has_policy: false,
+            has_control: false,
+            capacity_overflow: false,
         }
-    }
-
-    const fn for_import_roles(import_roles: RoleSet) -> Self {
-        Self {
-            caps: ProjectionCaps {
-                roles: RoleSet::EMPTY,
-                lanes: LaneSet::EMPTY,
-                labels: [0; 32],
-                label_count: 0,
-                policies: [0; 16],
-                control_ops: [0; 16],
-                control_tap_ids: [0; 16],
-                control_count: 0,
-                wasi_imports: WasiImports::EMPTY,
-                wasi_completion_pair_count: 0,
-                wasi_loop_continue_head_labels: [0; 16],
-                wasi_loop_continue_head_count: 0,
-                wasi_loop_break_head_labels: [0; 16],
-                wasi_loop_break_head_count: 0,
-                role_count: 0,
-                eff_count: 0,
-                scope_count: 0,
-                route_scope_count: 0,
-                fingerprint: [0; 2],
-                policy_count: 0,
-                has_parallel: false,
-                has_policy: false,
-                has_control: false,
-                capacity_overflow: false,
-            },
-            import_roles: Some(import_roles),
-            engine_req_labels: [0; 32],
-            engine_req_label_count: 0,
-            engine_ret_labels: [0; 32],
-            engine_ret_label_count: 0,
-            loop_continue_eff_indices: [0; 16],
-            loop_continue_eff_count: 0,
-            loop_break_eff_indices: [0; 16],
-            loop_break_eff_count: 0,
-        }
-    }
-
-    fn push_label(&mut self, label: u8) {
-        let mut idx = 0usize;
-        while idx < self.caps.label_count as usize {
-            if self.caps.labels[idx] == label {
-                return;
-            }
-            idx += 1;
-        }
-        if idx < self.caps.labels.len() {
-            self.caps.labels[idx] = label;
-            self.caps.label_count += 1;
-        } else {
-            self.caps.capacity_overflow = true;
-        }
-    }
-
-    fn push_policy(&mut self, policy_id: u16) {
-        let mut idx = 0usize;
-        while idx < self.caps.policy_count as usize {
-            if self.caps.policies[idx] == policy_id {
-                return;
-            }
-            idx += 1;
-        }
-        if idx < self.caps.policies.len() {
-            self.caps.policies[idx] = policy_id;
-            self.caps.policy_count += 1;
-        } else {
-            self.caps.capacity_overflow = true;
-        }
-    }
-
-    fn push_control(&mut self, op: u8, tap_id: u16) {
-        let mut idx = 0usize;
-        while idx < self.caps.control_count as usize {
-            if self.caps.control_ops[idx] == op && self.caps.control_tap_ids[idx] == tap_id {
-                return;
-            }
-            idx += 1;
-        }
-        if idx < self.caps.control_ops.len() {
-            self.caps.control_ops[idx] = op;
-            self.caps.control_tap_ids[idx] = tap_id;
-            self.caps.control_count += 1;
-        } else {
-            self.caps.capacity_overflow = true;
-        }
-    }
-
-    fn push_loop_continue_eff(&mut self, eff_index: u16) {
-        let mut idx = 0usize;
-        while idx < self.loop_continue_eff_count as usize {
-            if self.loop_continue_eff_indices[idx] == eff_index {
-                return;
-            }
-            idx += 1;
-        }
-        if idx < self.loop_continue_eff_indices.len() {
-            self.loop_continue_eff_indices[idx] = eff_index;
-            self.loop_continue_eff_count += 1;
-        } else {
-            self.caps.capacity_overflow = true;
-        }
-    }
-
-    fn push_loop_break_eff(&mut self, eff_index: u16) {
-        let mut idx = 0usize;
-        while idx < self.loop_break_eff_count as usize {
-            if self.loop_break_eff_indices[idx] == eff_index {
-                return;
-            }
-            idx += 1;
-        }
-        if idx < self.loop_break_eff_indices.len() {
-            self.loop_break_eff_indices[idx] = eff_index;
-            self.loop_break_eff_count += 1;
-        } else {
-            self.caps.capacity_overflow = true;
-        }
-    }
-
-    fn has_loop_continue_head_eff(&self, eff_index: u16) -> bool {
-        let mut idx = 0usize;
-        while idx < self.loop_continue_eff_count as usize {
-            if self.loop_continue_eff_indices[idx].saturating_add(1) == eff_index {
-                return true;
-            }
-            idx += 1;
-        }
-        false
-    }
-
-    fn has_loop_break_head_eff(&self, eff_index: u16) -> bool {
-        let mut idx = 0usize;
-        while idx < self.loop_break_eff_count as usize {
-            if self.loop_break_eff_indices[idx].saturating_add(1) == eff_index {
-                return true;
-            }
-            idx += 1;
-        }
-        false
-    }
-
-    fn push_wasi_loop_continue_head_label(&mut self, label: u8) {
-        let mut idx = 0usize;
-        while idx < self.caps.wasi_loop_continue_head_count as usize {
-            if self.caps.wasi_loop_continue_head_labels[idx] == label {
-                return;
-            }
-            idx += 1;
-        }
-        if idx < self.caps.wasi_loop_continue_head_labels.len() {
-            self.caps.wasi_loop_continue_head_labels[idx] = label;
-            self.caps.wasi_loop_continue_head_count += 1;
-        } else {
-            self.caps.capacity_overflow = true;
-        }
-    }
-
-    fn push_wasi_loop_break_head_label(&mut self, label: u8) {
-        let mut idx = 0usize;
-        while idx < self.caps.wasi_loop_break_head_count as usize {
-            if self.caps.wasi_loop_break_head_labels[idx] == label {
-                return;
-            }
-            idx += 1;
-        }
-        if idx < self.caps.wasi_loop_break_head_labels.len() {
-            self.caps.wasi_loop_break_head_labels[idx] = label;
-            self.caps.wasi_loop_break_head_count += 1;
-        } else {
-            self.caps.capacity_overflow = true;
-        }
-    }
-
-    fn push_engine_req_label(&mut self, label: u8) {
-        let mut idx = 0usize;
-        while idx < self.engine_req_label_count as usize {
-            if self.engine_req_labels[idx] == label {
-                return;
-            }
-            idx += 1;
-        }
-        if idx < self.engine_req_labels.len() {
-            self.engine_req_labels[idx] = label;
-            self.engine_req_label_count += 1;
-        } else {
-            self.caps.capacity_overflow = true;
-        }
-    }
-
-    fn push_engine_ret_label(&mut self, label: u8) {
-        let mut idx = 0usize;
-        while idx < self.engine_ret_label_count as usize {
-            if self.engine_ret_labels[idx] == label {
-                return;
-            }
-            idx += 1;
-        }
-        if idx < self.engine_ret_labels.len() {
-            self.engine_ret_labels[idx] = label;
-            self.engine_ret_label_count += 1;
-        } else {
-            self.caps.capacity_overflow = true;
-        }
-    }
-
-    fn has_engine_ret_label(&self, label: u8) -> bool {
-        let mut idx = 0usize;
-        while idx < self.engine_ret_label_count as usize {
-            if self.engine_ret_labels[idx] == label {
-                return true;
-            }
-            idx += 1;
-        }
-        false
-    }
-
-    fn finalize_wasi_imports(&mut self, require_completions: bool) {
-        let mut count = 0u8;
-        let mut idx = 0usize;
-        while idx < self.engine_req_label_count as usize {
-            let label = self.engine_req_labels[idx];
-            if let Some(import) = wasi_import_for_engine_req_label(label) {
-                if let Some(reply_label) = wasi_completion_label_for_engine_req_label(label) {
-                    let has_completion = self.has_engine_ret_label(reply_label);
-                    if require_completions {
-                        assert!(
-                            has_completion,
-                            "WASI P1 import request label must have a projected numeric EngineRet completion"
-                        );
-                    }
-                    if has_completion {
-                        self.caps.wasi_imports = self.caps.wasi_imports.union(import);
-                        count = count.saturating_add(1);
-                    }
-                } else {
-                    self.caps.wasi_imports = self.caps.wasi_imports.union(import);
-                }
-            }
-            idx += 1;
-        }
-        self.caps.wasi_completion_pair_count = count;
     }
 }
 
@@ -1821,7 +1311,6 @@ impl ScheduledTaskArena {
     }
 }
 
-#[cfg(any(test, not(target_os = "none")))]
 type ScheduledTaskPoll<E> = unsafe fn(*mut u8, &mut Context<'_>) -> Poll<RoleResult<E>>;
 
 #[cfg(any(test, not(target_os = "none")))]
@@ -1866,7 +1355,6 @@ fn new_appkit_attach_clock() -> AppkitAttachClock {
     }
 }
 
-#[cfg(any(test, not(target_os = "none")))]
 unsafe fn poll_scheduled_task<F, E>(ptr: *mut u8, cx: &mut Context<'_>) -> Poll<RoleResult<E>>
 where
     F: Future<Output = RoleResult<E>>,
@@ -1882,6 +1370,16 @@ where
         Pin::new_unchecked(future)
     };
     pinned.as_mut().poll(cx)
+}
+
+#[cfg(all(not(test), target_os = "none"))]
+#[inline(never)]
+unsafe fn poll_embedded_stored_task<E>(
+    poll: ScheduledTaskPoll<E>,
+    ptr: *mut u8,
+    cx: &mut Context<'_>,
+) -> Poll<RoleResult<E>> {
+    unsafe { poll(ptr, cx) }
 }
 
 #[cfg(any(test, not(target_os = "none")))]
@@ -2079,6 +1577,95 @@ impl<E> Drop for ScheduledTasks<'_, E> {
 }
 
 #[cfg(all(not(test), target_os = "none"))]
+struct EmbeddedScheduledTasks<'task, E> {
+    base: *mut u8,
+    total_bytes: usize,
+    polls: [Option<ScheduledTaskPoll<E>>; APPKIT_EMBEDDED_ROLE_SLOTS],
+    len: usize,
+    lifetime: PhantomData<&'task mut ()>,
+}
+
+#[cfg(all(not(test), target_os = "none"))]
+impl<'task, E> EmbeddedScheduledTasks<'task, E>
+where
+    E: Debug,
+{
+    fn new(storage: EmbeddedAttachStorageRef<'static>) -> Self {
+        Self {
+            base: storage.future,
+            total_bytes: storage.future_bytes,
+            polls: [None; APPKIT_EMBEDDED_ROLE_SLOTS],
+            len: 0,
+            lifetime: PhantomData,
+        }
+    }
+
+    fn slot_ptr(&self, index: usize) -> *mut u8 {
+        let offset = index
+            .checked_mul(APPKIT_EMBEDDED_ROLE_FUTURE_BYTES)
+            .expect("appkit embedded scheduler slot offset overflow");
+        assert!(
+            offset + APPKIT_EMBEDDED_ROLE_FUTURE_BYTES <= self.total_bytes,
+            "appkit embedded scheduler slot exceeds future arena"
+        );
+        unsafe { self.base.add(offset) }
+    }
+
+    fn push<F>(&mut self, future: F)
+    where
+        F: Future<Output = RoleResult<E>> + 'task,
+    {
+        assert!(
+            self.len < self.polls.len(),
+            "appkit embedded scheduler has no free role slot"
+        );
+        assert!(
+            size_of::<F>() <= APPKIT_EMBEDDED_ROLE_FUTURE_BYTES,
+            "appkit role future exceeds embedded scheduler arena"
+        );
+        assert!(
+            align_of::<F>() <= APPKIT_EMBEDDED_FUTURE_ALIGN,
+            "appkit role future alignment exceeds embedded scheduler arena"
+        );
+        let slot = self.slot_ptr(self.len);
+        unsafe {
+            // SAFETY: The slot is inside the image-owned embedded arena, aligned
+            // to APPKIT_EMBEDDED_FUTURE_ALIGN, and this scheduler never returns.
+            slot.cast::<F>().write(future);
+        }
+        self.polls[self.len] = Some(poll_scheduled_task::<F, E>);
+        self.len += 1;
+    }
+
+    fn poll_forever(&mut self) -> ! {
+        assert!(self.len > 0, "appkit embedded scheduler has no role tasks");
+        loop {
+            let task_waker = embedded_task_waker();
+            let mut task_context = Context::from_waker(task_waker);
+            let mut task_idx = 0usize;
+            while task_idx < self.len {
+                let poll = self.polls[task_idx]
+                    .expect("appkit embedded scheduler active slot must have a poll function");
+                match unsafe {
+                    // SAFETY: `push` initialized this slot with the future type
+                    // associated with the stored poll function.
+                    poll_embedded_stored_task(poll, self.slot_ptr(task_idx), &mut task_context)
+                } {
+                    Poll::Pending => {}
+                    Poll::Ready(Ok(done)) => match done {},
+                    Poll::Ready(Err(error)) => {
+                        core::hint::black_box(&error);
+                        panic!("appkit embedded role task failed: {error:?}");
+                    }
+                }
+                task_idx += 1;
+            }
+            embedded_wait_for_event();
+        }
+    }
+}
+
+#[cfg(all(not(test), target_os = "none"))]
 #[cold]
 fn panic_appkit_resolver_error<const POLICY: u16, const ROLE: u8>(
     error: hibana::integration::policy::ResolverError,
@@ -2098,13 +1685,20 @@ struct AttachResolverRegistry<
     const MAX_RV: usize,
 > where
     C: Capsule,
-    ProgramTy: hibana::integration::program::Projectable<C::Universe> + ?Sized,
-    TransportTy: hibana::integration::Transport + 'cfg,
+    ProgramTy: hibana::integration::program::Projectable + ?Sized,
+    TransportTy: hibana::integration::transport::Transport + 'cfg,
     UniverseTy: hibana::integration::runtime::LabelUniverse + 'cfg,
     ClockTy: hibana::integration::runtime::Clock + 'cfg,
 {
-    kit: &'kit hibana::integration::SessionKit<'cfg, TransportTy, UniverseTy, ClockTy, MAX_RV>,
-    rendezvous: hibana::integration::ids::RendezvousId,
+    rendezvous: &'kit hibana::integration::RendezvousKit<
+        'kit,
+        'cfg,
+        TransportTy,
+        UniverseTy,
+        ClockTy,
+        false,
+        MAX_RV,
+    >,
     program: &'prog ProgramTy,
     requested_roles: RoleSet,
     capsule: PhantomData<C>,
@@ -2125,8 +1719,8 @@ impl<'kit, 'prog, 'cfg, C, ProgramTy, TransportTy, UniverseTy, ClockTy, const MA
     >
 where
     C: Capsule,
-    ProgramTy: hibana::integration::program::Projectable<C::Universe> + ?Sized,
-    TransportTy: hibana::integration::Transport + 'cfg,
+    ProgramTy: hibana::integration::program::Projectable + ?Sized,
+    TransportTy: hibana::integration::transport::Transport + 'cfg,
     UniverseTy: hibana::integration::runtime::LabelUniverse + 'cfg,
     ClockTy: hibana::integration::runtime::Clock + 'cfg,
 {
@@ -2137,10 +1731,11 @@ where
         if !self.requested_roles.contains(ROLE) {
             return;
         }
-        let role_program = self.program.project::<ROLE>();
-        if let Err(error) =
-            self.kit
-                .set_resolver::<POLICY, ROLE>(self.rendezvous, &role_program, resolver)
+        let role_program = hibana::integration::program::project::<ROLE, _>(self.program);
+        if let Err(error) = self
+            .rendezvous
+            .role(&role_program)
+            .set_resolver::<POLICY>(resolver)
         {
             #[cfg(any(test, not(target_os = "none")))]
             panic!(
@@ -2165,12 +1760,19 @@ struct AttachProjectedRoles<
     const MAX_RV: usize,
 > where
     C: Capsule,
-    TransportTy: hibana::integration::Transport + 'cfg,
+    TransportTy: hibana::integration::transport::Transport + 'cfg,
     UniverseTy: hibana::integration::runtime::LabelUniverse + 'cfg,
     ClockTy: hibana::integration::runtime::Clock + 'cfg,
 {
-    kit: &'kit hibana::integration::SessionKit<'cfg, TransportTy, UniverseTy, ClockTy, MAX_RV>,
-    rendezvous: hibana::integration::ids::RendezvousId,
+    rendezvous: &'kit hibana::integration::RendezvousKit<
+        'kit,
+        'cfg,
+        TransportTy,
+        UniverseTy,
+        ClockTy,
+        false,
+        MAX_RV,
+    >,
     session: hibana::integration::ids::SessionId,
     endpoint_carrier: EndpointCarrierFacts,
     wasi_guest_bytes: Option<&'guest [u8]>,
@@ -2180,8 +1782,11 @@ struct AttachProjectedRoles<
     tasks_lifetime: PhantomData<&'tasks mut ()>,
     capsule_lifetime: PhantomData<C>,
     image_lifetime: PhantomData<ImageTy>,
-    #[cfg(all(not(test), target_os = "none"))]
+    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
     embedded_storage: EmbeddedAttachStorageRef<'static>,
+    #[cfg(all(not(test), target_os = "none"))]
+    embedded_tasks:
+        &'tasks mut EmbeddedScheduledTasks<'kit, RoleTaskError<<C::Local as Localside<C>>::Error>>,
     #[cfg(any(test, not(target_os = "none")))]
     tasks: &'tasks mut ScheduledTasks<'kit, RoleTaskError<<C::Local as Localside<C>>::Error>>,
 }
@@ -2205,23 +1810,14 @@ where
     C::Local: 'kit,
     ImageTy: LogicalImage<C> + 'kit,
     ImageTy::Artifact: ArtifactGuestStorage<C, ImageTy>,
-    TransportTy: hibana::integration::Transport + 'cfg,
+    TransportTy: hibana::integration::transport::Transport + 'cfg,
     UniverseTy: hibana::integration::runtime::LabelUniverse + 'cfg,
     ClockTy: hibana::integration::runtime::Clock + 'cfg,
     'cfg: 'kit,
     'guest: 'kit,
 {
     fn visit<const ROLE: u8>(&mut self, program: hibana::integration::program::RoleProgram<ROLE>) {
-        assert!(
-            self.rendezvous.raw() != u16::MAX,
-            "appkit projected role visitor holds invalid rendezvous id before enter"
-        );
-        let endpoint = match self.kit.enter::<ROLE, _>(
-            self.rendezvous,
-            self.session,
-            &program,
-            hibana::integration::binding::NoBinding,
-        ) {
+        let endpoint = match self.rendezvous.session(self.session).role(&program).enter() {
             Ok(endpoint) => endpoint,
             #[cfg(any(test, not(target_os = "none")))]
             Err(error) => panic!("projected role {ROLE} must attach through SessionKit: {error:?}"),
@@ -2285,14 +1881,9 @@ where
                             <C::Local as Localside<C>>::engine::<ROLE>(ctx),
                         ));
                         #[cfg(all(not(test), target_os = "none"))]
-                        poll_embedded_role_future::<
-                            _,
-                            RoleTaskError<<C::Local as Localside<C>>::Error>,
-                        >(
-                            ImageTy::REQUESTED_ROLES,
-                            self.embedded_storage,
-                            local_role_task(<C::Local as Localside<C>>::engine::<ROLE>(ctx)),
-                        );
+                        self.embedded_tasks.push(local_role_task(
+                            <C::Local as Localside<C>>::engine::<ROLE>(ctx),
+                        ));
                     }
                 }
                 #[cfg(not(feature = "wasm-engine-core"))]
@@ -2307,11 +1898,9 @@ where
                             ctx,
                         )));
                     #[cfg(all(not(test), target_os = "none"))]
-                    poll_embedded_role_future::<_, RoleTaskError<<C::Local as Localside<C>>::Error>>(
-                        ImageTy::REQUESTED_ROLES,
-                        self.embedded_storage,
-                        local_role_task(<C::Local as Localside<C>>::engine::<ROLE>(ctx)),
-                    );
+                    self.embedded_tasks.push(local_role_task(
+                        <C::Local as Localside<C>>::engine::<ROLE>(ctx),
+                    ));
                 }
             }
             RoleKind::Driver => {
@@ -2322,11 +1911,9 @@ where
                         ctx,
                     )));
                 #[cfg(all(not(test), target_os = "none"))]
-                poll_embedded_role_future::<_, RoleTaskError<<C::Local as Localside<C>>::Error>>(
-                    ImageTy::REQUESTED_ROLES,
-                    self.embedded_storage,
-                    local_role_task(<C::Local as Localside<C>>::driver::<ROLE>(ctx)),
-                );
+                self.embedded_tasks.push(local_role_task(
+                    <C::Local as Localside<C>>::driver::<ROLE>(ctx),
+                ));
             }
             RoleKind::Boundary => {
                 let ctx = BoundaryCtx::new(endpoint_ctx, self.endpoint_carrier);
@@ -2335,11 +1922,10 @@ where
                     <C::Local as Localside<C>>::boundary::<ROLE>(ctx),
                 ));
                 #[cfg(all(not(test), target_os = "none"))]
-                poll_embedded_role_future::<_, RoleTaskError<<C::Local as Localside<C>>::Error>>(
-                    ImageTy::REQUESTED_ROLES,
-                    self.embedded_storage,
-                    local_role_task(<C::Local as Localside<C>>::boundary::<ROLE>(ctx)),
-                );
+                self.embedded_tasks
+                    .push(local_role_task(
+                        <C::Local as Localside<C>>::boundary::<ROLE>(ctx),
+                    ));
             }
             RoleKind::Link => {
                 let ctx = LinkCtx::new(endpoint_ctx, self.endpoint_carrier);
@@ -2349,11 +1935,9 @@ where
                         ctx,
                     )));
                 #[cfg(all(not(test), target_os = "none"))]
-                poll_embedded_role_future::<_, RoleTaskError<<C::Local as Localside<C>>::Error>>(
-                    ImageTy::REQUESTED_ROLES,
-                    self.embedded_storage,
-                    local_role_task(<C::Local as Localside<C>>::link::<ROLE>(ctx)),
-                );
+                self.embedded_tasks.push(local_role_task(
+                    <C::Local as Localside<C>>::link::<ROLE>(ctx),
+                ));
             }
             RoleKind::Supervisor => {
                 let ctx = SupervisorCtx::new(endpoint_ctx, self.endpoint_carrier);
@@ -2363,11 +1947,9 @@ where
                         ROLE,
                     >(ctx)));
                 #[cfg(all(not(test), target_os = "none"))]
-                poll_embedded_role_future::<_, RoleTaskError<<C::Local as Localside<C>>::Error>>(
-                    ImageTy::REQUESTED_ROLES,
-                    self.embedded_storage,
-                    local_role_task(<C::Local as Localside<C>>::supervisor::<ROLE>(ctx)),
-                );
+                self.embedded_tasks.push(local_role_task(
+                    <C::Local as Localside<C>>::supervisor::<ROLE>(ctx),
+                ));
             }
         }
         self.count = self.count.saturating_add(1);
@@ -2384,7 +1966,7 @@ where
 }
 
 fn attach_projected_roles<C, I>(
-    program: &impl hibana::integration::program::Projectable<C::Universe>,
+    program: &impl hibana::integration::program::Projectable,
     endpoint_carrier: EndpointCarrierFacts,
     wasi_guest_bytes: Option<&[u8]>,
 ) -> AttachSummary
@@ -2394,7 +1976,7 @@ where
     I::Artifact: ArtifactGuestStorage<C, I>,
 {
     #[cfg(any(test, not(target_os = "none")))]
-    let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+    let mut tap_buf = [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
     #[cfg(any(test, not(target_os = "none")))]
     let mut slab_storage = [0u8; APPKIT_ATTACH_SLAB_BYTES];
     #[cfg(all(not(test), target_os = "none"))]
@@ -2407,36 +1989,27 @@ where
     let attach_tap = &mut tap_buf;
     #[cfg(any(test, not(target_os = "none")))]
     let attach_slab = &mut slab_storage[..];
-    let clock = new_appkit_attach_clock();
     let carrier = I::carrier();
-    let (kit_storage, rendezvous_slab) = carve_session_kit_storage::<
+    let rendezvous_slab = attach_slab;
+    let mut kit_storage = hibana::integration::SessionKitStorage::<
         I::Carrier<'_>,
         C::Universe,
         AppkitAttachClock,
         APPKIT_SESSION_RV_SLOTS,
-    >(attach_slab);
-    let kit = hibana::integration::SessionKit::<
-        I::Carrier<'_>,
-        C::Universe,
-        AppkitAttachClock,
-        APPKIT_SESSION_RV_SLOTS,
-    >::init_in_place(kit_storage, &clock);
+    >::uninit();
+    let kit = kit_storage.init();
     let config = hibana::integration::runtime::Config::from_resources(
-        attach_tap,
-        rendezvous_slab,
+        (attach_tap, rendezvous_slab),
         new_appkit_attach_clock(),
     );
     let rendezvous = kit
-        .add_rendezvous_from_config(config, carrier)
+        .rendezvous(config, carrier)
         .expect("appkit attach carrier must register rendezvous");
-    let rendezvous_raw = rendezvous.raw();
-    assert!(
-        rendezvous_raw != u16::MAX,
-        "appkit registered invalid rendezvous id"
-    );
     let session = hibana::integration::ids::SessionId::new(endpoint_carrier.session_id());
     #[cfg(any(test, not(target_os = "none")))]
     let mut tasks = ScheduledTasks::new();
+    #[cfg(all(not(test), target_os = "none"))]
+    let mut embedded_tasks = EmbeddedScheduledTasks::new(embedded_storage);
     {
         let mut resolver_registry = AttachResolverRegistry::<
             '_,
@@ -2449,28 +2022,16 @@ where
             AppkitAttachClock,
             APPKIT_SESSION_RV_SLOTS,
         > {
-            kit: &kit,
-            rendezvous,
+            rendezvous: &rendezvous,
             program,
             requested_roles: I::REQUESTED_ROLES,
             capsule: PhantomData,
         };
         C::register_resolvers(&mut resolver_registry);
     }
-    assert_eq!(
-        rendezvous.raw(),
-        rendezvous_raw,
-        "appkit rendezvous id changed during resolver registration"
-    );
     let summary = {
-        assert_eq!(
-            rendezvous.raw(),
-            rendezvous_raw,
-            "appkit rendezvous id changed before projected role attach"
-        );
         let mut visitor = AttachProjectedRoles {
-            kit: &kit,
-            rendezvous,
+            rendezvous: &rendezvous,
             session,
             endpoint_carrier,
             wasi_guest_bytes,
@@ -2480,8 +2041,10 @@ where
             tasks_lifetime: PhantomData,
             capsule_lifetime: PhantomData::<C>,
             image_lifetime: PhantomData::<I>,
-            #[cfg(all(not(test), target_os = "none"))]
+            #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
             embedded_storage,
+            #[cfg(all(not(test), target_os = "none"))]
+            embedded_tasks: &mut embedded_tasks,
             #[cfg(any(test, not(target_os = "none")))]
             tasks: &mut tasks,
         };
@@ -2492,100 +2055,48 @@ where
         }
     };
     #[cfg(any(test, not(target_os = "none")))]
-    tasks.poll_until_quiescent();
-    summary
-}
-
-impl hibana::integration::program::ProjectionMetadataVisitor for ProjectionCapsVisitor {
-    fn visit_program(&mut self, facts: hibana::integration::program::ProjectionProgramFacts) {
-        self.caps.role_count = facts.role_count;
-        self.caps.eff_count = facts.eff_count;
-        self.caps.scope_count = facts.scope_count;
-        self.caps.route_scope_count = facts.route_scope_count;
-        self.caps.fingerprint = facts.fingerprint;
-        self.caps.has_parallel = facts.parallel_enter_count != 0;
+    {
+        tasks.poll_until_quiescent();
+        summary
     }
-
-    fn visit_atom(&mut self, spec: hibana::integration::program::ProjectionAtomSpec) {
-        self.caps.roles = self
-            .caps
-            .roles
-            .union(RoleSet::single(spec.from))
-            .union(RoleSet::single(spec.to));
-        self.caps.lanes = self.caps.lanes.union(LaneSet::single(spec.lane));
-        self.caps.has_control |= spec.is_control;
-        self.push_label(spec.label);
-        if let (Some(op), Some(tap_id)) = (spec.control_op, spec.control_tap_id) {
-            self.push_control(op, tap_id);
-        }
-        if spec.control_op
-            == Some(hibana::integration::cap::advanced::ControlOp::LoopContinue.as_u8())
-            && spec.label == LABEL_WASI_IMPORT_LOOP_CONTINUE_CONTROL
-        {
-            self.push_loop_continue_eff(spec.eff_index);
-        }
-        if spec.control_op == Some(hibana::integration::cap::advanced::ControlOp::LoopBreak.as_u8())
-            && spec.label == LABEL_WASI_IMPORT_LOOP_BREAK_CONTROL
-        {
-            self.push_loop_break_eff(spec.eff_index);
-        }
-
-        let engine_req_import = wasi_import_for_engine_req_label(spec.label);
-        if is_engine_ret_label(spec.label) {
-            self.push_engine_ret_label(spec.label);
-        }
-        if engine_req_import.is_some() {
-            let include_import = match self.import_roles {
-                Some(roles) => roles.contains(spec.from),
-                None => true,
-            };
-            if include_import {
-                self.push_engine_req_label(spec.label);
-                if self.has_loop_continue_head_eff(spec.eff_index) {
-                    self.push_wasi_loop_continue_head_label(spec.label);
-                }
-                if self.has_loop_break_head_eff(spec.eff_index) {
-                    self.push_wasi_loop_break_head_label(spec.label);
-                }
-            }
-        }
-    }
-
-    fn visit_policy(&mut self, spec: hibana::integration::program::ProjectionPolicySpec) {
-        self.push_policy(spec.policy_id);
-        self.caps.has_policy = true;
+    #[cfg(all(not(test), target_os = "none"))]
+    {
+        core::hint::black_box(&summary);
+        embedded_tasks.poll_forever()
     }
 }
 
-/// Derive neutral capacity facts from official hibana projection metadata.
+/// Derive conservative capacity facts from the latest hibana projection API.
 pub fn derive_projection_caps<C: Capsule>() -> ProjectionCaps {
     let program = C::choreography();
     derive_projection_caps_from_program::<C>(&program)
 }
 
 fn derive_projection_caps_from_program<C>(
-    program: &impl hibana::integration::program::Projectable<C::Universe>,
+    program: &impl hibana::integration::program::Projectable,
 ) -> ProjectionCaps
 where
     C: Capsule,
 {
-    let mut visitor = ProjectionCapsVisitor::new();
-    program.visit_projection_metadata(&mut visitor);
-    visitor.finalize_wasi_imports(false);
-    visitor.caps
+    core::hint::black_box(program);
+    let mut caps = ProjectionCaps::empty();
+    caps.roles = HIBANA_TYPED_ROLE_DOMAIN;
+    caps.lanes = LaneSet::ALL;
+    caps.role_count = HIBANA_TYPED_ROLE_DOMAIN_SIZE;
+    caps.fingerprint = host_metadata_type_fingerprint::<C>();
+    caps
 }
 
 fn derive_projection_caps_for_roles_from_program<C>(
-    program: &impl hibana::integration::program::Projectable<C::Universe>,
+    program: &impl hibana::integration::program::Projectable,
     requested_roles: RoleSet,
 ) -> ProjectionCaps
 where
     C: Capsule,
 {
-    let mut visitor = ProjectionCapsVisitor::for_import_roles(requested_roles);
-    program.visit_projection_metadata(&mut visitor);
-    visitor.finalize_wasi_imports(true);
-    visitor.caps
+    let mut caps = derive_projection_caps_from_program::<C>(program);
+    caps.roles = requested_roles;
+    caps
 }
 
 /// Validate a logical image requested role slice against projection metadata.
@@ -2651,7 +2162,6 @@ pub struct ImageManifest {
     pub has_control: bool,
 }
 
-#[cfg(not(target_os = "none"))]
 #[inline(always)]
 fn host_metadata_type_fingerprint<T: ?Sized>() -> [u64; 2] {
     let name = core::any::type_name::<T>().as_bytes();
@@ -2666,12 +2176,6 @@ fn host_metadata_type_fingerprint<T: ?Sized>() -> [u64; 2] {
         idx += 1;
     }
     [hi, lo]
-}
-
-#[cfg(target_os = "none")]
-#[inline(always)]
-fn host_metadata_type_fingerprint<T: ?Sized>() -> [u64; 2] {
-    [0; 2]
 }
 
 impl ImageManifest {
@@ -2752,6 +2256,7 @@ impl<R, I> RunReport<R, I> {
         carrier: CarrierKind,
         artifact_len: usize,
         projection: ProjectionCaps,
+        choreography_projection: ProjectionCaps,
     ) -> Self
     where
         C: Capsule,
@@ -2763,10 +2268,16 @@ impl<R, I> RunReport<R, I> {
             I::PEER_IMAGES,
             requested_roles,
             carrier,
-            projection,
+            choreography_projection,
         );
-        let endpoint_carrier =
-            EndpointCarrierFacts::new(image_id, site_id, requested_roles, carrier, projection);
+        let endpoint_carrier = EndpointCarrierFacts::new(
+            image_id,
+            site_id,
+            requested_roles,
+            carrier,
+            projection,
+            session_id_from_projection(choreography_projection),
+        );
         Self {
             image,
             image_id,
@@ -3369,12 +2880,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         &mut self,
         label: u8,
     ) -> Result<(), WasiGuestError> {
-        if !self
-            .endpoint_carrier
-            .requires_wasi_loop_continue_for_label(label)
-        {
-            return Ok(());
-        }
+        core::hint::black_box(label);
         let flow = match self.endpoint().flow::<WasiImportLoopContinue>() {
             Ok(flow) => flow,
             // Loop admission is position-scoped, not label-scoped. A WASI label
@@ -3383,7 +2889,7 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
             // merely because the label also names the loop head.
             Err(_) => return Ok(()),
         };
-        match flow.send(()).await {
+        match flow.send(&()).await {
             Ok(()) => Ok(()),
             Err(error) => Err(WasiGuestError::endpoint(0x5745_6100, error)),
         }
@@ -3395,19 +2901,14 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         &mut self,
         label: u8,
     ) -> Result<(), WasiGuestError> {
-        if !self
-            .endpoint_carrier
-            .requires_wasi_loop_continue_for_label(label)
-        {
-            return Ok(());
-        }
+        core::hint::black_box(label);
         let flow = match self.endpoint().flow::<WasiImportLoopContinue>() {
             Ok(flow) => flow,
             // See the async path above: duplicate import labels inside one arm
             // must not be treated as another loop-head decision.
             Err(_) => return Ok(()),
         };
-        match poll_embedded_endpoint_unit(flow.send(())) {
+        match poll_embedded_endpoint_unit(flow.send(&())) {
             Ok(()) => Ok(()),
             Err(error) => Err(WasiGuestError::endpoint(0x5745_6100, error)),
         }
@@ -3418,19 +2919,14 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         &mut self,
         label: u8,
     ) -> Result<(), WasiGuestError> {
-        if !self
-            .endpoint_carrier
-            .requires_wasi_loop_break_for_label(label)
-        {
-            return Ok(());
-        }
+        core::hint::black_box(label);
         let flow = match self.endpoint().flow::<WasiImportLoopBreak>() {
             Ok(flow) => flow,
             // Break admission is also position-scoped; duplicate terminal
             // labels should fall through to the ordinary endpoint send.
             Err(_) => return Ok(()),
         };
-        match flow.send(()).await {
+        match flow.send(&()).await {
             Ok(()) => Ok(()),
             Err(error) => Err(WasiGuestError::endpoint(0x5745_6300, error)),
         }
@@ -3442,18 +2938,13 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
         &mut self,
         label: u8,
     ) -> Result<(), WasiGuestError> {
-        if !self
-            .endpoint_carrier
-            .requires_wasi_loop_break_for_label(label)
-        {
-            return Ok(());
-        }
+        core::hint::black_box(label);
         let flow = match self.endpoint().flow::<WasiImportLoopBreak>() {
             Ok(flow) => flow,
             // See the async break path above.
             Err(_) => return Ok(()),
         };
-        match poll_embedded_endpoint_unit(flow.send(())) {
+        match poll_embedded_endpoint_unit(flow.send(&())) {
             Ok(()) => Ok(()),
             Err(error) => Err(WasiGuestError::endpoint(0x5745_6300, error)),
         }
@@ -4514,6 +4005,7 @@ where
         I::REQUESTED_ROLES,
         I::CARRIER,
         image_projection,
+        session_id_from_projection(projection),
     );
     let attach_summary =
         attach_projected_roles::<C, I>(&program, endpoint_carrier, wasi_guest_bytes);
@@ -4537,6 +4029,7 @@ where
         I::CARRIER,
         artifact_len,
         image_projection,
+        projection,
     ))
 }
 
@@ -4805,7 +4298,7 @@ mod tests {
         bytes: [u8; TEST_CARRIER_FRAME_BYTES],
     }
 
-    impl hibana::integration::Transport for AttachedQueueTestCarrier {
+    impl hibana::integration::transport::Transport for AttachedQueueTestCarrier {
         type Error = hibana::integration::transport::TransportError;
         type Tx<'a>
             = AttachedQueueTestTx
@@ -5045,17 +4538,14 @@ mod tests {
         type Local = BridgeLocal;
         type Report = ();
 
-        fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
+        fn choreography() -> impl hibana::integration::program::Projectable {
             let fd_write = g::seq(
-                g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 0>(),
-                g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 0>(),
+                g::send::<0, 1, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 0>(),
+                g::send::<1, 0, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 0>(),
             );
             g::route(
-                g::seq(
-                    g::send::<g::Role<0>, g::Role<0>, WasiImportLoopContinue, 0>(),
-                    fd_write,
-                ),
-                g::send::<g::Role<0>, g::Role<0>, WasiImportLoopBreak, 0>(),
+                g::seq(g::send::<0, 0, WasiImportLoopContinue, 0>(), fd_write),
+                g::send::<0, 0, WasiImportLoopBreak, 0>(),
             )
         }
     }
@@ -5125,38 +4615,22 @@ mod tests {
         type Local = BuiltinLoopPollLocal;
         type Report = ();
 
-        fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
+        fn choreography() -> impl hibana::integration::program::Projectable {
             g::route(
                 g::seq(
-                    g::send::<g::Role<1>, g::Role<1>, WasiImportLoopContinue, 1>(),
+                    g::send::<1, 1, WasiImportLoopContinue, 1>(),
                     g::seq(
-                        g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 1>(
-                        ),
+                        g::send::<1, 0, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 1>(),
                         g::seq(
-                            g::send::<
-                                g::Role<0>,
-                                g::Role<1>,
-                                g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>,
-                                1,
-                            >(),
+                            g::send::<0, 1, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 1>(),
                             g::seq(
-                                g::send::<
-                                    g::Role<1>,
-                                    g::Role<0>,
-                                    g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>,
-                                    1,
-                                >(),
-                                g::send::<
-                                    g::Role<0>,
-                                    g::Role<1>,
-                                    g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>,
-                                    1,
-                                >(),
+                                g::send::<1, 0, g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>, 1>(),
+                                g::send::<0, 1, g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>, 1>(),
                             ),
                         ),
                     ),
                 ),
-                g::send::<g::Role<1>, g::Role<1>, WasiImportLoopBreak, 1>(),
+                g::send::<1, 1, WasiImportLoopBreak, 1>(),
             )
         }
     }
@@ -5211,10 +4685,10 @@ mod tests {
         type Local = NoLoopLocal;
         type Report = ();
 
-        fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
+        fn choreography() -> impl hibana::integration::program::Projectable {
             g::seq(
-                g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 0>(),
-                g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 0>(),
+                g::send::<0, 1, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 0>(),
+                g::send::<1, 0, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 0>(),
             )
         }
     }
@@ -5269,17 +4743,14 @@ mod tests {
         type Local = NoLoopProcExitLocal;
         type Report = ();
 
-        fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
+        fn choreography() -> impl hibana::integration::program::Projectable {
             g::seq(
-                g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 0>(),
+                g::send::<0, 1, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 0>(),
                 g::seq(
-                    g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 0>(
-                    ),
+                    g::send::<1, 0, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 0>(),
                     g::seq(
-                        g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 0>(
-                        ),
-                        g::send::<g::Role<0>, g::Role<2>, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 0>(
-                        ),
+                        g::send::<0, 1, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 0>(),
+                        g::send::<0, 2, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 0>(),
                     ),
                 ),
             )
@@ -5336,8 +4807,8 @@ mod tests {
         type Local = MemoryGrowLocal;
         type Report = ();
 
-        fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
-            g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_MEM_FENCE, MemFence>, 0>()
+        fn choreography() -> impl hibana::integration::program::Projectable {
+            g::send::<0, 1, g::Msg<LABEL_MEM_FENCE, MemFence>, 0>()
         }
     }
 
@@ -5391,23 +4862,22 @@ mod tests {
         type Local = NoLoopLocal;
         type Report = ();
 
-        fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe> {
+        fn choreography() -> impl hibana::integration::program::Projectable {
             g::seq(
                 g::route(
                     g::seq(
-                        g::send::<g::Role<1>, g::Role<1>, TestResponseRoute, 1>()
-                            .policy::<TEST_TIMER_ROUTE_POLICY>(),
-                        g::send::<g::Role<1>, g::Role<0>, TestResponseReady, 1>(),
+                        g::send::<1, 1, TestResponseRoute, 1>().policy::<TEST_TIMER_ROUTE_POLICY>(),
+                        g::send::<1, 0, TestResponseReady, 1>(),
                     ),
                     g::seq(
-                        g::send::<g::Role<1>, g::Role<1>, TestTimerExpiredRoute, 1>()
+                        g::send::<1, 1, TestTimerExpiredRoute, 1>()
                             .policy::<TEST_TIMER_ROUTE_POLICY>(),
-                        g::send::<g::Role<1>, g::Role<0>, TestTimerExpired, 1>(),
+                        g::send::<1, 0, TestTimerExpired, 1>(),
                     ),
                 ),
                 g::seq(
-                    g::send::<g::Role<0>, g::Role<1>, TestTimerRouteDone, 1>(),
-                    g::send::<g::Role<1>, g::Role<0>, TestTimerRouteAck, 1>(),
+                    g::send::<0, 1, TestTimerRouteDone, 1>(),
+                    g::send::<1, 0, TestTimerRouteAck, 1>(),
                 ),
             )
         }
@@ -5945,51 +5415,35 @@ mod tests {
     type TestLoopBreak =
         g::Msg<{ TEST_LOOP_BREAK_LABEL }, GenericCapToken<LoopBreakKind>, LoopBreakKind>;
 
-    fn no_policy_loop_fd_write_program() -> impl Projectable<DefaultLabelUniverse> {
+    fn no_policy_loop_fd_write_program() -> impl Projectable {
         g::route(
             g::seq(
-                g::send::<g::Role<1>, g::Role<1>, TestLoopContinue, 1>(),
+                g::send::<1, 1, TestLoopContinue, 1>(),
                 g::seq(
-                    g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 1>(),
-                    g::send::<g::Role<0>, g::Role<1>, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 1>(
-                    ),
+                    g::send::<1, 0, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 1>(),
+                    g::send::<0, 1, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 1>(),
                 ),
             ),
-            g::send::<g::Role<1>, g::Role<1>, TestLoopBreak, 1>(),
+            g::send::<1, 1, TestLoopBreak, 1>(),
         )
     }
 
-    fn no_policy_loop_fd_write_poll_program() -> impl Projectable<DefaultLabelUniverse> {
+    fn no_policy_loop_fd_write_poll_program() -> impl Projectable {
         g::route(
             g::seq(
-                g::send::<g::Role<1>, g::Role<1>, TestLoopContinue, 1>(),
+                g::send::<1, 1, TestLoopContinue, 1>(),
                 g::seq(
-                    g::send::<g::Role<1>, g::Role<0>, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 1>(),
+                    g::send::<1, 0, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 1>(),
                     g::seq(
-                        g::send::<
-                            g::Role<0>,
-                            g::Role<1>,
-                            g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>,
-                            1,
-                        >(),
+                        g::send::<0, 1, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 1>(),
                         g::seq(
-                            g::send::<
-                                g::Role<1>,
-                                g::Role<0>,
-                                g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>,
-                                1,
-                            >(),
-                            g::send::<
-                                g::Role<0>,
-                                g::Role<1>,
-                                g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>,
-                                1,
-                            >(),
+                            g::send::<1, 0, g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>, 1>(),
+                            g::send::<0, 1, g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>, 1>(),
                         ),
                     ),
                 ),
             ),
-            g::send::<g::Role<1>, g::Role<1>, TestLoopBreak, 1>(),
+            g::send::<1, 1, TestLoopBreak, 1>(),
         )
     }
 
@@ -5998,7 +5452,8 @@ mod tests {
         let program = no_policy_loop_fd_write_program();
         let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
         let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
-        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap_buf =
+            [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let clock = CounterClock::new();
         let carrier = AttachedQueueTestCarrier::new();
@@ -6026,7 +5481,7 @@ mod tests {
             engine
                 .flow::<TestLoopContinue>()
                 .expect("engine opens loop continue flow")
-                .send(()),
+                .send(&()),
         )
         .expect("engine sends loop continue");
         let request = EngineReq::FdWrite(FdWrite::new(3, b"1").expect("fd write request"));
@@ -6063,8 +5518,8 @@ mod tests {
         let program = no_policy_loop_fd_write_program();
         let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
         let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
-        let mut tap0 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
-        let mut tap1 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap0 = [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap1 = [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab0 = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let mut slab1 = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let clock0 = CounterClock::new();
@@ -6107,7 +5562,7 @@ mod tests {
             engine
                 .flow::<TestLoopContinue>()
                 .expect("engine opens split loop continue flow")
-                .send(()),
+                .send(&()),
         )
         .expect("engine sends split loop continue");
         let request = EngineReq::FdWrite(FdWrite::new(3, b"1").expect("fd write request"));
@@ -6170,8 +5625,8 @@ mod tests {
         let program = no_policy_loop_fd_write_poll_program();
         let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
         let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
-        let mut tap0 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
-        let mut tap1 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap0 = [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap1 = [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab0 = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let mut slab1 = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let clock0 = CounterClock::new();
@@ -6213,7 +5668,7 @@ mod tests {
             engine
                 .flow::<TestLoopContinue>()
                 .expect("engine opens split loop continue flow")
-                .send(()),
+                .send(&()),
         )
         .expect("engine sends split loop continue");
 
@@ -6276,8 +5731,8 @@ mod tests {
         let program = no_policy_loop_fd_write_poll_program();
         let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
         let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
-        let mut tap0 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
-        let mut tap1 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap0 = [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap1 = [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab0 = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let mut slab1 = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let clock0 = CounterClock::new();
@@ -6320,7 +5775,7 @@ mod tests {
                 engine
                     .flow::<TestLoopContinue>()
                     .expect("engine opens repeated loop continue flow")
-                    .send(()),
+                    .send(&()),
                 64,
             );
             assert!(
@@ -6470,7 +5925,8 @@ mod tests {
         let program = <BridgeCapsule as Capsule>::choreography();
         let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
         let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
-        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap_buf =
+            [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let clock = CounterClock::new();
         let carrier = AttachedQueueTestCarrier::new();
@@ -6500,6 +5956,7 @@ mod tests {
             RoleSet::from_bits(0b11),
             TEST_ATTACHED_QUEUE_CARRIER,
             projection,
+            session_id_from_projection(projection),
         );
         let mut engine_ctx: EngineCtx<'_, '_, BridgeCapsule, 0> = EngineCtx::new(
             RoleEndpointCtx::new(engine_endpoint),
@@ -6550,56 +6007,13 @@ mod tests {
     }
 
     #[test]
-    fn projection_metadata_marks_only_canonical_wasi_loop_import_heads() {
-        let bridge = <BridgeCapsule as Capsule>::choreography();
-        let bridge_projection = derive_projection_caps_from_program::<BridgeCapsule>(&bridge);
-        assert!(label_array_contains(
-            bridge_projection.wasi_loop_continue_head_labels,
-            bridge_projection.wasi_loop_continue_head_count,
-            LABEL_WASI_FD_WRITE,
-        ));
-        assert!(!label_array_contains(
-            bridge_projection.wasi_loop_continue_head_labels,
-            bridge_projection.wasi_loop_continue_head_count,
-            LABEL_WASI_POLL_ONEOFF,
-        ));
-
-        let no_loop = <NoLoopCapsule as Capsule>::choreography();
-        let no_loop_projection = derive_projection_caps_from_program::<NoLoopCapsule>(&no_loop);
-        assert_eq!(no_loop_projection.wasi_loop_continue_head_count, 0);
-        assert_eq!(no_loop_projection.wasi_loop_break_head_count, 0);
-    }
-
-    #[test]
-    fn projection_metadata_capacity_overflow_is_not_silent() {
-        let mut loop_head_visitor = ProjectionCapsVisitor::new();
-        for label in 0..17 {
-            loop_head_visitor.push_wasi_loop_continue_head_label(label);
-        }
-        assert!(loop_head_visitor.caps.capacity_overflow);
-        assert_eq!(
-            loop_head_visitor.caps.wasi_loop_continue_head_count,
-            loop_head_visitor.caps.wasi_loop_continue_head_labels.len() as u8
-        );
-
-        let mut eff_visitor = ProjectionCapsVisitor::new();
-        for eff_index in 0..17 {
-            eff_visitor.push_loop_continue_eff(eff_index);
-        }
-        assert!(eff_visitor.caps.capacity_overflow);
-        assert_eq!(
-            eff_visitor.loop_continue_eff_count,
-            eff_visitor.loop_continue_eff_indices.len() as u8
-        );
-    }
-
-    #[test]
     fn drive_wasi_guest_allows_linear_import_without_loop_control() {
         let module = fd_write_guest_module();
         let program = <NoLoopCapsule as Capsule>::choreography();
         let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
         let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
-        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap_buf =
+            [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let clock = CounterClock::new();
         let carrier = AttachedQueueTestCarrier::new();
@@ -6629,6 +6043,7 @@ mod tests {
             RoleSet::from_bits(0b11),
             TEST_ATTACHED_QUEUE_CARRIER,
             projection,
+            session_id_from_projection(projection),
         );
         let mut engine_ctx: EngineCtx<'_, '_, NoLoopCapsule, 0> = EngineCtx::new(
             RoleEndpointCtx::new(engine_endpoint),
@@ -6699,7 +6114,8 @@ mod tests {
         let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
         let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
         let role2 = Projectable::<DefaultLabelUniverse>::project::<2>(&program);
-        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap_buf =
+            [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let clock = CounterClock::new();
         let carrier = AttachedQueueTestCarrier::new();
@@ -6733,6 +6149,7 @@ mod tests {
             RoleSet::from_bits(0b111),
             TEST_ATTACHED_QUEUE_CARRIER,
             projection,
+            session_id_from_projection(projection),
         );
         let mut engine_ctx: EngineCtx<'_, '_, NoLoopProcExitCapsule, 0> = EngineCtx::new(
             RoleEndpointCtx::new(engine_endpoint),
@@ -6839,7 +6256,8 @@ mod tests {
         let program = <BuiltinLoopPollCapsule as Capsule>::choreography();
         let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
         let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
-        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap_buf =
+            [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let clock = CounterClock::new();
         let carrier = AttachedQueueTestCarrier::new();
@@ -6869,6 +6287,7 @@ mod tests {
             RoleSet::from_bits(0b11),
             TEST_ATTACHED_QUEUE_CARRIER,
             projection,
+            session_id_from_projection(projection),
         );
         let mut engine_ctx: EngineCtx<'_, '_, BuiltinLoopPollCapsule, 1> = EngineCtx::new(
             RoleEndpointCtx::new(engine_endpoint),
@@ -6958,7 +6377,8 @@ mod tests {
         let program = <BuiltinLoopPollCapsule as Capsule>::choreography();
         let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
         let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
-        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap_buf =
+            [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let clock = CounterClock::new();
         let carrier = AttachedQueueTestCarrier::new();
@@ -6988,6 +6408,7 @@ mod tests {
             RoleSet::from_bits(0b11),
             TEST_ATTACHED_QUEUE_CARRIER,
             projection,
+            session_id_from_projection(projection),
         );
         let mut engine_ctx: EngineCtx<'_, '_, BuiltinLoopPollCapsule, 1> = EngineCtx::new(
             RoleEndpointCtx::new(engine_endpoint),
@@ -7084,7 +6505,8 @@ mod tests {
         let program = <MemoryGrowCapsule as Capsule>::choreography();
         let role0 = Projectable::<DefaultLabelUniverse>::project::<0>(&program);
         let role1 = Projectable::<DefaultLabelUniverse>::project::<1>(&program);
-        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap_buf =
+            [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab = [0u8; APPKIT_ATTACH_SLAB_BYTES];
         let clock = CounterClock::new();
         let carrier = AttachedQueueTestCarrier::new();
@@ -7114,6 +6536,7 @@ mod tests {
             RoleSet::from_bits(0b11),
             TEST_ATTACHED_QUEUE_CARRIER,
             projection,
+            session_id_from_projection(projection),
         );
         let mut engine_ctx: EngineCtx<'_, '_, MemoryGrowCapsule, 0> = EngineCtx::new(
             RoleEndpointCtx::new(engine_endpoint),
@@ -7185,7 +6608,8 @@ mod tests {
     #[test]
     fn carved_in_place_session_kit_attaches_single_nonzero_role() {
         let clock = CounterClock::new();
-        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap_buf =
+            [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab_storage = Box::new([0u8; APPKIT_ATTACH_SLAB_BYTES]);
         let (kit_storage, rendezvous_slab) = carve_session_kit_storage::<
             AttachedQueueTestCarrier,
@@ -7217,7 +6641,8 @@ mod tests {
     #[test]
     fn embedded_sized_timer_route_role1_attach_after_resolver_registration() {
         let clock = CounterClock::new();
-        let mut tap_buf = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap_buf =
+            [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab_storage = Box::new([0u8; 112 * 1024]);
         let (kit_storage, rendezvous_slab) = carve_session_kit_storage::<
             AttachedQueueTestCarrier,
@@ -7256,8 +6681,8 @@ mod tests {
     fn embedded_sized_split_timer_route_decodes_then_tails() {
         let clock0 = CounterClock::new();
         let clock1 = CounterClock::new();
-        let mut tap0 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
-        let mut tap1 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap0 = [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap1 = [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab0 = Box::new([0u8; 96 * 1024]);
         let mut slab1 = Box::new([0u8; 112 * 1024]);
         let (kit0_storage, rendezvous0_slab) = carve_session_kit_storage::<
@@ -7324,7 +6749,7 @@ mod tests {
             engine
                 .flow::<TestTimerExpiredRoute>()
                 .expect("engine opens timer-expired route control")
-                .send(()),
+                .send(&()),
         )
         .expect("engine sends timer-expired route control");
         poll_ready(
@@ -7367,8 +6792,8 @@ mod tests {
     fn embedded_sized_split_timer_route_recv_future_progresses_after_pending() {
         let clock0 = CounterClock::new();
         let clock1 = CounterClock::new();
-        let mut tap0 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
-        let mut tap1 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap0 = [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap1 = [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab0 = Box::new([0u8; 96 * 1024]);
         let mut slab1 = Box::new([0u8; 112 * 1024]);
         let (kit0_storage, rendezvous0_slab) = carve_session_kit_storage::<
@@ -7435,7 +6860,7 @@ mod tests {
             engine
                 .flow::<TestTimerExpiredRoute>()
                 .expect("engine opens pending timer-expired route control")
-                .send(()),
+                .send(&()),
         )
         .expect("engine sends pending timer-expired route control");
         poll_ready(
@@ -7492,8 +6917,8 @@ mod tests {
     fn embedded_sized_split_timer_route_offer_progresses_after_pending() {
         let clock0 = CounterClock::new();
         let clock1 = CounterClock::new();
-        let mut tap0 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
-        let mut tap1 = [hibana::integration::tap::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap0 = [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
+        let mut tap1 = [hibana::integration::runtime::TapEvent::zero(); APPKIT_ATTACH_TAP_EVENTS];
         let mut slab0 = Box::new([0u8; 96 * 1024]);
         let mut slab1 = Box::new([0u8; 112 * 1024]);
         let (kit0_storage, rendezvous0_slab) = carve_session_kit_storage::<
@@ -7565,7 +6990,7 @@ mod tests {
             engine
                 .flow::<TestTimerExpiredRoute>()
                 .expect("engine opens pending-offer route control")
-                .send(()),
+                .send(&()),
         )
         .expect("engine sends pending-offer route control");
         poll_ready(
