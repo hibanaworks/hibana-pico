@@ -65,3 +65,7 @@ path = "src/bin/deadline_fault.rs"
 [[bin]]
 name = "baker-timer-route"
 path = "src/bin/timer_route.rs"
+
+[[bin]]
+name = "baker-session-mismatch"
+path = "src/bin/session_mismatch.rs"

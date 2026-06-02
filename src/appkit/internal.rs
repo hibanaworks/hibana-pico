@@ -4439,19 +4439,27 @@ mod tests {
             );
         }
 
-        fn recv_frame_hint<'a>(
-            &'a self,
-            rx: &'a Self::Rx<'a>,
-        ) -> Option<hibana::integration::transport::FrameLabel> {
+        fn peek_recv_frame<'a>(
+            &self,
+            rx: &mut Self::Rx<'a>,
+        ) -> Option<hibana::integration::transport::FrameHeader> {
             assert!(
                 (rx.local_role as usize) < TEST_CARRIER_ROLES,
                 "attached receive role must be valid"
             );
-            let hint = rx.hint_frame_label.take();
+            let hint = rx.hint_frame_label.get();
             if hint.is_some() {
                 self.queues.edit(|queues| queues.hint_count += 1);
             }
-            hint
+            hint.map(|frame_label| {
+                hibana::integration::transport::FrameHeader::new(
+                    hibana::integration::ids::SessionId::new(rx.session_id),
+                    hibana::integration::ids::Lane::new(rx.lane as u32),
+                    0,
+                    rx.local_role,
+                    frame_label,
+                )
+            })
         }
 
         fn metrics(&self) -> Self::Metrics {}

@@ -127,6 +127,7 @@ mod rp2350_sio {
         delivered: bool,
         pending_logged: bool,
         pending_polls: u32,
+        sender_role: u8,
         frame_label: Option<hibana::integration::transport::FrameLabel>,
         hint_frame_label: Cell<Option<hibana::integration::transport::FrameLabel>>,
         len: usize,
@@ -143,11 +144,30 @@ mod rp2350_sio {
                 delivered: false,
                 pending_logged: false,
                 pending_polls: 0,
+                sender_role: 0,
                 frame_label: None,
                 hint_frame_label: Cell::new(None),
                 len: 0,
                 bytes: [0; SIO_FRAME_BYTES],
             }
+        }
+
+        fn frame_header(&self) -> hibana::integration::transport::FrameHeader {
+            hibana::integration::transport::FrameHeader::new(
+                hibana::integration::ids::SessionId::new(self.session_id),
+                hibana::integration::ids::Lane::new(self.lane as u32),
+                self.sender_role,
+                self.local_role,
+                self.frame_label
+                    .unwrap_or_else(|| hibana::integration::transport::FrameLabel::new(0)),
+            )
+        }
+
+        fn incoming<'a>(&'a self) -> hibana::integration::transport::Incoming<'a> {
+            hibana::integration::transport::Incoming::new(
+                self.frame_header(),
+                hibana::integration::wire::Payload::new(&self.bytes[..self.len]),
+            )
         }
     }
 
@@ -595,16 +615,18 @@ mod rp2350_sio {
             rx.delivered = true;
 
             assert_eq!(
-                <SioTransport as hibana::integration::transport::Transport>::recv_frame_hint(
+                <SioTransport as hibana::integration::transport::Transport>::peek_recv_frame(
                     &transport, &mut rx,
-                ),
+                )
+                .map(|header| header.label),
                 Some(label)
             );
             assert_eq!(
-                <SioTransport as hibana::integration::transport::Transport>::recv_frame_hint(
+                <SioTransport as hibana::integration::transport::Transport>::peek_recv_frame(
                     &transport, &mut rx,
-                ),
-                None
+                )
+                .map(|header| header.label),
+                Some(label)
             );
         }
 
@@ -618,16 +640,18 @@ mod rp2350_sio {
             rx.delivered = false;
 
             assert_eq!(
-                <SioTransport as hibana::integration::transport::Transport>::recv_frame_hint(
+                <SioTransport as hibana::integration::transport::Transport>::peek_recv_frame(
                     &transport, &mut rx,
-                ),
+                )
+                .map(|header| header.label),
                 Some(label)
             );
             assert_eq!(
-                <SioTransport as hibana::integration::transport::Transport>::recv_frame_hint(
+                <SioTransport as hibana::integration::transport::Transport>::peek_recv_frame(
                     &transport, &mut rx,
-                ),
-                None
+                )
+                .map(|header| header.label),
+                Some(label)
             );
         }
     }
@@ -792,7 +816,8 @@ mod rp2350_sio {
             &'a self,
             rx: &'a mut Self::Rx<'a>,
             context: &mut core::task::Context<'_>,
-        ) -> core::task::Poll<Result<hibana::integration::wire::Payload<'a>, Self::Error>> {
+        ) -> core::task::Poll<Result<hibana::integration::transport::Incoming<'a>, Self::Error>>
+        {
             core::hint::black_box(core::ptr::addr_of!(*context));
             if rx.local_role == 1 {
                 let seen_tx = super::read_core0_to_core1_tx_count();
@@ -818,9 +843,7 @@ mod rp2350_sio {
                     rx.len,
                     rx.frame_label.map(|label| label.raw()).unwrap_or(0),
                 ));
-                return core::task::Poll::Ready(Ok(hibana::integration::wire::Payload::new(
-                    &rx.bytes[..rx.len],
-                )));
+                return core::task::Poll::Ready(Ok(rx.incoming()));
             }
             if rx.frame_label.is_some() {
                 rx.frame_label = None;
@@ -835,6 +858,7 @@ mod rp2350_sio {
                 if let Some(frame) = take_demux_frame(rx.local_role, rx.session_id, rx.lane) {
                     rx.frame_label = Some(frame.frame_label);
                     rx.hint_frame_label.set(Some(frame.frame_label));
+                    rx.sender_role = frame.sender_role;
                     rx.len = frame.len;
                     rx.bytes[..frame.len].copy_from_slice(&frame.bytes[..frame.len]);
                     rx.delivered = true;
@@ -848,9 +872,7 @@ mod rp2350_sio {
                         frame.len,
                         frame.frame_label.raw(),
                     ));
-                    return core::task::Poll::Ready(Ok(hibana::integration::wire::Payload::new(
-                        &rx.bytes[..rx.len],
-                    )));
+                    return core::task::Poll::Ready(Ok(rx.incoming()));
                 }
             }
             #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -958,6 +980,7 @@ mod rp2350_sio {
 
                 rx.frame_label = Some(frame.frame_label);
                 rx.hint_frame_label.set(Some(frame.frame_label));
+                rx.sender_role = frame.sender_role;
                 rx.len = frame.len;
                 rx.delivered = true;
                 rx.bytes[..frame.len].copy_from_slice(&frame.bytes[..frame.len]);
@@ -969,9 +992,7 @@ mod rp2350_sio {
                     frame.len,
                     frame.frame_label.raw(),
                 ));
-                return core::task::Poll::Ready(Ok(hibana::integration::wire::Payload::new(
-                    &rx.bytes[..rx.len],
-                )));
+                return core::task::Poll::Ready(Ok(rx.incoming()));
             }
         }
 
@@ -990,11 +1011,11 @@ mod rp2350_sio {
             Ok(())
         }
 
-        fn recv_frame_hint<'a>(
+        fn peek_recv_frame<'a>(
             &self,
             rx: &mut Self::Rx<'a>,
-        ) -> Option<hibana::integration::transport::FrameLabel> {
-            let hint = rx.hint_frame_label.take();
+        ) -> Option<hibana::integration::transport::FrameHeader> {
+            let hint = rx.hint_frame_label.get();
             if let Some(frame_label) = hint {
                 super::record_choreofs_sio_trace(trace_frame(
                     5,
@@ -1004,7 +1025,7 @@ mod rp2350_sio {
                     frame_label.raw(),
                 ));
             }
-            hint
+            hint.map(|_| rx.frame_header())
         }
     }
 }
@@ -1696,7 +1717,7 @@ where
         &'a self,
         rx: &'a mut Self::Rx<'a>,
         context: &mut core::task::Context<'_>,
-    ) -> core::task::Poll<Result<hibana::integration::wire::Payload<'a>, Self::Error>> {
+    ) -> core::task::Poll<Result<hibana::integration::transport::Incoming<'a>, Self::Error>> {
         hibana::integration::transport::Transport::poll_recv(&self.inner, rx, context)
     }
 
@@ -1704,11 +1725,11 @@ where
         hibana::integration::transport::Transport::requeue(&self.inner, rx)
     }
 
-    fn recv_frame_hint<'a>(
+    fn peek_recv_frame<'a>(
         &self,
         rx: &mut Self::Rx<'a>,
-    ) -> Option<hibana::integration::transport::FrameLabel> {
-        hibana::integration::transport::Transport::recv_frame_hint(&self.inner, rx)
+    ) -> Option<hibana::integration::transport::FrameHeader> {
+        hibana::integration::transport::Transport::peek_recv_frame(&self.inner, rx)
     }
 }
 

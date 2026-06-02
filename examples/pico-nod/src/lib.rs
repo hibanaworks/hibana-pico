@@ -283,7 +283,7 @@ impl hibana::integration::transport::Transport for ProofCarrier {
         &'a self,
         rx: &'a mut Self::Rx<'a>,
         task_context: &mut core::task::Context<'_>,
-    ) -> Poll<Result<hibana::integration::wire::Payload<'a>, Self::Error>> {
+    ) -> Poll<Result<hibana::integration::transport::Incoming<'a>, Self::Error>> {
         core::hint::black_box((self, rx, task_context));
         Poll::Ready(Err(hibana::integration::transport::TransportError::Failed))
     }
@@ -293,10 +293,10 @@ impl hibana::integration::transport::Transport for ProofCarrier {
         Ok(())
     }
 
-    fn recv_frame_hint<'a>(
+    fn peek_recv_frame<'a>(
         &self,
         rx: &mut Self::Rx<'a>,
-    ) -> Option<hibana::integration::transport::FrameLabel> {
+    ) -> Option<hibana::integration::transport::FrameHeader> {
         core::hint::black_box((self, rx));
         None
     }

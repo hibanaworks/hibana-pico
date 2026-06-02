@@ -28,6 +28,9 @@ resolver = "3"
 [dependencies]
 hibana = { version = "0.8.0", default-features = false }
 
+[patch.crates-io]
+hibana = { path = "../hibana" }
+
 [features]
 default = []
 

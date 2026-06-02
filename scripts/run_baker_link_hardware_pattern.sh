@@ -81,9 +81,16 @@ case "$pattern" in
     expected_result="48495452"
     features="${HIBANA_PICO_FEATURES-}"
     ;;
+  session-mismatch)
+    bin_name="baker-session-mismatch"
+    expected_core1_stage="48490004"
+    allow_core1_ready="0"
+    expected_result="4849534d"
+    features="${HIBANA_PICO_FEATURES-}"
+    ;;
   *)
     echo "unknown Baker Link pattern: $pattern" >&2
-    echo "expected: traffic, choreofs-traffic, choreofs-traffic-loop, fail-safe, recovery, many-reentry, panic-marker, endpoint-fault, endpoint-poison, preview-probe, deadline-fault, timer-route" >&2
+    echo "expected: traffic, choreofs-traffic, choreofs-traffic-loop, fail-safe, recovery, many-reentry, panic-marker, endpoint-fault, endpoint-poison, preview-probe, deadline-fault, timer-route, session-mismatch" >&2
     exit 2
     ;;
 esac
@@ -98,13 +105,19 @@ cargo build \
 
 elf="target/$target/release/$bin_name"
 
+probe_args=()
+if [[ -n "${PROBE_RS_PROBE:-}" ]]; then
+  probe_args=(--probe "$PROBE_RS_PROBE")
+fi
+
 probe-rs download \
+  "${probe_args[@]}" \
   --chip RP2040 \
   --non-interactive \
   --verify \
   --disable-progressbars \
   "$elf"
-probe-rs reset --chip RP2040 --non-interactive
+probe-rs reset "${probe_args[@]}" --chip RP2040 --non-interactive
 
 sysroot="$(rustc --print sysroot)"
 host="$(rustc -vV | sed -n 's/^host: //p')"
@@ -132,7 +145,7 @@ probe_read() {
   local attempt=0
   local output
   while :; do
-    if output="$(probe-rs read --chip RP2040 --non-interactive "$width" "$addr" "$len" 2>&1)"; then
+    if output="$(probe-rs read "${probe_args[@]}" --chip RP2040 --non-interactive "$width" "$addr" "$len" 2>&1)"; then
       printf '%s\n' "$output"
       return 0
     fi
@@ -214,6 +227,13 @@ choreofs_sio_core1_to_core0_rx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_CORE1_TO_
 choreofs_sio_role1_pending_seen_core0_tx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_ROLE1_PENDING_SEEN_CORE0_TX)"
 choreofs_sio_role1_poll_seen_core0_tx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_ROLE1_POLL_SEEN_CORE0_TX)"
 choreofs_sio_role1_ready_seen_core0_tx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_ROLE1_READY_SEEN_CORE0_TX)"
+epf_core1_epoch_addr="$(symbol_addr HIBANA_EPF_CORE1_EPOCH)"
+epf_core1_kind_addr="$(symbol_addr HIBANA_EPF_CORE1_KIND)"
+epf_core1_reason_addr="$(symbol_addr HIBANA_EPF_CORE1_REASON)"
+epf_core1_arg0_addr="$(symbol_addr HIBANA_EPF_CORE1_ARG0)"
+epf_core1_arg1_addr="$(symbol_addr HIBANA_EPF_CORE1_ARG1)"
+epf_core1_arg2_addr="$(symbol_addr HIBANA_EPF_CORE1_ARG2)"
+epf_core1_fuel_addr="$(symbol_addr HIBANA_EPF_CORE1_FUEL_USED)"
 
 result=""
 stage=""
@@ -305,6 +325,13 @@ choreofs_sio_core1_to_core0_rx="$(read_word "$choreofs_sio_core1_to_core0_rx_add
 choreofs_sio_role1_pending_seen_core0_tx="$(read_word "$choreofs_sio_role1_pending_seen_core0_tx_addr")"
 choreofs_sio_role1_poll_seen_core0_tx="$(read_word "$choreofs_sio_role1_poll_seen_core0_tx_addr")"
 choreofs_sio_role1_ready_seen_core0_tx="$(read_word "$choreofs_sio_role1_ready_seen_core0_tx_addr")"
+epf_core1_epoch="$(read_word "$epf_core1_epoch_addr")"
+epf_core1_kind="$(read_word "$epf_core1_kind_addr")"
+epf_core1_reason="$(read_word "$epf_core1_reason_addr")"
+epf_core1_arg0="$(read_word "$epf_core1_arg0_addr")"
+epf_core1_arg1="$(read_word "$epf_core1_arg1_addr")"
+epf_core1_arg2="$(read_word "$epf_core1_arg2_addr")"
+epf_core1_fuel="$(read_word "$epf_core1_fuel_addr")"
 watchdog_tick="$(read_mmio_word 0x4005802c)"
 clk_ref_ctrl="$(read_mmio_word 0x40008030)"
 clk_ref_selected="$(read_mmio_word 0x40008038)"
@@ -336,6 +363,13 @@ printf 'choreofs_sio_core1_to_core0_rx_addr=%s count=0x%s\n' "$choreofs_sio_core
 printf 'choreofs_sio_role1_pending_seen_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_role1_pending_seen_core0_tx_addr" "$choreofs_sio_role1_pending_seen_core0_tx"
 printf 'choreofs_sio_role1_poll_seen_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_role1_poll_seen_core0_tx_addr" "$choreofs_sio_role1_poll_seen_core0_tx"
 printf 'choreofs_sio_role1_ready_seen_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_role1_ready_seen_core0_tx_addr" "$choreofs_sio_role1_ready_seen_core0_tx"
+printf 'epf_core1_epoch_addr=%s epoch=0x%s\n' "$epf_core1_epoch_addr" "$epf_core1_epoch"
+printf 'epf_core1_kind_addr=%s kind=0x%s\n' "$epf_core1_kind_addr" "$epf_core1_kind"
+printf 'epf_core1_reason_addr=%s reason=0x%s\n' "$epf_core1_reason_addr" "$epf_core1_reason"
+printf 'epf_core1_arg0_addr=%s arg0=0x%s\n' "$epf_core1_arg0_addr" "$epf_core1_arg0"
+printf 'epf_core1_arg1_addr=%s arg1=0x%s\n' "$epf_core1_arg1_addr" "$epf_core1_arg1"
+printf 'epf_core1_arg2_addr=%s arg2=0x%s\n' "$epf_core1_arg2_addr" "$epf_core1_arg2"
+printf 'epf_core1_fuel_addr=%s fuel=0x%s\n' "$epf_core1_fuel_addr" "$epf_core1_fuel"
 printf 'baker_clock_watchdog_tick=0x%s\n' "$watchdog_tick"
 printf 'baker_clock_clk_ref_ctrl=0x%s\n' "$clk_ref_ctrl"
 printf 'baker_clock_clk_ref_selected=0x%s\n' "$clk_ref_selected"
@@ -428,6 +462,35 @@ fi
 if [[ "$hardfault_pc" != "00000000" || "$hardfault_lr" != "00000000" ]]; then
   echo "Baker hardware pattern $pattern failed: hardfault marker was set" >&2
   exit 1
+fi
+
+if [[ "$pattern" == "session-mismatch" ]]; then
+  if [[ "$epf_core1_epoch" == "00000000" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF marker epoch was not advanced on core1" >&2
+    exit 1
+  fi
+  if [[ "$epf_core1_kind" != "00000001" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF kind is not TransportReject" >&2
+    exit 1
+  fi
+  if [[ "$epf_core1_reason" != "00000001" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF reason is not SessionMismatch" >&2
+    exit 1
+  fi
+  epf_expected_session_dec="$((16#$epf_core1_arg0))"
+  epf_observed_session_dec="$((16#$epf_core1_arg1))"
+  if (( epf_expected_session_dec == 0 || epf_observed_session_dec == 0 )); then
+    echo "Baker hardware pattern $pattern failed: EPF session ids were not recorded" >&2
+    exit 1
+  fi
+  if (( (epf_expected_session_dec ^ 0x11110000) != epf_observed_session_dec )); then
+    echo "Baker hardware pattern $pattern failed: observed session did not match the deliberate skew" >&2
+    exit 1
+  fi
+  if [[ "$epf_core1_arg2" == "00000000" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF transport meta was not recorded" >&2
+    exit 1
+  fi
 fi
 
 watchdog_tick_dec="$((16#$watchdog_tick))"

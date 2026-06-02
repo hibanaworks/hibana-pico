@@ -21,8 +21,6 @@ dependencies = [
 [[package]]
 name = "hibana"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7db409cfbf66cdb46b674560b7a6c0e5b541f1da45b914a22a3a9848eaeb4eb8"
 
 [[package]]
 name = "hibana-pico"

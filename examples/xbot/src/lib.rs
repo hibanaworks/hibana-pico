@@ -897,7 +897,7 @@ impl hibana::integration::transport::Transport for ProofCarrier {
         &'a self,
         rx: &'a mut Self::Rx<'a>,
         task_context: &mut core::task::Context<'_>,
-    ) -> Poll<Result<hibana::integration::wire::Payload<'a>, Self::Error>> {
+    ) -> Poll<Result<hibana::integration::transport::Incoming<'a>, Self::Error>> {
         if rx.session_id == 0 {
             return Poll::Ready(Err(hibana::integration::transport::TransportError::Failed));
         }
@@ -913,8 +913,15 @@ impl hibana::integration::transport::Transport for ProofCarrier {
         rx.len = frame.len;
         rx.bytes[..frame.len].copy_from_slice(&frame.bytes[..frame.len]);
         task_context.waker().wake_by_ref();
-        Poll::Ready(Ok(hibana::integration::wire::Payload::new(
-            &rx.bytes[..rx.len],
+        Poll::Ready(Ok(hibana::integration::transport::Incoming::new(
+            hibana::integration::transport::FrameHeader::new(
+                hibana::integration::ids::SessionId::new(rx.session_id),
+                hibana::integration::ids::Lane::new(rx.lane as u32),
+                0,
+                rx.local_role,
+                frame.frame_label,
+            ),
+            hibana::integration::wire::Payload::new(&rx.bytes[..rx.len]),
         )))
     }
 
@@ -931,18 +938,33 @@ impl hibana::integration::transport::Transport for ProofCarrier {
         Ok(())
     }
 
-    fn recv_frame_hint<'a>(
+    fn peek_recv_frame<'a>(
         &self,
         rx: &mut Self::Rx<'a>,
-    ) -> Option<hibana::integration::transport::FrameLabel> {
-        if let Some(frame_label) = rx.hint_frame_label.take() {
-            return Some(frame_label);
+    ) -> Option<hibana::integration::transport::FrameHeader> {
+        if let Some(frame_label) = rx.hint_frame_label.get() {
+            return Some(hibana::integration::transport::FrameHeader::new(
+                hibana::integration::ids::SessionId::new(rx.session_id),
+                hibana::integration::ids::Lane::new(rx.lane as u32),
+                0,
+                rx.local_role,
+                frame_label,
+            ));
         }
         let local_role = rx.local_role as usize;
         if local_role >= PROOF_CARRIER_ROLES {
             return None;
         }
         self.edit(|queues| queues.by_role[local_role].front_label(rx.lane))
+            .map(|frame_label| {
+                hibana::integration::transport::FrameHeader::new(
+                    hibana::integration::ids::SessionId::new(rx.session_id),
+                    hibana::integration::ids::Lane::new(rx.lane as u32),
+                    0,
+                    rx.local_role,
+                    frame_label,
+                )
+            })
     }
 }
 

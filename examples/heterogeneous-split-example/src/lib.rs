@@ -111,15 +111,22 @@ impl ExampleFrameSlot {
         Some(hibana::integration::wire::Payload::new(&rx.bytes[..len]))
     }
 
-    fn frame_label(
+    fn frame_header(
         &self,
         session_id: u32,
+        lane: u8,
         peer: u8,
-    ) -> Option<hibana::integration::transport::FrameLabel> {
+    ) -> Option<hibana::integration::transport::FrameHeader> {
         if !self.matches(session_id, peer) {
             return None;
         }
-        Some(self.label)
+        Some(hibana::integration::transport::FrameHeader::new(
+            hibana::integration::ids::SessionId::new(self.session_id),
+            hibana::integration::ids::Lane::new(lane as u32),
+            self.sender,
+            self.peer,
+            self.label,
+        ))
     }
 }
 
@@ -325,7 +332,7 @@ impl hibana::integration::transport::Transport for ExampleCarrier {
         &'a self,
         rx: &'a mut Self::Rx<'a>,
         task_context: &mut core::task::Context<'_>,
-    ) -> core::task::Poll<Result<hibana::integration::wire::Payload<'a>, Self::Error>> {
+    ) -> core::task::Poll<Result<hibana::integration::transport::Incoming<'a>, Self::Error>> {
         assert_ne!(rx.session_id, 0);
         let local_role = rx.local_role;
         let session_id = rx.session_id;
@@ -346,6 +353,7 @@ impl hibana::integration::transport::Transport for ExampleCarrier {
                 ));
             }
         };
+        let header = slot.frame_header(session_id, rx.lane, local_role);
         match slot.pop_into(session_id, local_role, rx) {
             Some(payload) => {
                 match local_role {
@@ -357,7 +365,14 @@ impl hibana::integration::transport::Transport for ExampleCarrier {
                     }
                     _ => {}
                 }
-                core::task::Poll::Ready(Ok(payload))
+                let Some(header) = header else {
+                    return core::task::Poll::Ready(Err(
+                        hibana::integration::transport::TransportError::Failed,
+                    ));
+                };
+                core::task::Poll::Ready(Ok(hibana::integration::transport::Incoming::new(
+                    header, payload,
+                )))
             }
             None => {
                 core::hint::black_box(task_context);
@@ -373,14 +388,14 @@ impl hibana::integration::transport::Transport for ExampleCarrier {
         Ok(())
     }
 
-    fn recv_frame_hint<'a>(
+    fn peek_recv_frame<'a>(
         &self,
         rx: &mut Self::Rx<'a>,
-    ) -> Option<hibana::integration::transport::FrameLabel> {
+    ) -> Option<hibana::integration::transport::FrameHeader> {
         let edge = edge_slots_for_recv(rx.local_role)?;
         let edge = unsafe { &*edge };
         let slot = edge.slot(rx.lane)?;
-        slot.frame_label(rx.session_id, rx.local_role)
+        slot.frame_header(rx.session_id, rx.lane, rx.local_role)
     }
 }
 

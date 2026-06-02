@@ -2690,6 +2690,34 @@ pub struct ProofRx {
     bytes: [u8; PROOF_CARRIER_FRAME_BYTES],
 }
 
+fn proof_frame_header(
+    session_id: u32,
+    lane: u8,
+    local_role: u8,
+    frame_label: hibana::integration::transport::FrameLabel,
+) -> hibana::integration::transport::FrameHeader {
+    hibana::integration::transport::FrameHeader::new(
+        hibana::integration::ids::SessionId::new(session_id),
+        hibana::integration::ids::Lane::new(lane as u32),
+        0,
+        local_role,
+        frame_label,
+    )
+}
+
+fn proof_incoming<'a>(
+    session_id: u32,
+    lane: u8,
+    local_role: u8,
+    frame_label: hibana::integration::transport::FrameLabel,
+    payload: Payload<'a>,
+) -> hibana::integration::transport::Incoming<'a> {
+    hibana::integration::transport::Incoming::new(
+        proof_frame_header(session_id, lane, local_role, frame_label),
+        payload,
+    )
+}
+
 #[derive(Clone, Copy)]
 struct ProofFrame {
     occupied: bool,
@@ -3191,7 +3219,7 @@ impl hibana::integration::transport::Transport for UnoQUartCarrier {
         &'a self,
         rx: &'a mut Self::Rx<'a>,
         task_context: &mut core::task::Context<'_>,
-    ) -> Poll<Result<Payload<'a>, Self::Error>> {
+    ) -> Poll<Result<hibana::integration::transport::Incoming<'a>, Self::Error>> {
         self.drain_uart(rx.session_id);
         let local_role = rx.local_role as usize;
         if local_role >= PROOF_CARRIER_ROLES {
@@ -3221,7 +3249,13 @@ impl hibana::integration::transport::Transport for UnoQUartCarrier {
             );
         }
         task_context.waker().wake_by_ref();
-        Poll::Ready(Ok(Payload::new(&rx.bytes[..rx.len])))
+        Poll::Ready(Ok(proof_incoming(
+            rx.session_id,
+            rx.lane,
+            rx.local_role,
+            frame.frame_label,
+            Payload::new(&rx.bytes[..rx.len]),
+        )))
     }
 
     fn requeue<'a>(&self, rx: &mut Self::Rx<'a>) -> Result<(), Self::Error> {
@@ -3237,12 +3271,17 @@ impl hibana::integration::transport::Transport for UnoQUartCarrier {
         Ok(())
     }
 
-    fn recv_frame_hint<'a>(
+    fn peek_recv_frame<'a>(
         &self,
         rx: &mut Self::Rx<'a>,
-    ) -> Option<hibana::integration::transport::FrameLabel> {
-        if let Some(frame_label) = rx.hint_frame_label.take() {
-            return Some(frame_label);
+    ) -> Option<hibana::integration::transport::FrameHeader> {
+        if let Some(frame_label) = rx.hint_frame_label.get() {
+            return Some(proof_frame_header(
+                rx.session_id,
+                rx.lane,
+                rx.local_role,
+                frame_label,
+            ));
         }
         unsafe {
             uno_q_m33_carrier_observe_hint(rx.lane);
@@ -3252,6 +3291,9 @@ impl hibana::integration::transport::Transport for UnoQUartCarrier {
             return None;
         }
         self.edit(|queues| queues.by_role[local_role].front_label(rx.lane))
+            .map(|frame_label| {
+                proof_frame_header(rx.session_id, rx.lane, rx.local_role, frame_label)
+            })
     }
 }
 
@@ -3506,7 +3548,7 @@ impl hibana::integration::transport::Transport for HardwarePeerCarrier {
         &'a self,
         rx: &'a mut Self::Rx<'a>,
         task_context: &mut core::task::Context<'_>,
-    ) -> Poll<Result<Payload<'a>, Self::Error>> {
+    ) -> Poll<Result<hibana::integration::transport::Incoming<'a>, Self::Error>> {
         let local_role = rx.local_role as usize;
         if local_role >= PROOF_CARRIER_ROLES {
             return Poll::Ready(Err(hibana::integration::transport::TransportError::Failed));
@@ -3524,7 +3566,13 @@ impl hibana::integration::transport::Transport for HardwarePeerCarrier {
         rx.len = frame.len;
         rx.bytes[..frame.len].copy_from_slice(&frame.bytes[..frame.len]);
         task_context.waker().wake_by_ref();
-        Poll::Ready(Ok(Payload::new(&rx.bytes[..rx.len])))
+        Poll::Ready(Ok(proof_incoming(
+            rx.session_id,
+            rx.lane,
+            rx.local_role,
+            frame.frame_label,
+            Payload::new(&rx.bytes[..rx.len]),
+        )))
     }
 
     fn requeue<'a>(&self, rx: &mut Self::Rx<'a>) -> Result<(), Self::Error> {
@@ -3540,12 +3588,17 @@ impl hibana::integration::transport::Transport for HardwarePeerCarrier {
         Ok(())
     }
 
-    fn recv_frame_hint<'a>(
+    fn peek_recv_frame<'a>(
         &self,
         rx: &mut Self::Rx<'a>,
-    ) -> Option<hibana::integration::transport::FrameLabel> {
-        if let Some(frame_label) = rx.hint_frame_label.take() {
-            return Some(frame_label);
+    ) -> Option<hibana::integration::transport::FrameHeader> {
+        if let Some(frame_label) = rx.hint_frame_label.get() {
+            return Some(proof_frame_header(
+                rx.session_id,
+                rx.lane,
+                rx.local_role,
+                frame_label,
+            ));
         }
         let local_role = rx.local_role as usize;
         if local_role >= PROOF_CARRIER_ROLES {
@@ -3553,6 +3606,9 @@ impl hibana::integration::transport::Transport for HardwarePeerCarrier {
         }
         self.local
             .edit(|queues| queues.by_role[local_role].front_label(rx.lane))
+            .map(|frame_label| {
+                proof_frame_header(rx.session_id, rx.lane, rx.local_role, frame_label)
+            })
     }
 }
 
@@ -3638,7 +3694,7 @@ impl hibana::integration::transport::Transport for ProofCarrier {
         &'a self,
         rx: &'a mut Self::Rx<'a>,
         task_context: &mut core::task::Context<'_>,
-    ) -> Poll<Result<Payload<'a>, Self::Error>> {
+    ) -> Poll<Result<hibana::integration::transport::Incoming<'a>, Self::Error>> {
         if rx.session_id == 0 {
             return Poll::Ready(Err(hibana::integration::transport::TransportError::Failed));
         }
@@ -3666,7 +3722,13 @@ impl hibana::integration::transport::Transport for ProofCarrier {
             );
         }
         task_context.waker().wake_by_ref();
-        Poll::Ready(Ok(Payload::new(&rx.bytes[..rx.len])))
+        Poll::Ready(Ok(proof_incoming(
+            rx.session_id,
+            rx.lane,
+            rx.local_role,
+            frame.frame_label,
+            Payload::new(&rx.bytes[..rx.len]),
+        )))
     }
 
     fn requeue<'a>(&self, rx: &mut Self::Rx<'a>) -> Result<(), Self::Error> {
@@ -3682,18 +3744,26 @@ impl hibana::integration::transport::Transport for ProofCarrier {
         Ok(())
     }
 
-    fn recv_frame_hint<'a>(
+    fn peek_recv_frame<'a>(
         &self,
         rx: &mut Self::Rx<'a>,
-    ) -> Option<hibana::integration::transport::FrameLabel> {
-        if let Some(frame_label) = rx.hint_frame_label.take() {
-            return Some(frame_label);
+    ) -> Option<hibana::integration::transport::FrameHeader> {
+        if let Some(frame_label) = rx.hint_frame_label.get() {
+            return Some(proof_frame_header(
+                rx.session_id,
+                rx.lane,
+                rx.local_role,
+                frame_label,
+            ));
         }
         let local_role = rx.local_role as usize;
         if local_role >= PROOF_CARRIER_ROLES {
             return None;
         }
         self.edit(|queues| queues.by_role[local_role].front_label(rx.lane))
+            .map(|frame_label| {
+                proof_frame_header(rx.session_id, rx.lane, rx.local_role, frame_label)
+            })
     }
 }
 
