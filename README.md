@@ -71,13 +71,16 @@ A logical image is a requested projection slice:
 pub trait LogicalImage<C: appkit::Capsule> {
     type Carrier<'a>: hibana::runtime::transport::Transport + 'a
     where
-        Self: 'a;
+        Self: 'a,
+        C: 'a;
 
     const REQUESTED_ROLES: appkit::RoleSet;
 
     fn init() -> Self;
     fn safe_state(&mut self);
-    fn carrier<'a>() -> Self::Carrier<'a>;
+    fn carrier<'a>() -> Self::Carrier<'a>
+    where
+        C: 'a;
 }
 ```
 
