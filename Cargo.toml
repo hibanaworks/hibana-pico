@@ -10,23 +10,21 @@ members = [
     ".",
     "examples/baker-firmware",
     "examples/heterogeneous-split-example",
-    "examples/rpw2-firmware",
+    "examples/rp2w-firmware",
     "examples/uno-q-heterogeneous",
-    "examples/pico-nod",
-    "examples/xbot",
 ]
 exclude = [
     "examples/baker-firmware/wasip1/guest",
-    "examples/rpw2-firmware/wasip1/guest",
+    "examples/rp2w-firmware/wasip1/guest",
     "examples/uno-q-heterogeneous/wasip1/guest",
-    "examples/xbot/wasip1/guest",
     "guest/hibana-wasip1-guest",
     "guest/wasip1-programs",
 ]
 resolver = "3"
 
 [dependencies]
-hibana = { version = "0.8.0", default-features = false }
+hibana = { version = "0.9.0", default-features = false }
+hibana-wasip1-runtime = { path = "../hibana-wasip1-runtime", default-features = false }
 
 [patch.crates-io]
 hibana = { path = "../hibana" }
@@ -34,20 +32,5 @@ hibana = { path = "../hibana" }
 [features]
 default = []
 
-# Wasm engine implementation capacity. WASI P1 syscalls are selected by
-# wasip1-sys-*.
+# Enables the appkit path that embeds and drives a WASI P1 guest.
 wasm-engine-core = []
-
-# WASI P1 syscall handler implementation capacity.
-wasip1-sys-args-env = []
-wasip1-sys-fd-write = []
-wasip1-sys-fd-read = []
-wasip1-sys-fd-readdir = []
-wasip1-sys-fd-fdstat-get = []
-wasip1-sys-fd-close = []
-wasip1-sys-clock-res-get = []
-wasip1-sys-clock-time-get = []
-wasip1-sys-poll-oneoff = []
-wasip1-sys-random-get = []
-wasip1-sys-proc-exit = []
-wasip1-sys-path-open = []

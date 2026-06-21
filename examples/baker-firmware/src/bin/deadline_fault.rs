@@ -1,31 +1,31 @@
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_std)]
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_main)]
 
-use baker_firmware::{BakerArtifacts, BakerCapsuleFacts, BakerPlacement};
+use baker_firmware::{BakerCapsuleFacts, BakerPlacement};
 use hibana::g;
-use hibana_pico::{appkit, choreography::protocol::EngineAbortBeginControl};
+use hibana_pico::appkit;
 
-pub struct DeadlineFault;
-pub struct DeadlineFaultLocal;
+const LABEL_ENGINE_ABORT_BEGIN: u8 = 129;
+type EngineAbortBegin = g::Msg<LABEL_ENGINE_ABORT_BEGIN, ()>;
+
+struct DeadlineFault;
+struct DeadlineFaultLocal;
 
 impl appkit::Capsule for DeadlineFault {
-    type Universe = appkit::BuiltInUniverse;
     type Placement = BakerPlacement;
     type Local = DeadlineFaultLocal;
-    type Report = core::convert::Infallible;
 
-    fn choreography() -> impl hibana::integration::program::Projectable {
-        g::send::<1, 0, EngineAbortBeginControl, 0>()
+    fn choreography() -> impl hibana::runtime::program::Projectable {
+        g::send::<1, 0, EngineAbortBegin>()
     }
 }
 
 impl BakerCapsuleFacts for DeadlineFault {
-    type DriverArtifact = appkit::NoWasi;
-    type EngineArtifact = appkit::NoWasi;
-
-    const DRIVER_IMAGE_ID: appkit::ImageId = appkit::ImageId(54);
-    const ENGINE_IMAGE_ID: appkit::ImageId = appkit::ImageId(55);
     const SIO_OPERATIONAL_DEADLINE_TICKS: u32 = 2;
+
+    fn run_engine_image() {
+        baker_firmware::run_engine_no_wasi::<Self>();
+    }
 }
 
 impl appkit::Localside<DeadlineFault> for DeadlineFaultLocal {
@@ -42,7 +42,7 @@ impl appkit::Localside<DeadlineFault> for DeadlineFaultLocal {
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 0 {
-                ctx.endpoint().recv::<EngineAbortBeginControl>().await?;
+                ctx.endpoint().recv::<EngineAbortBegin>().await?;
             }
             ctx.pending().await
         }
@@ -52,27 +52,6 @@ impl appkit::Localside<DeadlineFault> for DeadlineFaultLocal {
         ctx: appkit::BoundaryCtx<'a, DeadlineFault, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
-    }
-
-    fn link<'a, const ROLE: u8>(
-        ctx: appkit::LinkCtx<'a, DeadlineFault, ROLE>,
-    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
-    }
-
-    fn supervisor<'a, const ROLE: u8>(
-        ctx: appkit::SupervisorCtx<'a, DeadlineFault, ROLE>,
-    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
-    }
-}
-
-impl<I> appkit::ArtifactForImage<DeadlineFault, I> for BakerArtifacts
-where
-    I: appkit::LogicalImage<DeadlineFault, Artifact = appkit::NoWasi>,
-{
-    fn artifact_for_image(&self) -> I::Artifact {
-        appkit::NoWasi
     }
 }
 

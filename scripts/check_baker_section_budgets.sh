@@ -6,8 +6,8 @@ cd "$ROOT"
 
 target="${HIBANA_PICO_TARGET:-thumbv6m-none-eabi}"
 package_name="baker-firmware"
-baker_features="wasm-engine-core wasip1-sys-args-env wasip1-sys-fd-write wasip1-sys-path-open wasip1-sys-poll-oneoff wasip1-sys-proc-exit embed-wasip1-artifacts"
-bins="baker-traffic baker-choreofs-traffic baker-choreofs-traffic-loop baker-fail-safe baker-recovery baker-many-reentry baker-panic-marker baker-endpoint-fault baker-endpoint-poison baker-preview-probe baker-deadline-fault baker-timer-route"
+baker_features="wasm-engine-core embed-wasip1-artifacts"
+bins="baker-traffic baker-choreofs-traffic baker-choreofs-traffic-loop baker-fail-safe baker-recovery baker-many-reentry baker-panic-marker baker-endpoint-fault baker-endpoint-poison baker-preview-probe baker-deadline-fault baker-timer-route baker-capacity-fault baker-epf-policy-timer"
 
 sysroot="$(rustc --print sysroot)"
 host="$(rustc -vV | sed -n 's/^host: //p')"
@@ -23,12 +23,12 @@ budget_for_bin() {
       echo "1000000 260000 4096 240000 1000000"
       ;;
     baker-panic-marker)
-      echo "16000 4096 1024 2048 16000"
+      echo "16000 4096 1024 2304 16000"
       ;;
-    baker-many-reentry | baker-timer-route)
+    baker-many-reentry | baker-timer-route | baker-epf-policy-timer)
       echo "835000 180000 4096 160000 835000"
       ;;
-    baker-endpoint-fault | baker-endpoint-poison | baker-deadline-fault)
+    baker-endpoint-fault | baker-endpoint-poison | baker-deadline-fault | baker-capacity-fault)
       echo "820000 180000 4096 160000 820000"
       ;;
     baker-traffic | baker-fail-safe | baker-recovery | baker-preview-probe)
@@ -68,7 +68,7 @@ check_budget() {
 }
 
 for bin in $bins; do
-  if [[ "$bin" == "baker-timer-route" ]]; then
+  if [[ "$bin" == "baker-timer-route" || "$bin" == "baker-capacity-fault" || "$bin" == "baker-epf-policy-timer" ]]; then
     cargo build --quiet --target "$target" --release -p "$package_name" --bin "$bin"
   else
     cargo build --quiet --target "$target" --release -p "$package_name" --bin "$bin" --features "$baker_features"

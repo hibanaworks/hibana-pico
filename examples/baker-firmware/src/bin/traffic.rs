@@ -1,45 +1,46 @@
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_std)]
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_main)]
 
-use baker_firmware::{BakerArtifacts, BakerCapsuleFacts, BakerPlacement};
+use baker_firmware::{BakerCapsuleFacts, BakerPlacement};
 use hibana::g;
-use hibana_pico::{
-    appkit,
-    choreography::protocol::{
-        EngineAbort, EngineAbortAckControl, EngineAbortBeginControl, EngineAbortFenceControl,
-        EngineAbortMsg, EngineAbortReason,
-    },
-};
+use hibana_pico::appkit;
 
-pub struct Traffic;
-pub struct TrafficLocal;
+const LABEL_ENGINE_ABORT_BEGIN: u8 = 129;
+const LABEL_ENGINE_ABORT_REASON: u8 = 130;
+const LABEL_ENGINE_ABORT_FENCE: u8 = 131;
+const LABEL_ENGINE_ABORT_ACK: u8 = 132;
+
+type EngineAbortBegin = g::Msg<LABEL_ENGINE_ABORT_BEGIN, ()>;
+type EngineAbortMsg = g::Msg<LABEL_ENGINE_ABORT_REASON, ()>;
+type EngineAbortFence = g::Msg<LABEL_ENGINE_ABORT_FENCE, ()>;
+type EngineAbortAck = g::Msg<LABEL_ENGINE_ABORT_ACK, ()>;
+
+struct Traffic;
+struct TrafficLocal;
 
 #[derive(Debug)]
-pub enum TrafficError {
-    Endpoint(hibana::EndpointError),
-    RuntimeViolation,
+enum TrafficError {
+    Endpoint,
 }
 
 impl From<hibana::EndpointError> for TrafficError {
-    fn from(error: hibana::EndpointError) -> Self {
-        Self::Endpoint(error)
+    fn from(_: hibana::EndpointError) -> Self {
+        Self::Endpoint
     }
 }
 
 impl appkit::Capsule for Traffic {
-    type Universe = appkit::BuiltInUniverse;
     type Placement = BakerPlacement;
     type Local = TrafficLocal;
-    type Report = core::convert::Infallible;
 
-    fn choreography() -> impl hibana::integration::program::Projectable {
+    fn choreography() -> impl hibana::runtime::program::Projectable {
         g::seq(
-            g::send::<1, 0, EngineAbortBeginControl, 0>(),
+            g::send::<1, 0, EngineAbortBegin>(),
             g::seq(
-                g::send::<1, 0, EngineAbortMsg, 0>(),
+                g::send::<1, 0, EngineAbortMsg>(),
                 g::seq(
-                    g::send::<0, 1, EngineAbortFenceControl, 0>(),
-                    g::send::<1, 0, EngineAbortAckControl, 0>(),
+                    g::send::<0, 1, EngineAbortFence>(),
+                    g::send::<1, 0, EngineAbortAck>(),
                 ),
             ),
         )
@@ -47,11 +48,9 @@ impl appkit::Capsule for Traffic {
 }
 
 impl BakerCapsuleFacts for Traffic {
-    type DriverArtifact = appkit::NoWasi;
-    type EngineArtifact = appkit::NoWasi;
-
-    const DRIVER_IMAGE_ID: appkit::ImageId = appkit::ImageId(0);
-    const ENGINE_IMAGE_ID: appkit::ImageId = appkit::ImageId(1);
+    fn run_engine_image() {
+        baker_firmware::run_engine_no_wasi::<Self>();
+    }
 }
 
 impl appkit::Localside<Traffic> for TrafficLocal {
@@ -62,17 +61,13 @@ impl appkit::Localside<Traffic> for TrafficLocal {
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 1 {
-                let begin = ctx.endpoint().flow::<EngineAbortBeginControl>()?;
-                begin.send(&()).await?;
+                ctx.endpoint().send::<EngineAbortBegin>(&()).await?;
 
-                let abort = EngineAbort::new(EngineAbortReason::FuelExhausted, 1);
-                let abort_flow = ctx.endpoint().flow::<EngineAbortMsg>()?;
-                abort_flow.send(&abort).await?;
+                ctx.endpoint().send::<EngineAbortMsg>(&()).await?;
 
-                ctx.endpoint().recv::<EngineAbortFenceControl>().await?;
+                ctx.endpoint().recv::<EngineAbortFence>().await?;
 
-                let ack = ctx.endpoint().flow::<EngineAbortAckControl>()?;
-                ack.send(&()).await?;
+                ctx.endpoint().send::<EngineAbortAck>(&()).await?;
 
                 baker_firmware::mark_runtime_ready();
                 return ctx.pending().await;
@@ -86,19 +81,15 @@ impl appkit::Localside<Traffic> for TrafficLocal {
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 0 {
-                ctx.endpoint().recv::<EngineAbortBeginControl>().await?;
+                ctx.endpoint().recv::<EngineAbortBegin>().await?;
 
-                let abort = ctx.endpoint().recv::<EngineAbortMsg>().await?;
-                if abort.reason() != EngineAbortReason::FuelExhausted {
-                    return Err(TrafficError::RuntimeViolation);
-                }
+                ctx.endpoint().recv::<EngineAbortMsg>().await?;
 
                 baker_firmware::mark_safe_state();
 
-                let fence = ctx.endpoint().flow::<EngineAbortFenceControl>()?;
-                fence.send(&()).await?;
+                ctx.endpoint().send::<EngineAbortFence>(&()).await?;
 
-                ctx.endpoint().recv::<EngineAbortAckControl>().await?;
+                ctx.endpoint().recv::<EngineAbortAck>().await?;
 
                 baker_firmware::mark_runtime_ready();
                 baker_firmware::mark_success(<Traffic as BakerCapsuleFacts>::SUCCESS_RESULT);
@@ -112,27 +103,6 @@ impl appkit::Localside<Traffic> for TrafficLocal {
         ctx: appkit::BoundaryCtx<'a, Traffic, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
-    }
-
-    fn link<'a, const ROLE: u8>(
-        ctx: appkit::LinkCtx<'a, Traffic, ROLE>,
-    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
-    }
-
-    fn supervisor<'a, const ROLE: u8>(
-        ctx: appkit::SupervisorCtx<'a, Traffic, ROLE>,
-    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
-    }
-}
-
-impl<I> appkit::ArtifactForImage<Traffic, I> for BakerArtifacts
-where
-    I: appkit::LogicalImage<Traffic, Artifact = appkit::NoWasi>,
-{
-    fn artifact_for_image(&self) -> I::Artifact {
-        appkit::NoWasi
     }
 }
 

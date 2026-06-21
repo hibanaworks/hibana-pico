@@ -18,6 +18,9 @@ expected_wasms=(
   wasip1-infinite-loop.wasm
   wasip1-led-choreofs-traffic-cycle.wasm
   wasip1-led-choreofs-traffic-once.wasm
+  wasip1-session-mismatch-fd-write.wasm
+  rp2w-epf-policy-timer-guest.wasm
+  rp2w-sensor-panel-guest.wasm
   wasip1-memory-grow-ok.wasm
   wasip1-memory-grow-stale-lease.wasm
   wasip1-random.wasm
@@ -33,7 +36,6 @@ expected_wasms=(
   uno-q-llm-face-shell-loop.wasm
   uno-q-llm-face-shell.wasm
   wasip1-trap.wasm
-  wasip1-xbot-reply-normalizer.wasm
 )
 
 rm -rf "$target_dir"
@@ -58,7 +60,7 @@ CARGO_TARGET_DIR="$target_dir" \
 RUSTFLAGS="$wasip1_rustflags" \
 CARGO_TARGET_DIR="$target_dir" \
   cargo build \
-    --manifest-path examples/xbot/wasip1/guest/Cargo.toml \
+    --manifest-path examples/rp2w-firmware/wasip1/guest/Cargo.toml \
     --target wasm32-wasip1 \
     --release \
     --bins

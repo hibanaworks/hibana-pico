@@ -58,5 +58,5 @@ done
 
 echo "installed llama.cpp local LLM:"
 echo "  server: ${REMOTE_ROOT}/bin/llama-server"
-echo "  fallback completion: ${REMOTE_ROOT}/bin/llama-completion"
+echo "  manual completion: ${REMOTE_ROOT}/bin/llama-completion"
 echo "  model:  ${REMOTE_ROOT}/models/${MODEL_NAME}"

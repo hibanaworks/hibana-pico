@@ -1,30 +1,34 @@
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_std)]
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_main)]
 
-use baker_firmware::{BakerArtifacts, BakerCapsuleFacts, BakerPlacement};
+use baker_firmware::{BakerCapsuleFacts, BakerPlacement};
 use hibana::g;
-use hibana_pico::{appkit, choreography::protocol::EngineAbortBeginControl};
+use hibana_pico::appkit;
 
-pub struct EndpointPoison;
-pub struct EndpointPoisonLocal;
+const LABEL_ENGINE_ABORT_BEGIN: u8 = 129;
+type EngineAbortBegin = g::Msg<LABEL_ENGINE_ABORT_BEGIN, ()>;
+
+struct EndpointPoison;
+struct EndpointPoisonLocal;
+
+fn record_endpoint_error(error: &hibana::EndpointError) {
+    core::hint::black_box(error);
+    baker_firmware::record_choreofs_engine_error_code(0x5745_0f00);
+}
 
 impl appkit::Capsule for EndpointPoison {
-    type Universe = appkit::BuiltInUniverse;
     type Placement = BakerPlacement;
     type Local = EndpointPoisonLocal;
-    type Report = core::convert::Infallible;
 
-    fn choreography() -> impl hibana::integration::program::Projectable {
-        g::send::<1, 0, EngineAbortBeginControl, 0>()
+    fn choreography() -> impl hibana::runtime::program::Projectable {
+        g::send::<1, 0, EngineAbortBegin>()
     }
 }
 
 impl BakerCapsuleFacts for EndpointPoison {
-    type DriverArtifact = appkit::NoWasi;
-    type EngineArtifact = appkit::NoWasi;
-
-    const DRIVER_IMAGE_ID: appkit::ImageId = appkit::ImageId(54);
-    const ENGINE_IMAGE_ID: appkit::ImageId = appkit::ImageId(55);
+    fn run_engine_image() {
+        baker_firmware::run_engine_no_wasi::<Self>();
+    }
 }
 
 impl appkit::Localside<EndpointPoison> for EndpointPoisonLocal {
@@ -37,13 +41,13 @@ impl appkit::Localside<EndpointPoison> for EndpointPoisonLocal {
             if ROLE == 1 {
                 match ctx.endpoint().offer().await {
                     Ok(_) => panic!("offer at send-only phase must not produce continuation"),
-                    Err(error) => baker_firmware::record_endpoint_error(&error),
+                    Err(error) => record_endpoint_error(&error),
                 }
 
-                match ctx.endpoint().flow::<EngineAbortBeginControl>() {
-                    Ok(_) => panic!("poisoned generation must not produce a flow continuation"),
+                match ctx.endpoint().send::<EngineAbortBegin>(&()).await {
+                    Ok(_) => panic!("poisoned generation must not send"),
                     Err(error) => {
-                        baker_firmware::record_endpoint_error(&error);
+                        record_endpoint_error(&error);
                         return Err(error);
                     }
                 }
@@ -62,27 +66,6 @@ impl appkit::Localside<EndpointPoison> for EndpointPoisonLocal {
         ctx: appkit::BoundaryCtx<'a, EndpointPoison, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
-    }
-
-    fn link<'a, const ROLE: u8>(
-        ctx: appkit::LinkCtx<'a, EndpointPoison, ROLE>,
-    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
-    }
-
-    fn supervisor<'a, const ROLE: u8>(
-        ctx: appkit::SupervisorCtx<'a, EndpointPoison, ROLE>,
-    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
-    }
-}
-
-impl<I> appkit::ArtifactForImage<EndpointPoison, I> for BakerArtifacts
-where
-    I: appkit::LogicalImage<EndpointPoison, Artifact = appkit::NoWasi>,
-{
-    fn artifact_for_image(&self) -> I::Artifact {
-        appkit::NoWasi
     }
 }
 

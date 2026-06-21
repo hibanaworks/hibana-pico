@@ -6,37 +6,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-use hibana_pico::{appkit, appkit::ArtifactBundle, site};
+use hibana_pico::appkit;
 use uno_q_heterogeneous::{UnoQCapsule, image};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProofMode {
+    Once,
+    FaceLoop,
+}
+
 fn main() {
-    apply_cli_args();
-    set_env_default("UNO_Q_HIBANA_UART_TURNAROUND_US", "200000");
-    set_env_default("UNO_Q_HIBANA_UART_BYTE_US", "50000");
-    let face_loop_forever = env::var_os("UNO_Q_FACE_LOOP_FOREVER").is_some();
-    let proof_human_input_mode = if face_loop_forever {
-        take_env("UNO_Q_HUMAN_INPUT_MODE")
-    } else {
-        None
-    };
-    let proof_local_llm_scripted = if face_loop_forever {
-        take_env("UNO_Q_LOCAL_LLM_SCRIPTED")
-    } else {
-        None
-    };
-    if face_loop_forever {
-        unsafe {
-            env::remove_var("UNO_Q_FACE_LOOP_FOREVER");
-            env::set_var("UNO_Q_LOCAL_LLM_SCRIPTED", "1");
-        }
-    }
-    run_choreography_proof();
-    if face_loop_forever {
-        unsafe {
-            env::set_var("UNO_Q_FACE_LOOP_FOREVER", "1");
-        }
-        restore_env("UNO_Q_LOCAL_LLM_SCRIPTED", proof_local_llm_scripted);
-        restore_env("UNO_Q_HUMAN_INPUT_MODE", proof_human_input_mode);
+    let proof_mode = apply_cli_args();
+    set_env_default("UNO_Q_HIBANA_UART_TURNAROUND_US", "10000");
+    set_env_default("UNO_Q_HIBANA_UART_BYTE_US", "1000");
+    if matches!(proof_mode, ProofMode::FaceLoop) {
         eprintln!(
             "uno-q face loop mode: local LLM drives the WASI ChoreoFS shell into /face/frame forever"
         );
@@ -62,43 +45,25 @@ fn main() {
     unsafe {
         env::set_var("UNO_Q_HIBANA_SERIAL", &serial);
     }
-    run_hardware_split_proof(&serial);
+    run_hardware_split_proof(&serial, proof_mode);
 
     println!(
         "uno-q hardware proof ok: split appkit images exchanged projected Endpoint/carrier frames over {serial}"
     );
 }
 
-fn run_choreography_proof() {
-    type Proof = site::Local<image::HostLoopbackProof>;
-
-    let report =
-        appkit::run::<Proof, UnoQCapsule>(uno_q_heterogeneous::ARTIFACTS.for_image::<Proof>());
-
-    assert_eq!(report.image_id(), appkit::ImageId(710));
-    assert_eq!(report.site_id(), appkit::SiteId(7100));
-    assert_eq!(report.requested_roles(), appkit::RoleSet::from_bits(0xf));
-    assert_eq!(report.attached_endpoint_count(), 4);
-    assert_eq!(report.attached_role_kinds().engine, 1);
-    assert_eq!(report.attached_role_kinds().driver, 1);
-    assert_eq!(report.attached_role_kinds().boundary, 2);
-    assert!(report.artifact_len() > 0);
+fn run_hardware_split_proof(serial: &str, mode: ProofMode) {
+    match mode {
+        ProofMode::Once => run_hardware_split_proof_once(serial),
+        ProofMode::FaceLoop => run_hardware_split_proof_loop(serial),
+    }
 }
 
-fn run_hardware_split_proof(serial: &str) {
-    type Proof = site::Local<image::HardwarePeerProof>;
-
-    let report =
-        appkit::run::<Proof, UnoQCapsule>(uno_q_heterogeneous::ARTIFACTS.for_image::<Proof>());
-
-    assert_eq!(report.image_id(), appkit::ImageId(717));
-    assert_eq!(report.site_id(), appkit::SiteId(7107));
-    assert_eq!(report.requested_roles(), appkit::RoleSet::from_bits(0xe));
-    assert_eq!(report.attached_endpoint_count(), 3);
-    assert_eq!(report.attached_role_kinds().engine, 1);
-    assert_eq!(report.attached_role_kinds().driver, 0);
-    assert_eq!(report.attached_role_kinds().boundary, 2);
-    assert!(report.artifact_len() > 0);
+fn assert_hardware_split_image<I>(serial: &str)
+where
+    I: appkit::LogicalImage<UnoQCapsule>,
+{
+    assert_eq!(I::REQUESTED_ROLES, appkit::RoleSet::from_bits(0x1e));
     assert_eq!(
         env::var("UNO_Q_HIBANA_SERIAL").as_deref(),
         Ok(serial),
@@ -106,17 +71,38 @@ fn run_hardware_split_proof(serial: &str) {
     );
 }
 
-fn apply_cli_args() {
+fn run_hardware_split_proof_once(serial: &str) {
+    type Proof = appkit::Local<image::HardwarePeerProof>;
+
+    appkit::run::<Proof, UnoQCapsule>(image::HardwarePeerProof::wasi_image());
+    assert_hardware_split_image::<Proof>(serial);
+}
+
+fn run_hardware_split_proof_loop(serial: &str) {
+    type Proof = appkit::Local<image::HardwarePeerLoopProof>;
+
+    appkit::run::<Proof, UnoQCapsule>(image::HardwarePeerLoopProof::wasi_image());
+    assert_hardware_split_image::<Proof>(serial);
+}
+
+fn apply_cli_args() -> ProofMode {
+    let mut proof_mode = if env::var_os("UNO_Q_FACE_LOOP_FOREVER").is_some() {
+        ProofMode::FaceLoop
+    } else {
+        ProofMode::Once
+    };
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--prompt-shell" => {
                 set_env("UNO_Q_HUMAN_INPUT_MODE", "prompt");
                 set_env("UNO_Q_FACE_LOOP_FOREVER", "1");
+                proof_mode = ProofMode::FaceLoop;
             }
             "--voice-shell" => {
                 set_env("UNO_Q_HUMAN_INPUT_MODE", "voice");
                 set_env("UNO_Q_FACE_LOOP_FOREVER", "1");
+                proof_mode = ProofMode::FaceLoop;
             }
             "--voice-cmd" => {
                 let Some(command) = args.next() else {
@@ -125,18 +111,21 @@ fn apply_cli_args() {
                 set_env("UNO_Q_HUMAN_INPUT_VOICE_CMD", &command);
                 set_env("UNO_Q_HUMAN_INPUT_MODE", "voice");
                 set_env("UNO_Q_FACE_LOOP_FOREVER", "1");
+                proof_mode = ProofMode::FaceLoop;
             }
             "--sensor-udp" => {
-                set_env("UNO_Q_HUMAN_INPUT_MODE", "sensor-udp");
+                set_env("UNO_Q_PICO2W_SENSOR_MODE", "udp");
                 set_env("UNO_Q_FACE_LOOP_FOREVER", "1");
+                proof_mode = ProofMode::FaceLoop;
             }
             "--sensor-bind" => {
                 let Some(bind) = args.next() else {
                     panic!("--sensor-bind requires ADDRESS:PORT");
                 };
-                set_env("UNO_Q_SENSOR_UDP_BIND", &bind);
-                set_env("UNO_Q_HUMAN_INPUT_MODE", "sensor-udp");
+                set_env("UNO_Q_PICO2W_SENSOR_UDP_BIND", &bind);
+                set_env("UNO_Q_PICO2W_SENSOR_MODE", "udp");
                 set_env("UNO_Q_FACE_LOOP_FOREVER", "1");
+                proof_mode = ProofMode::FaceLoop;
             }
             "--serial" => {
                 let Some(serial) = args.next() else {
@@ -145,7 +134,10 @@ fn apply_cli_args() {
                 set_env("UNO_Q_HIBANA_SERIAL", &serial);
             }
             "--trace" => set_env("UNO_Q_HIBANA_TRACE", "1"),
-            "--face-loop-forever" => set_env("UNO_Q_FACE_LOOP_FOREVER", "1"),
+            "--face-loop-forever" => {
+                set_env("UNO_Q_FACE_LOOP_FOREVER", "1");
+                proof_mode = ProofMode::FaceLoop;
+            }
             "--scripted-llm" => set_env("UNO_Q_LOCAL_LLM_SCRIPTED", "1"),
             "--help" | "-h" => {
                 println!(
@@ -158,6 +150,7 @@ fn apply_cli_args() {
             other => panic!("unknown argument {other}; pass --help for usage"),
         }
     }
+    proof_mode
 }
 
 fn set_env(key: &str, value: &str) {
@@ -169,28 +162,6 @@ fn set_env(key: &str, value: &str) {
 fn set_env_default(key: &str, value: &str) {
     if env::var_os(key).is_none() {
         set_env(key, value);
-    }
-}
-
-fn take_env(key: &str) -> Option<std::ffi::OsString> {
-    let value = env::var_os(key);
-    if value.is_some() {
-        unsafe {
-            env::remove_var(key);
-        }
-    }
-    value
-}
-
-fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
-    if let Some(value) = value {
-        unsafe {
-            env::set_var(key, value);
-        }
-    } else {
-        unsafe {
-            env::remove_var(key);
-        }
     }
 }
 
@@ -276,10 +247,25 @@ fn pulse_gpio_line(line: &str) {
 }
 
 fn configure_serial(path: &str) {
+    let device_flag = if cfg!(target_os = "macos") {
+        "-f"
+    } else {
+        "-F"
+    };
     let status = Command::new("stty")
         .args([
-            "-F", path, "115200", "raw", "-echo", "-crtscts", "clocal", "-hupcl", "min", "0",
-            "time", "0",
+            device_flag,
+            path,
+            "115200",
+            "raw",
+            "-echo",
+            "-crtscts",
+            "clocal",
+            "-hupcl",
+            "min",
+            "0",
+            "time",
+            "0",
         ])
         .status()
         .unwrap_or_else(|error| panic!("failed to run stty for {path}: {error}"));
@@ -305,7 +291,6 @@ fn reset_m33_appkit_image() {
             panic!("failed to reset STM32U585 appkit image before proof: {error}")
         });
     assert!(status.success(), "STM32U585 reset-run failed: {status}");
-    std::thread::sleep(Duration::from_millis(300));
 }
 
 fn drain_serial(path: &str) {

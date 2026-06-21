@@ -4,4 +4,4 @@ rustflags = ["-C", "link-arg=-Tlinker/rp2040/pico_demo.ld", "-C", "link-arg=--gc
 
 [target.thumbv8m.main-none-eabi]
 linker = "rust-lld"
-rustflags = ["-C", "link-arg=--gc-sections"]
+rustflags = ["-C", "link-arg=-Tlinker/rp2350/pico2w_demo.ld", "-C", "link-arg=--gc-sections"]

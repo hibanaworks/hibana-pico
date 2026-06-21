@@ -5,17 +5,14 @@ edition = "2024"
 publish = false
 
 [dependencies]
-hibana = { version = "0.8.0", default-features = false }
+hibana = { version = "0.9.0", default-features = false }
+hibana-epf = { path = "../../../hibana-epf", default-features = false }
 hibana-pico = { path = "../.." }
+hibana-wasip1-runtime = { path = "../../../hibana-wasip1-runtime", default-features = false }
 
 [features]
 default = []
 wasm-engine-core = ["hibana-pico/wasm-engine-core"]
-wasip1-sys-args-env = ["hibana-pico/wasip1-sys-args-env"]
-wasip1-sys-fd-write = ["hibana-pico/wasip1-sys-fd-write"]
-wasip1-sys-path-open = ["hibana-pico/wasip1-sys-path-open"]
-wasip1-sys-poll-oneoff = ["hibana-pico/wasip1-sys-poll-oneoff"]
-wasip1-sys-proc-exit = ["hibana-pico/wasip1-sys-proc-exit"]
 embed-wasip1-artifacts = []
 
 [[bin]]
@@ -69,3 +66,11 @@ path = "src/bin/timer_route.rs"
 [[bin]]
 name = "baker-session-mismatch"
 path = "src/bin/session_mismatch.rs"
+
+[[bin]]
+name = "baker-capacity-fault"
+path = "src/bin/capacity_fault.rs"
+
+[[bin]]
+name = "baker-epf-policy-timer"
+path = "src/bin/epf_policy_timer.rs"

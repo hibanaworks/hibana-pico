@@ -72,7 +72,7 @@ mod animation_timing_tests {
 mod firmware {
     use core::{arch::asm, hint::spin_loop, ptr};
 
-    use hibana_pico::{appkit, appkit::ArtifactBundle, site};
+    use hibana_pico::appkit;
     use uno_q_heterogeneous::protocol;
     use uno_q_heterogeneous::{UnoQCapsule, image};
 
@@ -444,12 +444,10 @@ mod firmware {
         renderer_show_face(protocol::FACE_NEUTRAL);
         mark_stage(7);
 
-        type Image = site::Local<image::M33LedKernelImage>;
+        type Image = appkit::Local<image::M33LedKernelImage>;
         mark_stage(8);
-        let report =
-            appkit::run::<Image, UnoQCapsule>(uno_q_heterogeneous::ARTIFACTS.for_image::<Image>());
+        appkit::run::<Image, UnoQCapsule>(appkit::NoWasi);
         mark_stage(9);
-        core::hint::black_box(report);
         loop {
             spin_loop();
         }

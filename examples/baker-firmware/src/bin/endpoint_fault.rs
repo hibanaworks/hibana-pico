@@ -1,33 +1,32 @@
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_std)]
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_main)]
 
-use baker_firmware::{BakerArtifacts, BakerCapsuleFacts, BakerPlacement};
+use baker_firmware::{BakerCapsuleFacts, BakerPlacement};
 use hibana::g;
-use hibana_pico::{
-    appkit,
-    choreography::protocol::{EngineAbortBeginControl, EngineAbortFenceControl},
-};
+use hibana_pico::appkit;
 
-pub struct EndpointFault;
-pub struct EndpointFaultLocal;
+const LABEL_ENGINE_ABORT_BEGIN: u8 = 129;
+const LABEL_ENGINE_ABORT_FENCE: u8 = 131;
+
+type EngineAbortBegin = g::Msg<LABEL_ENGINE_ABORT_BEGIN, ()>;
+type EngineAbortFence = g::Msg<LABEL_ENGINE_ABORT_FENCE, ()>;
+
+struct EndpointFault;
+struct EndpointFaultLocal;
 
 impl appkit::Capsule for EndpointFault {
-    type Universe = appkit::BuiltInUniverse;
     type Placement = BakerPlacement;
     type Local = EndpointFaultLocal;
-    type Report = core::convert::Infallible;
 
-    fn choreography() -> impl hibana::integration::program::Projectable {
-        g::send::<1, 0, EngineAbortBeginControl, 0>()
+    fn choreography() -> impl hibana::runtime::program::Projectable {
+        g::send::<1, 0, EngineAbortBegin>()
     }
 }
 
 impl BakerCapsuleFacts for EndpointFault {
-    type DriverArtifact = appkit::NoWasi;
-    type EngineArtifact = appkit::NoWasi;
-
-    const DRIVER_IMAGE_ID: appkit::ImageId = appkit::ImageId(50);
-    const ENGINE_IMAGE_ID: appkit::ImageId = appkit::ImageId(51);
+    fn run_engine_image() {
+        baker_firmware::run_engine_no_wasi::<Self>();
+    }
 }
 
 impl appkit::Localside<EndpointFault> for EndpointFaultLocal {
@@ -38,7 +37,7 @@ impl appkit::Localside<EndpointFault> for EndpointFaultLocal {
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 1 {
-                ctx.endpoint().recv::<EngineAbortFenceControl>().await?;
+                ctx.endpoint().recv::<EngineAbortFence>().await?;
             }
             ctx.pending().await
         }
@@ -54,27 +53,6 @@ impl appkit::Localside<EndpointFault> for EndpointFaultLocal {
         ctx: appkit::BoundaryCtx<'a, EndpointFault, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
-    }
-
-    fn link<'a, const ROLE: u8>(
-        ctx: appkit::LinkCtx<'a, EndpointFault, ROLE>,
-    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
-    }
-
-    fn supervisor<'a, const ROLE: u8>(
-        ctx: appkit::SupervisorCtx<'a, EndpointFault, ROLE>,
-    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
-    }
-}
-
-impl<I> appkit::ArtifactForImage<EndpointFault, I> for BakerArtifacts
-where
-    I: appkit::LogicalImage<EndpointFault, Artifact = appkit::NoWasi>,
-{
-    fn artifact_for_image(&self) -> I::Artifact {
-        appkit::NoWasi
     }
 }
 

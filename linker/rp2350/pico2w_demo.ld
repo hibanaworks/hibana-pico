@@ -18,6 +18,11 @@ SECTIONS
     KEEP(*(.vector_table.reset_vector))
   } > FLASH
 
+  .start_block : ALIGN(4)
+  {
+    KEEP(*(.start_block))
+  } > FLASH
+
   .text :
   {
     *(.text*)
@@ -26,13 +31,18 @@ SECTIONS
 
   .data : ALIGN(4)
   {
+    __data_start = .;
     *(.data*)
+    __data_end = .;
   } > RAM AT > FLASH
+  __data_load_start = LOADADDR(.data);
 
   .bss (NOLOAD) : ALIGN(4)
   {
+    __bss_start = .;
     *(.bss*)
     *(COMMON)
+    __bss_end = .;
   } > RAM
 
   . = ALIGN(8);

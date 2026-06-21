@@ -1,7 +1,7 @@
 #![cfg_attr(target_os = "none", no_std)]
 #![cfg_attr(target_os = "none", no_main)]
 
-use hibana_pico::{appkit, appkit::ArtifactBundle, site};
+use hibana_pico::appkit;
 
 #[cfg(target_os = "none")]
 #[panic_handler]
@@ -14,36 +14,24 @@ fn panic_handler(info: &core::panic::PanicInfo<'_>) -> ! {
 
 #[cfg(not(target_os = "none"))]
 fn main() {
-    let report = appkit::run::<
-        site::Local<heterogeneous_split_example::image::M33Realtime>,
-        heterogeneous_split_example::Control,
-    >(
-        heterogeneous_split_example::ARTIFACTS
-            .for_image::<site::Local<heterogeneous_split_example::image::M33Realtime>>(),
-    );
-    heterogeneous_split_example::assert_single_role_image(
-        &report,
-        hibana_pico::appkit::ImageId(31),
-        hibana_pico::appkit::SiteId(331),
-        1,
+    type Image = appkit::Local<heterogeneous_split_example::image::M33Realtime>;
+
+    appkit::run::<Image, heterogeneous_split_example::Control>(appkit::NoWasi);
+    assert_eq!(
+        <Image as appkit::LogicalImage<heterogeneous_split_example::Control>>::REQUESTED_ROLES,
+        appkit::RoleSet::single(1)
     );
 }
 
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> ! {
-    let report = appkit::run::<
-        site::Local<heterogeneous_split_example::image::M33Realtime>,
-        heterogeneous_split_example::Control,
-    >(
-        heterogeneous_split_example::ARTIFACTS
-            .for_image::<site::Local<heterogeneous_split_example::image::M33Realtime>>(),
-    );
-    heterogeneous_split_example::assert_single_role_image(
-        &report,
-        hibana_pico::appkit::ImageId(31),
-        hibana_pico::appkit::SiteId(331),
-        1,
+    type Image = appkit::Local<heterogeneous_split_example::image::M33Realtime>;
+
+    appkit::run::<Image, heterogeneous_split_example::Control>(appkit::NoWasi);
+    assert_eq!(
+        <Image as appkit::LogicalImage<heterogeneous_split_example::Control>>::REQUESTED_ROLES,
+        appkit::RoleSet::single(1)
     );
     loop {
         core::hint::spin_loop();

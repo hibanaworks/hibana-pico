@@ -13,8 +13,8 @@ artifact contains two logical images:
 examples/baker-firmware
   src/lib.rs: Baker boot2, clock init, SIO carrier, markers, reset support, logical image helpers
   src/bin/traffic.rs: Capsule + choreography + Localside
-  src/bin/choreofs_traffic.rs: Capsule + choreography + Localside + ObjectSpec
-  src/bin/choreofs_traffic_loop.rs: Capsule + choreography + Localside + ObjectSpec
+  src/bin/choreofs_traffic.rs: Capsule + choreography + Localside + ChoreoFS object facts
+  src/bin/choreofs_traffic_loop.rs: Capsule + choreography + Localside + ChoreoFS object facts
   src/bin/fail_safe.rs: Capsule + choreography + Localside
   src/bin/recovery.rs: Capsule + choreography + Localside
   src/bin/many_reentry.rs: Capsule + choreography + Localside
@@ -24,10 +24,11 @@ examples/baker-firmware
   src/bin/preview_probe.rs: route-observation preview proof
   src/bin/deadline_fault.rs: operational deadline fault proof
   src/bin/timer_route.rs: protocol timer route proof
+  src/bin/epf_policy_timer.rs: loaded EPF policy VM route proof
   wasip1/guest/src/lib.rs: Baker WASI P1 guest helpers
   wasip1/guest/src/bin/*.rs: Baker WASI P1 guest programs
-  Core0 logical image: DriverImage
-  Core1 logical image: EngineImage
+  Core0 logical image: private driver marker
+  Core1 logical image: private engine marker
 ```
 
 Both images are projections of the same raw Hibana choreography. Each
@@ -35,25 +36,27 @@ Both images are projections of the same raw Hibana choreography. Each
 role slice:
 
 ```text
-Core0 DriverImage REQUESTED_ROLES = role 0
-Core1 EngineImage REQUESTED_ROLES = role 1
+Core0 driver requested roles = role 0
+Core1 engine requested roles = role 1
 ```
 
-The two logical images are connected by the real RP2040 SIO carrier defined by the Baker example as `rp2040_sio::SIO`. Same firmware, same ELF, and same address space do not
-mean direct call, authority merge, or syscall shortcut.
+The two logical images are connected by the real RP2040 SIO carrier owned by
+the Baker example. Same firmware, same ELF, and same address space do not mean
+direct call, authority merge, or syscall shortcut.
 
 The current source map is:
 
 | Layer | File |
 | --- | --- |
 | AppKit capsule/logical-image integration | `src/appkit/mod.rs`, `src/appkit/internal.rs` |
-| Generic site marker | `src/site.rs` |
+| Generic logical-site marker | `src/appkit/internal.rs` via `hibana_pico::appkit::Local` |
 | Baker-local RP2040 SIO carrier | `examples/baker-firmware/src/lib.rs` |
 | Baker logical-image/reset support | `examples/baker-firmware/src/lib.rs` |
 | Baker-local boot2 and clock setup | `examples/baker-firmware/src/lib.rs` |
-| Baker validation Capsules, choreography, Localside, ObjectSpec | `examples/baker-firmware/src/bin/*.rs` |
+| Baker validation Capsules, choreography, Localside, ChoreoFS object facts | `examples/baker-firmware/src/bin/*.rs` |
 | Baker WASI P1 guest helpers | `examples/baker-firmware/wasip1/guest/src/lib.rs` |
-| WASI P1 ChoreoFS traffic guest | `examples/baker-firmware/wasip1/guest/src/bin/wasip1-led-choreofs-traffic-cycle.rs` |
+| WASI P1 finite ChoreoFS traffic guest | `examples/baker-firmware/wasip1/guest/src/bin/wasip1-led-choreofs-traffic-once.rs` |
+| WASI P1 loop ChoreoFS traffic guest | `examples/baker-firmware/wasip1/guest/src/bin/wasip1-led-choreofs-traffic-cycle.rs` |
 | WASI P1 guest build gate | `scripts/check_wasip1_guest_builds.sh` |
 | Hardware proof runner | `scripts/run_baker_link_hardware_pattern.sh` |
 
@@ -86,20 +89,37 @@ bash scripts/run_baker_link_hardware_pattern.sh endpoint-poison
 bash scripts/run_baker_link_hardware_pattern.sh preview-probe
 bash scripts/run_baker_link_hardware_pattern.sh deadline-fault
 bash scripts/run_baker_link_hardware_pattern.sh timer-route
+bash scripts/run_baker_link_hardware_pattern.sh epf-policy-timer
+bash scripts/run_baker_link_hardware_pattern.sh capacity-fault
 ```
 
 `traffic`, `fail-safe`, `recovery`, and `many-reentry` are two-role endpoint /
 carrier control proofs. They no longer use a role-2 boundary shortcut or a
 composite `0b101` attach slice.
 
-`choreofs-traffic` and `choreofs-traffic-loop` are the WASI P1 proofs.
-Core1 runs the WASI P1 engine and Core0 runs the driver/kernel side. The guest
-itself is an infinite WASI P1 loop:
+`choreofs-traffic` and `choreofs-traffic-loop` are the WASI P1 proofs. Core1
+runs the Hibana WASIP1 runtime engine and Core0 runs the driver side. The
+guests are ordinary `std` `wasm32-wasip1` programs. They do not call board APIs;
+they reach the hardware only by making WASI P1 imports that cross the projected
+Endpoint/carrier frontier.
+
+Both proofs start by opening the same ChoreoFS LED object paths:
 
 ```text
 path_open("device/led/green")
 path_open("device/led/yellow")
 path_open("device/led/red")
+```
+
+`choreofs-traffic` embeds the finite `wasip1-led-choreofs-traffic-once.wasm`
+guest. It performs one green/yellow/red cycle and exits through the real WASI
+`proc_exit` boundary.
+
+`choreofs-traffic-loop` embeds the looping
+`wasip1-led-choreofs-traffic-cycle.wasm` guest. Its projected choreography admits
+reentry over the actual `fd_write` / `poll_oneoff` imports:
+
+```text
 loop {
   fd_write(green, "1"); poll_oneoff(...)
   fd_write(yellow, "0"); poll_oneoff(...)
@@ -112,18 +132,18 @@ The guest imports complete through:
 
 ```text
 WASI P1 guest
-  -> Engine side
+  -> Hibana WASIP1 runtime engine side
   -> typed EngineReq
   -> Endpoint / RP2040 SIO carrier
   -> Driver side
   -> ledger / ChoreoFS / resolver / boundary facts
   -> typed EngineRet
   -> Endpoint / RP2040 SIO carrier
-  -> Engine side
+  -> Hibana WASIP1 runtime engine side
   -> import completion
 ```
 
-There is no host filesystem fallback, route inference, timeout rescue,
+There is no host filesystem authority, route inference, timeout rescue,
 lane-recovery loop, or co-located syscall completion.
 
 `panic-marker`, `endpoint-fault`, `endpoint-poison`, and `deadline-fault` are
@@ -136,13 +156,25 @@ session generation.
 evidence without becoming route authority. `timer-route` is the protocol-time
 counterpart to `deadline-fault`: a timer/clock fact is present in the
 choreography and resolver-selected route arm, so the expired branch is typed
-progress rather than an operational timeout fallback.
+progress rather than an operational timeout rescue path.
+
+`epf-policy-timer` proves that loaded EPF policy bytecode can affect a Hibana
+dynamic policy point on RP2040/SIO without becoming a hook or side channel. The
+BakerLink runner commits the framed `Target::Policy(57)` bytes into the SWD
+mailbox and sets only an image-ready fact. A Hibana route resolver reads that
+fact and selects the image-load branch; role0 then delivers the staged image to
+role1 as a normal SIO choreography payload. The later timer IRQ fact resolver
+reads the RP2040 timer IRQ-ready fact and selects the timer-expired arm after
+the interrupt fires; each EPF-wrapped resolver entry feeds the timer IRQ fact to
+EPF as Hibana evidence, and the loaded policy VM selects the response-ready arm
+instead. Both core0 and core1 also drain real Hibana `TapEvent`s through EPF
+observe markers.
 
 ## ChoreoFS Scope
 
 ChoreoFS is a bounded path/object fact resolver. It is not a host filesystem,
-route owner, protocol authority, public Manifest API, POSIX compatibility
-layer, or hidden fallback.
+route owner, protocol authority, public Manifest API, POSIX emulation layer, or
+hidden progress path.
 
 For the Baker proof:
 
@@ -158,25 +190,24 @@ Choreography:
 ```
 
 The `choreofs-traffic` pattern opens the three configured LED object paths,
-mints their fds through the driver-side materialization path, then performs
-three green/yellow/red cycles through the projected choreography. Each cycle is
-thirteen `fd_write` completions and thirteen `poll_oneoff` completions. The
-hardware proof checks:
+mints their fds through the driver-side materialization path, then performs one
+green/yellow/red traffic cycle through the projected choreography. The finite
+guest then exits through the real WASI `proc_exit` boundary. The hardware proof
+checks:
 
 ```text
 choreofs_engine_status = 0x57414f4b
 choreofs_path_open_count = 3
-choreofs_fd_write_count = 39
-choreofs_poll_count = 39
+choreofs_fd_write_count = 13
+choreofs_poll_count = 13
 choreofs_last_object = 3
 choreofs_led_mask = 4
 choreofs_seen_led_mask = 7
 ```
 
-The `choreofs-traffic-loop` pattern uses the same WASI artifact and
-choreography, but leaves the guest and driver in the visual loop. The runner
-does not require a fixed final LED mask or final object for that mode; it
-checks that at least one full green/yellow/red cycle was observed:
+The `choreofs-traffic-loop` pattern leaves the guest and driver in the visual
+loop. The runner does not require a fixed final LED mask or final object for
+that mode; it checks that at least one full green/yellow/red cycle was observed:
 
 ```text
 choreofs_path_open_count = 3
@@ -200,6 +231,7 @@ Important result values:
 | `0x4849524d` | many-reentry proof success |
 | `0x48495050` | preview-probe proof success |
 | `0x48495452` | timer-route proof success |
+| `0x48494550` | EPF policy timer proof success |
 | `0x48494641` | hard failure |
 
 Important stage values:
@@ -239,8 +271,8 @@ choreofs-traffic:
   choreofs_engine_status=0x57414f4b
   choreofs_engine_error_code=0
   choreofs_path_open_count=3
-  choreofs_fd_write_count=39
-  choreofs_poll_count=39
+  choreofs_fd_write_count=13
+  choreofs_poll_count=13
   choreofs_last_object=3
   choreofs_led_mask=4
   choreofs_seen_led_mask=7
@@ -302,6 +334,32 @@ timer-route:
   core0_stage=0x4849000a
   core1_stage=0x4849000a
   hardfault pc/lr=0
+
+epf-policy-timer:
+  result=0x48494550
+  core0_stage=0x4849000a
+  core1_stage=0x4849000a
+  active_epf_target=Policy(57)
+  image_ingress=CHOR
+  timer_irq_ready=1
+  timer_fact_kind=0x57
+  timer_fact_arg0=1
+  timer_fact_fuel>0
+  core0_epf_epoch>0
+  core1_epf_epoch>0
+  hardfault pc/lr=0
+
+capacity-fault:
+  result=0x00000000
+  core0_stage=0x48490004
+  core1_stage=0x48490004
+  epf_load_epoch=1
+  epf_kind=TransportFault
+  epf_reason=Capacity
+  epf_arg0=capacity site
+  epf_arg1=lane
+  epf_arg2=0x02070003
+  epf_fuel_used=7
 ```
 
 ## Build And Run
@@ -315,7 +373,7 @@ cargo build -p baker-firmware \
   --bin baker-choreofs-traffic-loop \
   --target thumbv6m-none-eabi \
   --release \
-  --features "wasm-engine-core wasip1-sys-args-env wasip1-sys-fd-write wasip1-sys-path-open wasip1-sys-poll-oneoff wasip1-sys-proc-exit embed-wasip1-artifacts"
+  --features "wasm-engine-core embed-wasip1-artifacts"
 ```
 
 `embed-wasip1-artifacts` is local to the `baker-firmware` example package. It
@@ -375,4 +433,6 @@ bash scripts/run_baker_link_hardware_pattern.sh endpoint-poison
 bash scripts/run_baker_link_hardware_pattern.sh preview-probe
 bash scripts/run_baker_link_hardware_pattern.sh deadline-fault
 bash scripts/run_baker_link_hardware_pattern.sh timer-route
+bash scripts/run_baker_link_hardware_pattern.sh epf-policy-timer
+bash scripts/run_baker_link_hardware_pattern.sh capacity-fault
 ```

@@ -1,18 +1,15 @@
-use hibana_pico::{appkit, appkit::ArtifactBundle, site};
+use hibana_pico::appkit;
 
 fn main() {
-    let report = appkit::run::<
-        site::Local<heterogeneous_split_example::image::LinuxControl>,
+    type Image = appkit::Local<heterogeneous_split_example::image::LinuxControl>;
+
+    appkit::run::<
+        appkit::Local<heterogeneous_split_example::image::LinuxControl>,
         heterogeneous_split_example::Control,
-    >(
-        heterogeneous_split_example::ARTIFACTS
-            .for_image::<site::Local<heterogeneous_split_example::image::LinuxControl>>(),
+    >(appkit::NoWasi);
+    assert_eq!(
+        <Image as appkit::LogicalImage<heterogeneous_split_example::Control>>::REQUESTED_ROLES,
+        appkit::RoleSet::single(0)
     );
-    heterogeneous_split_example::assert_single_role_image(
-        &report,
-        hibana_pico::appkit::ImageId(30),
-        hibana_pico::appkit::SiteId(300),
-        0,
-    );
-    heterogeneous_split_example::assert_peer_manifests();
+    heterogeneous_split_example::assert_projected_role_progress();
 }

@@ -1,0 +1,25 @@
+[package]
+name = "rp2w-wasip1-guest"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+hibana-wasip1-guest = { path = "../../../../guest/hibana-wasip1-guest" }
+
+[[bin]]
+name = "rp2w-epf-policy-timer-guest"
+path = "src/bin/rp2w-epf-policy-timer-guest.rs"
+
+[[bin]]
+name = "rp2w-sensor-panel-guest"
+path = "src/bin/rp2w-sensor-panel-guest.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "debuginfo"

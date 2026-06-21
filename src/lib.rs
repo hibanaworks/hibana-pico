@@ -8,7 +8,3 @@ extern crate std;
 extern crate std;
 
 pub mod appkit;
-pub mod choreography;
-pub mod site;
-
-mod kernel;

@@ -1,11 +1,15 @@
 # UNO Q Heterogeneous Face Proof Plan
 
-This example proves a deliberately small four-role path:
+This example proves a deliberately small five-role path:
 
 ```text
-HumanInput CLI role on Linux
+HumanInput CLI/voice/manual role on Linux
   -> typed HumanInputText message
-  -> local LLM role on Linux
+Pico 2 W sensor-panel choreography on a Pico-class board
+  -> fixed Pico2wSensorSample over CYW43 / UDP
+Uno Q PICO2W_SENSOR boundary
+  -> typed Pico2wSensorSample message inside this choreography
+Both branches join at the local LLM role
   -> one shell command
 WASI P1 guest process on Linux
   -> ChoreoFS /llm/stdout write
@@ -75,8 +79,12 @@ remains the authority for which effects can happen.
   choreography-visible input request, then sends the input text as a typed
   `HumanInputText` message to the local LLM role; it does not classify,
   rewrite, or convert the text into face commands.
+- `ROLE_PICO2W_SENSOR = 4`: Pico 2 W sensor role. In this choreography it is
+  the Uno Q boundary that receives the fixed 9-byte `Pico2wSensorSample` emitted
+  by the separate Pico 2 W sensor-panel choreography over CYW43 / UDP, then
+  sends that typed sample to `LOCAL_LLM`. It is not hidden inside HumanInput.
 
-No iOS ingress, Challenger network role, or detached unused sidecar choreography
+No iOS ingress, Challenger network role, or detached sidecar choreography
 is part of this proof.
 
 ## Choreography
@@ -88,20 +96,17 @@ is part of this proof.
 5. WASI enters the projected import route loop.
 6. Continue arm:
    - WASI asks the local LLM for the next terminal input line.
-   - The local LLM sends a typed `HumanInputReq` to the HumanInput role.
-   - The HumanInput role sends the latest input text to the local LLM role as
-     one typed `HumanInputText` message.
-   - The local LLM acknowledges that input turn with one typed
-     `HumanInputAck` message.
+   - The local LLM starts two parallel input branches:
+     `HumanInputReq`/`HumanInputText`/`HumanInputAck` on lane 1 and
+     `Pico2wSensorReq`/`Pico2wSensorSample`/`Pico2wSensorAck` on lane 2.
+   - Only after both branches join does the local LLM answer `/llm/stdin` with
+     one terminal command.
    - The local LLM reads the terminal transcript and replies on `/llm/stdin`
      with `ls` or `find ChoreoFS -type f`.
    - WASI writes the ChoreoFS catalog to `/llm/stdout`.
    - WASI asks the local LLM for the next terminal input line.
-   - The local LLM sends another typed `HumanInputReq` for this input turn.
-   - The HumanInput role sends the latest input text to the local LLM role as
-     one typed `HumanInputText` message.
-   - The local LLM acknowledges that input turn with one typed
-     `HumanInputAck` message, then answers the WASI read.
+   - The same HumanInput and Pico 2 W sensor branches run in parallel again;
+     the local LLM observes their joined context and then answers the WASI read.
    - The local LLM replies with `echo <code> > /face/frame`.
    - WASI parses that shell command into `FaceFrame` bytes and writes them to
      `/face/frame`.
@@ -111,15 +116,16 @@ is part of this proof.
 7. Break arm:
    - Bounded proof guests send `proc_exit(0)`.
    - The projected Endpoint admits that exit as terminal messages to the local
-     LLM role, the M33 role, and the HumanInput role, so no passive role guesses
-     that the loop ended.
+     LLM role, the M33 role, the HumanInput role, and the Pico 2 W sensor role,
+     so no passive role guesses that the loop ended.
    - The real face demo keeps selecting the continue arm forever.
 
 `FaceFrame` remains one typed message payload. Individual face patterns are
 payload values, not separate message types and not route authority. LLM text is
 not route authority either; it is terminal input consumed by the WASI shell.
 M33 and the local LLM never exchange typed messages directly; WASI is the
-isolation boundary. HumanInput also never talks to M33.
+isolation boundary. HumanInput and the Pico 2 W sensor role also never talk to
+M33.
 
 ## Cadence
 
@@ -148,8 +154,8 @@ commands for this cycle:
 - 8 speaking mouth frames.
 
 The bounded proof guest copies one cycle and exits. The real hardware face demo
-uses `UNO_Q_FACE_LOOP_FOREVER=1`, swaps in the infinite shell-loop guest, and lets
-the local LLM boundary drive the WASI shell forever.
+selects the `HardwarePeerLoopProof` image, whose artifact is the infinite
+shell-loop guest, and lets the local LLM boundary drive the WASI shell forever.
 
 ## Local LLM Command Configuration
 
@@ -184,10 +190,10 @@ These variables override the default placement:
 - `UNO_Q_LOCAL_LLM_WORK_DIR=/path/to/bin`
 - `UNO_Q_HUMAN_INPUT_MODE=prompt` to run the prompt shell input role
 - `UNO_Q_HUMAN_INPUT_MODE=voice` to run the voice shell input role
-- `UNO_Q_HUMAN_INPUT_MODE=sensor-udp` to receive Pico 2 W sensor payloads over UDP
 - `UNO_Q_HUMAN_INPUT_TEXT="initial human request text"`
 - `UNO_Q_HUMAN_INPUT_VOICE_CMD="command that prints recognized utterances"`
-- `UNO_Q_SENSOR_UDP_BIND=0.0.0.0:8787`
+- `UNO_Q_PICO2W_SENSOR_MODE=udp` to receive Pico 2 W sensor payloads over UDP
+- `UNO_Q_PICO2W_SENSOR_UDP_BIND=0.0.0.0:8787`
 - `UNO_Q_LOCAL_LLM_SELF_MOOD=1`
 - `UNO_Q_LOCAL_LLM_SELF_MOOD_PROMPT="assistant mood instruction"`
 - `UNO_Q_LOCAL_LLM_SCRIPTED=1` for host-only scripted smoke checks
@@ -201,7 +207,7 @@ llama-server -m "$UNO_Q_LOCAL_LLM_MODEL" --host 127.0.0.1 --port 18080 -t 4 -c 5
 POST http://127.0.0.1:18080/completion
 ```
 
-`llama-completion` remains only as an explicit fallback through
+`llama-completion` remains only as an explicit manual CLI through
 `UNO_Q_LOCAL_LLM_CLI` or custom experiments. The proof/demo path must not reload
 the model per shell command.
 
@@ -211,7 +217,7 @@ the LLM may type any shell-looking text; invalid commands are rejected by the
 WASI shell / ChoreoFS path, and actual effects are still admitted only by the
 projected choreography. The shell transcript is included in the completion
 prompt sent to the persistent server. `UNO_Q_LOCAL_LLM_ARGS` can replace the
-fallback completion flags for manual experiments.
+manual completion flags for explicit CLI experiments.
 
 The hardware CLI can start the live input role directly:
 
@@ -224,15 +230,15 @@ uno-q-sensor-face-demo --bind 0.0.0.0:8787 --serial /dev/ttyHS1
 
 The prompt shell reads terminal lines. The voice shell starts
 `UNO_Q_HUMAN_INPUT_VOICE_CMD` and reads recognized utterances from that process'
-stdout. The sensor UDP mode binds `UNO_Q_SENSOR_UDP_BIND`, accepts the Pico 2 W
-text payload (`T:22.58C H:60%` plus `Light:2500`) or a small JSON/key-value
-variant, and converts it into one bounded `HumanInputText` line such as
-`Sensor T=22.6C H=60% L=2500`. In all modes the input role only performs transport framing
-and fixed-capacity UTF-8 validation. It does not classify, rewrite, or convert
-the text into face commands. The local LLM receives the exact text as prompt
-context and remains the only component that chooses the next shell command.
+stdout. The Pico 2 W sensor mode binds `UNO_Q_PICO2W_SENSOR_UDP_BIND` and
+accepts only the fixed 9-byte `Pico2wSensorSample` UDP payload emitted by the
+Pico 2 W sensor-panel choreography.
+`HumanInputText` never carries sensor readings. `Pico2wSensorSample.status`
+carries fresh/pending/stale state; no magic pending/stale text is injected into
+the human-input channel. The local LLM receives both the human input and the
+sensor sample as joined prompt context, then returns exactly one shell command.
 
-The old prompt-file injection path is not
+The prompt-file injection path is not
 part of the demo: human input is a live terminal interaction, not a file that a
 sidecar rewrites. No model restart, proof restart, or choreography change is
 required for the next turn to observe the new human input.
@@ -266,10 +272,11 @@ changes the face only when the projected Endpoint admits and decodes a
 
 ## Success Criteria
 
-- `host-loopback-proof` passes with roles 0, 1, 2, and 3.
+- `host-loopback-proof` passes with roles 0, 1, 2, 3, and 4.
 - `uno-q-hardware-proof` passes with M33 as the physical peer and Linux running
-  the WASI role plus the local LLM role plus the HumanInput role.
+  the WASI role plus the local LLM role plus the HumanInput role plus the Pico
+  2 W sensor role.
 - The bounded proof makes `HIBANA_M33_FACE_UPDATES` reach one cycle.
 - The infinite face demo keeps increasing `HIBANA_M33_FACE_UPDATES` after the
   first cycle.
-- No disconnected iOS, Challenger, or unused LLM-sidecar choreography is present.
+- No disconnected iOS, Challenger, or LLM-sidecar choreography is present.

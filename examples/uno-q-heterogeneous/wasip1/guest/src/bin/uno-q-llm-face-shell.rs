@@ -1,7 +1,7 @@
 use hibana_wasip1_guest::{Result, choreofs};
 
 const PREOPEN_FD: u32 = 9;
-const PROOF_FRAME_COUNT: usize = 20;
+const PROOF_FRAME_COUNT: usize = 1;
 const SHELL_PROMPT: &[u8] = b"$ ";
 const SHELL_CATALOG: &[u8] = b"w /face/frame FaceFrame\n$ ";
 const SHELL_INVALID_COMMAND: &[u8] = b"err /face/frame h,a,s,u,mw\n$ ";

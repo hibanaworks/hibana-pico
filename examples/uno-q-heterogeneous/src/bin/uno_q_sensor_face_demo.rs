@@ -3,7 +3,7 @@ use std::{
     process::{Command, ExitCode, ExitStatus},
 };
 
-use uno_q_heterogeneous::DEFAULT_UNO_Q_SENSOR_UDP_BIND;
+const DEFAULT_SENSOR_UDP_BIND: &str = "0.0.0.0:8787";
 
 struct Args {
     bind: String,
@@ -78,7 +78,7 @@ fn append_hardware_args(command: &mut Command, args: &Args) {
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
-    let mut bind = DEFAULT_UNO_Q_SENSOR_UDP_BIND.to_owned();
+    let mut bind = DEFAULT_SENSOR_UDP_BIND.to_owned();
     let mut serial = None;
     let mut hardware_bin =
         env::var("UNO_Q_HARDWARE_PROOF_BIN").unwrap_or_else(|_| "uno-q-hardware-proof".to_owned());

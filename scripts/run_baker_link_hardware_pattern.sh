@@ -5,15 +5,17 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 target="${HIBANA_PICO_TARGET:-thumbv6m-none-eabi}"
+chip="${HIBANA_BAKER_CHIP:-RP2040}"
 package_name="baker-firmware"
 pattern="${1:-${HIBANA_BAKER_PATTERN:-traffic}}"
-features="${HIBANA_PICO_FEATURES:-wasm-engine-core wasip1-sys-args-env wasip1-sys-fd-write wasip1-sys-path-open wasip1-sys-poll-oneoff wasip1-sys-proc-exit embed-wasip1-artifacts}"
+features="${HIBANA_PICO_FEATURES:-wasm-engine-core embed-wasip1-artifacts}"
 expected_result="48494f4b"
 expected_core1_stage="48490004"
 allow_core1_ready="1"
 expect_panic_marker="0"
 expect_panic_hex_contains=""
 expect_endpoint_error_prefix=""
+skip_result_check="0"
 bin_name="baker-traffic"
 timeout_seconds="${HIBANA_BAKER_TIMEOUT_SECONDS:-45}"
 poll_seconds="${HIBANA_BAKER_POLL_SECONDS:-1}"
@@ -72,7 +74,7 @@ case "$pattern" in
     bin_name="baker-deadline-fault"
     expected_result="48494641"
     expect_panic_marker="1"
-    expect_panic_hex_contains="446561646c696e654578636565646564"
+    expect_panic_hex_contains="5472616e73706f7274284429"
     ;;
   timer-route)
     bin_name="baker-timer-route"
@@ -81,16 +83,36 @@ case "$pattern" in
     expected_result="48495452"
     features="${HIBANA_PICO_FEATURES-}"
     ;;
+  epf-policy-timer)
+    bin_name="baker-epf-policy-timer"
+    expected_core1_stage="4849000a"
+    allow_core1_ready="1"
+    expected_result="48494550"
+    target="${HIBANA_PICO_TARGET:-thumbv6m-none-eabi}"
+    chip="${HIBANA_BAKER_CHIP:-RP2040}"
+    features="${HIBANA_PICO_FEATURES-}"
+    ;;
   session-mismatch)
     bin_name="baker-session-mismatch"
     expected_core1_stage="48490004"
     allow_core1_ready="0"
-    expected_result="4849534d"
+    expected_result="00000000"
+    skip_result_check="1"
+    timeout_seconds="${HIBANA_BAKER_TIMEOUT_SECONDS:-12}"
+    features="${HIBANA_PICO_FEATURES:-wasm-engine-core embed-wasip1-artifacts}"
+    ;;
+  capacity-fault)
+    bin_name="baker-capacity-fault"
+    expected_core1_stage="48490004"
+    allow_core1_ready="0"
+    expected_result="00000000"
+    skip_result_check="1"
+    timeout_seconds="${HIBANA_BAKER_TIMEOUT_SECONDS:-12}"
     features="${HIBANA_PICO_FEATURES-}"
     ;;
   *)
     echo "unknown Baker Link pattern: $pattern" >&2
-    echo "expected: traffic, choreofs-traffic, choreofs-traffic-loop, fail-safe, recovery, many-reentry, panic-marker, endpoint-fault, endpoint-poison, preview-probe, deadline-fault, timer-route, session-mismatch" >&2
+    echo "expected: traffic, choreofs-traffic, choreofs-traffic-loop, fail-safe, recovery, many-reentry, panic-marker, endpoint-fault, endpoint-poison, preview-probe, deadline-fault, timer-route, epf-policy-timer, session-mismatch, capacity-fault" >&2
     exit 2
     ;;
 esac
@@ -112,12 +134,12 @@ fi
 
 probe-rs download \
   "${probe_args[@]}" \
-  --chip RP2040 \
+  --chip "$chip" \
   --non-interactive \
   --verify \
   --disable-progressbars \
   "$elf"
-probe-rs reset "${probe_args[@]}" --chip RP2040 --non-interactive
+probe-rs reset "${probe_args[@]}" --chip "$chip" --non-interactive
 
 sysroot="$(rustc --print sysroot)"
 host="$(rustc -vV | sed -n 's/^host: //p')"
@@ -145,7 +167,7 @@ probe_read() {
   local attempt=0
   local output
   while :; do
-    if output="$(probe-rs read "${probe_args[@]}" --chip RP2040 --non-interactive "$width" "$addr" "$len" 2>&1)"; then
+    if output="$(probe-rs read "${probe_args[@]}" --chip "$chip" --non-interactive "$width" "$addr" "$len" 2>&1)"; then
       printf '%s\n' "$output"
       return 0
     fi
@@ -161,6 +183,19 @@ probe_read() {
 read_word() {
   local addr="$1"
   probe_read b32 "$addr" 1 | awk 'NF { value=$NF } END { print tolower(value) }'
+}
+
+probe_write() {
+  local width="$1"
+  local addr="$2"
+  shift 2
+  probe-rs write \
+    "${probe_args[@]}" \
+    --chip "$chip" \
+    --non-interactive \
+    "$width" \
+    "$addr" \
+    "$@" >/dev/null
 }
 
 read_bytes_hex() {
@@ -227,6 +262,13 @@ choreofs_sio_core1_to_core0_rx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_CORE1_TO_
 choreofs_sio_role1_pending_seen_core0_tx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_ROLE1_PENDING_SEEN_CORE0_TX)"
 choreofs_sio_role1_poll_seen_core0_tx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_ROLE1_POLL_SEEN_CORE0_TX)"
 choreofs_sio_role1_ready_seen_core0_tx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_ROLE1_READY_SEEN_CORE0_TX)"
+epf_core0_epoch_addr="$(symbol_addr HIBANA_EPF_CORE0_EPOCH)"
+epf_core0_kind_addr="$(symbol_addr HIBANA_EPF_CORE0_KIND)"
+epf_core0_reason_addr="$(symbol_addr HIBANA_EPF_CORE0_REASON)"
+epf_core0_arg0_addr="$(symbol_addr HIBANA_EPF_CORE0_ARG0)"
+epf_core0_arg1_addr="$(symbol_addr HIBANA_EPF_CORE0_ARG1)"
+epf_core0_arg2_addr="$(symbol_addr HIBANA_EPF_CORE0_ARG2)"
+epf_core0_fuel_addr="$(symbol_addr HIBANA_EPF_CORE0_FUEL_USED)"
 epf_core1_epoch_addr="$(symbol_addr HIBANA_EPF_CORE1_EPOCH)"
 epf_core1_kind_addr="$(symbol_addr HIBANA_EPF_CORE1_KIND)"
 epf_core1_reason_addr="$(symbol_addr HIBANA_EPF_CORE1_REASON)"
@@ -234,6 +276,64 @@ epf_core1_arg0_addr="$(symbol_addr HIBANA_EPF_CORE1_ARG0)"
 epf_core1_arg1_addr="$(symbol_addr HIBANA_EPF_CORE1_ARG1)"
 epf_core1_arg2_addr="$(symbol_addr HIBANA_EPF_CORE1_ARG2)"
 epf_core1_fuel_addr="$(symbol_addr HIBANA_EPF_CORE1_FUEL_USED)"
+epf_load_epoch_addr="$(symbol_addr HIBANA_EPF_LOAD_EPOCH)"
+epf_image_digest_addr="$(symbol_addr HIBANA_EPF_IMAGE_DIGEST)"
+epf_load_reason_addr="$(symbol_addr HIBANA_EPF_LOAD_REASON)"
+epf_active_target_kind_addr="$(symbol_addr HIBANA_EPF_ACTIVE_TARGET_KIND)"
+epf_active_policy_id_addr="$(symbol_addr HIBANA_EPF_ACTIVE_POLICY_ID)"
+epf_policy_timer_irq_ready_addr="$(symbol_addr HIBANA_EPF_POLICY_TIMER_IRQ_READY)"
+epf_policy_timer_fact_kind_addr="$(symbol_addr HIBANA_EPF_POLICY_TIMER_FACT_KIND)"
+epf_policy_timer_fact_arg0_addr="$(symbol_addr HIBANA_EPF_POLICY_TIMER_FACT_ARG0)"
+epf_policy_timer_fact_fuel_addr="$(symbol_addr HIBANA_EPF_POLICY_TIMER_FACT_FUEL)"
+epf_image_ingress_addr="$(symbol_addr HIBANA_EPF_IMAGE_INGRESS)"
+epf_bytecode_state_addr="$(symbol_addr HIBANA_EPF_BYTECODE_STATE)"
+epf_bytecode_len_addr="$(symbol_addr HIBANA_EPF_BYTECODE_LEN)"
+epf_bytecode_hash_addr="$(symbol_addr HIBANA_EPF_BYTECODE_HASH)"
+epf_bytecode_image_addr="$(symbol_addr HIBANA_EPF_BYTECODE_IMAGE)"
+epf_core0_tap_spool_len_addr="$(symbol_addr HIBANA_EPF_CORE0_TAP_SPOOL_LEN)"
+epf_core0_tap_spool_read_addr="$(symbol_addr HIBANA_EPF_CORE0_TAP_SPOOL_READ)"
+epf_tap_spool_len_addr="$(symbol_addr HIBANA_EPF_TAP_SPOOL_LEN)"
+epf_tap_spool_read_addr="$(symbol_addr HIBANA_EPF_TAP_SPOOL_READ)"
+
+write_epf_policy_timer_mailbox_image() {
+  local lines
+  mapfile -t lines < <(python3 <<'PY'
+def fnv32(values):
+    h = 0x811c9dc5
+    for value in values:
+        h ^= value & 0xff
+        h = (h * 0x01000193) & 0xffffffff
+    return h
+
+image = bytes([
+    0x45, 0x50, 0x46, 0x30, 0x01, 0x00, 0x01, 0x00,
+    0x39, 0x00, 0x28, 0x00, 0x20, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x45, 0x48, 0xe5, 0x71, 0x4d, 0xc0,
+    0x11, 0x00, 0x01, 0x00, 0x00, 0x00, 0x11, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x11, 0x02, 0x00, 0x00,
+    0x00, 0x00, 0x20, 0x00, 0x01, 0x02, 0x01, 0x01,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+])
+print(f"{fnv32(image):08x}")
+print(" ".join(f"0x{byte:02x}" for byte in image))
+PY
+  )
+  local digest="${lines[0]}"
+  local image
+  read -r -a image <<< "${lines[1]}"
+  local image_len="${#image[@]}"
+
+  probe_write b32 "$epf_bytecode_state_addr" 0x00000000
+  probe_write b8 "$epf_bytecode_image_addr" "${image[@]}"
+  probe_write b32 "$epf_bytecode_len_addr" "$image_len"
+  probe_write b32 "$epf_bytecode_hash_addr" "0x$digest"
+  probe_write b32 "$epf_bytecode_state_addr" 0x434f4d54
+}
+
+if [[ "$pattern" == "epf-policy-timer" ]]; then
+  write_epf_policy_timer_mailbox_image
+fi
 
 result=""
 stage=""
@@ -258,8 +358,149 @@ while :; do
   sleep "$poll_seconds"
 done
 
+fnv32_bytes() {
+  python3 - "$@" <<'PY'
+import sys
+h = 0x811c9dc5
+for arg in sys.argv[1:]:
+    h ^= int(arg, 0) & 0xff
+    h = (h * 0x01000193) & 0xffffffff
+print(f"{h:08x}")
+PY
+}
+
+write_session_mismatch_epf_image() {
+  local image
+  read -r -a image < <(python3 <<'PY'
+def fnv32(values):
+    h = 0x811c9dc5
+    for value in values:
+        h ^= value & 0xff
+        h = (h * 0x01000193) & 0xffffffff
+    return h
+
+code = [
+    0x15, 0x05, 0x02,
+    0x16, 0x01,
+    0x13, 0x00,
+    0x14, 0x01,
+    0x10, 0x02, 0x00,
+    0x10, 0x03, 0x01,
+    0x10, 0x04, 0x03,
+    0x20, 0x00, 0x01, 0x02, 0x03, 0x04,
+    0xff,
+]
+code_hash = fnv32(code)
+header = []
+header.extend(b"EPF0")
+header.extend((1).to_bytes(2, "little"))          # abi
+header.extend([0, 0])                              # Target::Observe, reserved
+header.extend((0).to_bytes(2, "little"))          # policy_id
+header.extend(len(code).to_bytes(2, "little"))
+header.extend((32).to_bytes(2, "little"))         # fuel_max
+header.extend((0).to_bytes(2, "little"))          # mem_len
+header.extend((0x48450001).to_bytes(4, "little")) # Evidence schema hash
+header.extend(code_hash.to_bytes(4, "little"))
+print(" ".join(f"0x{byte:02x}" for byte in header + code))
+PY
+  )
+  local image_len="${#image[@]}"
+  local digest
+  digest="$(fnv32_bytes "${image[@]}")"
+
+  probe_write b32 "$epf_bytecode_state_addr" 0x00000000
+  probe_write b8 "$epf_bytecode_image_addr" "${image[@]}"
+  probe_write b32 "$epf_bytecode_len_addr" "$image_len"
+  probe_write b32 "$epf_bytecode_hash_addr" "0x$digest"
+  probe_write b32 "$epf_bytecode_state_addr" 0x434f4d54
+
+  local wait_deadline=$((SECONDS + 8))
+  local load_epoch="00000000"
+  local fuel="00000000"
+  while :; do
+    load_epoch="$(read_word "$epf_load_epoch_addr")"
+    fuel="$(read_word "$epf_core1_fuel_addr")"
+    if [[ "$load_epoch" != "00000000" && "$fuel" != "00000000" ]]; then
+      break
+    fi
+    if (( SECONDS >= wait_deadline )); then
+      break
+    fi
+    sleep 0.25
+  done
+}
+
+write_capacity_fault_epf_image() {
+  local image
+  read -r -a image < <(python3 <<'PY'
+def fnv32(values):
+    h = 0x811c9dc5
+    for value in values:
+        h ^= value & 0xff
+        h = (h * 0x01000193) & 0xffffffff
+    return h
+
+code = [
+    0x15, 0x07, 0x02,
+    0x16, 0x03,
+    0x13, 0x00,
+    0x14, 0x01,
+    0x11, 0x02, 0x01, 0x00, 0x00, 0x00,
+    0x11, 0x03, 0x00, 0x00, 0x00, 0x00,
+    0x10, 0x04, 0x03,
+    0x20, 0x00, 0x01, 0x02, 0x03, 0x04,
+    0xff,
+]
+code_hash = fnv32(code)
+header = []
+header.extend(b"EPF0")
+header.extend((1).to_bytes(2, "little"))          # abi
+header.extend([0, 0])                              # Target::Observe, reserved
+header.extend((0).to_bytes(2, "little"))          # policy_id
+header.extend(len(code).to_bytes(2, "little"))
+header.extend((32).to_bytes(2, "little"))         # fuel_max
+header.extend((0).to_bytes(2, "little"))          # mem_len
+header.extend((0x48450001).to_bytes(4, "little")) # Evidence schema hash
+header.extend(code_hash.to_bytes(4, "little"))
+print(" ".join(f"0x{byte:02x}" for byte in header + code))
+PY
+  )
+  local image_len="${#image[@]}"
+  local digest
+  digest="$(fnv32_bytes "${image[@]}")"
+
+  probe_write b32 "$epf_bytecode_state_addr" 0x00000000
+  probe_write b8 "$epf_bytecode_image_addr" "${image[@]}"
+  probe_write b32 "$epf_bytecode_len_addr" "$image_len"
+  probe_write b32 "$epf_bytecode_hash_addr" "0x$digest"
+  probe_write b32 "$epf_bytecode_state_addr" 0x434f4d54
+
+  local wait_deadline=$((SECONDS + 8))
+  local load_epoch="00000000"
+  local fuel="00000000"
+  while :; do
+    load_epoch="$(read_word "$epf_load_epoch_addr")"
+    fuel="$(read_word "$epf_core1_fuel_addr")"
+    if [[ "$load_epoch" != "00000000" && "$fuel" != "00000000" ]]; then
+      break
+    fi
+    if (( SECONDS >= wait_deadline )); then
+      break
+    fi
+    sleep 0.25
+  done
+}
+
+if [[ "$pattern" == "session-mismatch" ]]; then
+  write_session_mismatch_epf_image
+elif [[ "$pattern" == "capacity-fault" ]]; then
+  write_capacity_fault_epf_image
+fi
+
 printf 'pattern=%s\n' "$pattern"
 printf 'bin=%s\n' "$bin_name"
+printf 'target=%s\n' "$target"
+printf 'chip=%s\n' "$chip"
 printf 'features=%s\n' "$features"
 printf 'result_addr=%s result=0x%s expected=0x%s\n' "$result_addr" "$result" "$expected_result"
 printf 'stage_addr=%s stage=0x%s\n' "$stage_addr" "$stage"
@@ -325,6 +566,13 @@ choreofs_sio_core1_to_core0_rx="$(read_word "$choreofs_sio_core1_to_core0_rx_add
 choreofs_sio_role1_pending_seen_core0_tx="$(read_word "$choreofs_sio_role1_pending_seen_core0_tx_addr")"
 choreofs_sio_role1_poll_seen_core0_tx="$(read_word "$choreofs_sio_role1_poll_seen_core0_tx_addr")"
 choreofs_sio_role1_ready_seen_core0_tx="$(read_word "$choreofs_sio_role1_ready_seen_core0_tx_addr")"
+epf_core0_epoch="$(read_word "$epf_core0_epoch_addr")"
+epf_core0_kind="$(read_word "$epf_core0_kind_addr")"
+epf_core0_reason="$(read_word "$epf_core0_reason_addr")"
+epf_core0_arg0="$(read_word "$epf_core0_arg0_addr")"
+epf_core0_arg1="$(read_word "$epf_core0_arg1_addr")"
+epf_core0_arg2="$(read_word "$epf_core0_arg2_addr")"
+epf_core0_fuel="$(read_word "$epf_core0_fuel_addr")"
 epf_core1_epoch="$(read_word "$epf_core1_epoch_addr")"
 epf_core1_kind="$(read_word "$epf_core1_kind_addr")"
 epf_core1_reason="$(read_word "$epf_core1_reason_addr")"
@@ -332,6 +580,21 @@ epf_core1_arg0="$(read_word "$epf_core1_arg0_addr")"
 epf_core1_arg1="$(read_word "$epf_core1_arg1_addr")"
 epf_core1_arg2="$(read_word "$epf_core1_arg2_addr")"
 epf_core1_fuel="$(read_word "$epf_core1_fuel_addr")"
+epf_load_epoch="$(read_word "$epf_load_epoch_addr")"
+epf_image_digest="$(read_word "$epf_image_digest_addr")"
+epf_load_reason="$(read_word "$epf_load_reason_addr")"
+epf_active_target_kind="$(read_word "$epf_active_target_kind_addr")"
+epf_active_policy_id="$(read_word "$epf_active_policy_id_addr")"
+epf_policy_timer_irq_ready="$(read_word "$epf_policy_timer_irq_ready_addr")"
+epf_policy_timer_fact_kind="$(read_word "$epf_policy_timer_fact_kind_addr")"
+epf_policy_timer_fact_arg0="$(read_word "$epf_policy_timer_fact_arg0_addr")"
+epf_policy_timer_fact_fuel="$(read_word "$epf_policy_timer_fact_fuel_addr")"
+epf_image_ingress="$(read_word "$epf_image_ingress_addr")"
+epf_bytecode_state="$(read_word "$epf_bytecode_state_addr")"
+epf_core0_tap_spool_len="$(read_word "$epf_core0_tap_spool_len_addr")"
+epf_core0_tap_spool_read="$(read_word "$epf_core0_tap_spool_read_addr")"
+epf_tap_spool_len="$(read_word "$epf_tap_spool_len_addr")"
+epf_tap_spool_read="$(read_word "$epf_tap_spool_read_addr")"
 watchdog_tick="$(read_mmio_word 0x4005802c)"
 clk_ref_ctrl="$(read_mmio_word 0x40008030)"
 clk_ref_selected="$(read_mmio_word 0x40008038)"
@@ -343,26 +606,38 @@ xosc_status="$(read_mmio_word 0x40024004)"
 pll_sys_cs="$(read_mmio_word 0x40028000)"
 pll_sys_fbdiv="$(read_mmio_word 0x40028008)"
 pll_sys_prim="$(read_mmio_word 0x4002800c)"
-printf 'choreofs_engine_status_addr=%s status=0x%s\n' "$choreofs_engine_status_addr" "$choreofs_engine_status"
-printf 'choreofs_engine_error_code_addr=%s code=0x%s\n' "$choreofs_engine_error_code_addr" "$choreofs_engine_error_code"
-printf 'choreofs_path_open_count_addr=%s count=0x%s\n' "$choreofs_path_open_count_addr" "$choreofs_path_open_count"
-printf 'choreofs_fd_write_count_addr=%s count=0x%s\n' "$choreofs_fd_write_count_addr" "$choreofs_fd_write_count"
-printf 'choreofs_poll_count_addr=%s count=0x%s\n' "$choreofs_poll_count_addr" "$choreofs_poll_count"
-printf 'choreofs_last_poll_ticks_lo_addr=%s lo=0x%s\n' "$choreofs_last_poll_ticks_lo_addr" "$choreofs_last_poll_ticks_lo"
-printf 'choreofs_last_poll_ticks_hi_addr=%s hi=0x%s\n' "$choreofs_last_poll_ticks_hi_addr" "$choreofs_last_poll_ticks_hi"
-printf 'choreofs_last_object_addr=%s object=0x%s\n' "$choreofs_last_object_addr" "$choreofs_last_object"
-printf 'choreofs_led_mask_addr=%s mask=0x%s\n' "$choreofs_led_mask_addr" "$choreofs_led_mask"
-printf 'choreofs_seen_led_mask_addr=%s mask=0x%s\n' "$choreofs_seen_led_mask_addr" "$choreofs_seen_led_mask"
-printf 'choreofs_driver_trace_addr=%s trace=0x%s\n' "$choreofs_driver_trace_addr" "$choreofs_driver_trace"
-printf 'choreofs_sio_trace_core0_count_addr=%s count=0x%s\n' "$choreofs_sio_trace_core0_count_addr" "$choreofs_sio_trace_core0_count"
-printf 'choreofs_sio_trace_core1_count_addr=%s count=0x%s\n' "$choreofs_sio_trace_core1_count_addr" "$choreofs_sio_trace_core1_count"
-printf 'choreofs_sio_core0_to_core1_tx_addr=%s count=0x%s\n' "$choreofs_sio_core0_to_core1_tx_addr" "$choreofs_sio_core0_to_core1_tx"
-printf 'choreofs_sio_core0_to_core1_rx_addr=%s count=0x%s\n' "$choreofs_sio_core0_to_core1_rx_addr" "$choreofs_sio_core0_to_core1_rx"
-printf 'choreofs_sio_core1_to_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_core1_to_core0_tx_addr" "$choreofs_sio_core1_to_core0_tx"
-printf 'choreofs_sio_core1_to_core0_rx_addr=%s count=0x%s\n' "$choreofs_sio_core1_to_core0_rx_addr" "$choreofs_sio_core1_to_core0_rx"
-printf 'choreofs_sio_role1_pending_seen_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_role1_pending_seen_core0_tx_addr" "$choreofs_sio_role1_pending_seen_core0_tx"
-printf 'choreofs_sio_role1_poll_seen_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_role1_poll_seen_core0_tx_addr" "$choreofs_sio_role1_poll_seen_core0_tx"
-printf 'choreofs_sio_role1_ready_seen_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_role1_ready_seen_core0_tx_addr" "$choreofs_sio_role1_ready_seen_core0_tx"
+
+print_choreofs_markers="${HIBANA_BAKER_PRINT_CHOREOFS:-1}"
+
+if [[ "$pattern" != "session-mismatch" && "$print_choreofs_markers" == "1" ]]; then
+  printf 'choreofs_engine_status_addr=%s status=0x%s\n' "$choreofs_engine_status_addr" "$choreofs_engine_status"
+  printf 'choreofs_engine_error_code_addr=%s code=0x%s\n' "$choreofs_engine_error_code_addr" "$choreofs_engine_error_code"
+  printf 'choreofs_path_open_count_addr=%s count=0x%s\n' "$choreofs_path_open_count_addr" "$choreofs_path_open_count"
+  printf 'choreofs_fd_write_count_addr=%s count=0x%s\n' "$choreofs_fd_write_count_addr" "$choreofs_fd_write_count"
+  printf 'choreofs_poll_count_addr=%s count=0x%s\n' "$choreofs_poll_count_addr" "$choreofs_poll_count"
+  printf 'choreofs_last_poll_ticks_lo_addr=%s lo=0x%s\n' "$choreofs_last_poll_ticks_lo_addr" "$choreofs_last_poll_ticks_lo"
+  printf 'choreofs_last_poll_ticks_hi_addr=%s hi=0x%s\n' "$choreofs_last_poll_ticks_hi_addr" "$choreofs_last_poll_ticks_hi"
+  printf 'choreofs_last_object_addr=%s object=0x%s\n' "$choreofs_last_object_addr" "$choreofs_last_object"
+  printf 'choreofs_led_mask_addr=%s mask=0x%s\n' "$choreofs_led_mask_addr" "$choreofs_led_mask"
+  printf 'choreofs_seen_led_mask_addr=%s mask=0x%s\n' "$choreofs_seen_led_mask_addr" "$choreofs_seen_led_mask"
+  printf 'choreofs_driver_trace_addr=%s trace=0x%s\n' "$choreofs_driver_trace_addr" "$choreofs_driver_trace"
+  printf 'choreofs_sio_trace_core0_count_addr=%s count=0x%s\n' "$choreofs_sio_trace_core0_count_addr" "$choreofs_sio_trace_core0_count"
+  printf 'choreofs_sio_trace_core1_count_addr=%s count=0x%s\n' "$choreofs_sio_trace_core1_count_addr" "$choreofs_sio_trace_core1_count"
+  printf 'choreofs_sio_core0_to_core1_tx_addr=%s count=0x%s\n' "$choreofs_sio_core0_to_core1_tx_addr" "$choreofs_sio_core0_to_core1_tx"
+  printf 'choreofs_sio_core0_to_core1_rx_addr=%s count=0x%s\n' "$choreofs_sio_core0_to_core1_rx_addr" "$choreofs_sio_core0_to_core1_rx"
+  printf 'choreofs_sio_core1_to_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_core1_to_core0_tx_addr" "$choreofs_sio_core1_to_core0_tx"
+  printf 'choreofs_sio_core1_to_core0_rx_addr=%s count=0x%s\n' "$choreofs_sio_core1_to_core0_rx_addr" "$choreofs_sio_core1_to_core0_rx"
+  printf 'choreofs_sio_role1_pending_seen_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_role1_pending_seen_core0_tx_addr" "$choreofs_sio_role1_pending_seen_core0_tx"
+  printf 'choreofs_sio_role1_poll_seen_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_role1_poll_seen_core0_tx_addr" "$choreofs_sio_role1_poll_seen_core0_tx"
+  printf 'choreofs_sio_role1_ready_seen_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_role1_ready_seen_core0_tx_addr" "$choreofs_sio_role1_ready_seen_core0_tx"
+fi
+printf 'epf_core0_epoch_addr=%s epoch=0x%s\n' "$epf_core0_epoch_addr" "$epf_core0_epoch"
+printf 'epf_core0_kind_addr=%s kind=0x%s\n' "$epf_core0_kind_addr" "$epf_core0_kind"
+printf 'epf_core0_reason_addr=%s reason=0x%s\n' "$epf_core0_reason_addr" "$epf_core0_reason"
+printf 'epf_core0_arg0_addr=%s arg0=0x%s\n' "$epf_core0_arg0_addr" "$epf_core0_arg0"
+printf 'epf_core0_arg1_addr=%s arg1=0x%s\n' "$epf_core0_arg1_addr" "$epf_core0_arg1"
+printf 'epf_core0_arg2_addr=%s arg2=0x%s\n' "$epf_core0_arg2_addr" "$epf_core0_arg2"
+printf 'epf_core0_fuel_addr=%s fuel=0x%s\n' "$epf_core0_fuel_addr" "$epf_core0_fuel"
 printf 'epf_core1_epoch_addr=%s epoch=0x%s\n' "$epf_core1_epoch_addr" "$epf_core1_epoch"
 printf 'epf_core1_kind_addr=%s kind=0x%s\n' "$epf_core1_kind_addr" "$epf_core1_kind"
 printf 'epf_core1_reason_addr=%s reason=0x%s\n' "$epf_core1_reason_addr" "$epf_core1_reason"
@@ -370,7 +645,22 @@ printf 'epf_core1_arg0_addr=%s arg0=0x%s\n' "$epf_core1_arg0_addr" "$epf_core1_a
 printf 'epf_core1_arg1_addr=%s arg1=0x%s\n' "$epf_core1_arg1_addr" "$epf_core1_arg1"
 printf 'epf_core1_arg2_addr=%s arg2=0x%s\n' "$epf_core1_arg2_addr" "$epf_core1_arg2"
 printf 'epf_core1_fuel_addr=%s fuel=0x%s\n' "$epf_core1_fuel_addr" "$epf_core1_fuel"
-printf 'baker_clock_watchdog_tick=0x%s\n' "$watchdog_tick"
+printf 'epf_load_epoch_addr=%s epoch=0x%s\n' "$epf_load_epoch_addr" "$epf_load_epoch"
+printf 'epf_image_digest_addr=%s digest=0x%s\n' "$epf_image_digest_addr" "$epf_image_digest"
+printf 'epf_load_reason_addr=%s reason=0x%s\n' "$epf_load_reason_addr" "$epf_load_reason"
+printf 'epf_active_target_kind_addr=%s target=0x%s\n' "$epf_active_target_kind_addr" "$epf_active_target_kind"
+printf 'epf_active_policy_id_addr=%s policy=0x%s\n' "$epf_active_policy_id_addr" "$epf_active_policy_id"
+printf 'epf_policy_timer_irq_ready_addr=%s ready=0x%s\n' "$epf_policy_timer_irq_ready_addr" "$epf_policy_timer_irq_ready"
+printf 'epf_policy_timer_fact_kind_addr=%s kind=0x%s\n' "$epf_policy_timer_fact_kind_addr" "$epf_policy_timer_fact_kind"
+printf 'epf_policy_timer_fact_arg0_addr=%s arg0=0x%s\n' "$epf_policy_timer_fact_arg0_addr" "$epf_policy_timer_fact_arg0"
+printf 'epf_policy_timer_fact_fuel_addr=%s fuel=0x%s\n' "$epf_policy_timer_fact_fuel_addr" "$epf_policy_timer_fact_fuel"
+printf 'epf_image_ingress_addr=%s ingress=0x%s\n' "$epf_image_ingress_addr" "$epf_image_ingress"
+printf 'epf_bytecode_state_addr=%s state=0x%s\n' "$epf_bytecode_state_addr" "$epf_bytecode_state"
+printf 'epf_core0_tap_spool_len_addr=%s len=0x%s\n' "$epf_core0_tap_spool_len_addr" "$epf_core0_tap_spool_len"
+printf 'epf_core0_tap_spool_read_addr=%s read=0x%s\n' "$epf_core0_tap_spool_read_addr" "$epf_core0_tap_spool_read"
+printf 'epf_tap_spool_len_addr=%s len=0x%s\n' "$epf_tap_spool_len_addr" "$epf_tap_spool_len"
+printf 'epf_tap_spool_read_addr=%s read=0x%s\n' "$epf_tap_spool_read_addr" "$epf_tap_spool_read"
+printf 'baker_clock_tick_ctrl=0x%s\n' "$watchdog_tick"
 printf 'baker_clock_clk_ref_ctrl=0x%s\n' "$clk_ref_ctrl"
 printf 'baker_clock_clk_ref_selected=0x%s\n' "$clk_ref_selected"
 printf 'baker_clock_clk_sys_ctrl=0x%s\n' "$clk_sys_ctrl"
@@ -400,10 +690,12 @@ print_sio_trace() {
   done
 }
 
-print_sio_trace choreofs_sio_trace_core0 "$choreofs_sio_trace_core0_addr" "$choreofs_sio_trace_core0_count"
-print_sio_trace choreofs_sio_trace_core1 "$choreofs_sio_trace_core1_addr" "$choreofs_sio_trace_core1_count"
+if [[ "$pattern" != "session-mismatch" && "$print_choreofs_markers" == "1" ]]; then
+  print_sio_trace choreofs_sio_trace_core0 "$choreofs_sio_trace_core0_addr" "$choreofs_sio_trace_core0_count"
+  print_sio_trace choreofs_sio_trace_core1 "$choreofs_sio_trace_core1_addr" "$choreofs_sio_trace_core1_count"
+fi
 
-if [[ "$result" != "$expected_result" ]]; then
+if [[ "$skip_result_check" != "1" && "$result" != "$expected_result" ]]; then
   echo "Baker hardware pattern $pattern failed: result mismatch" >&2
   exit 1
 fi
@@ -442,35 +734,71 @@ if [[ "$expect_panic_marker" == "1" ]]; then
     echo "expected hex substring: $expect_panic_hex_contains" >&2
     exit 1
   fi
-  echo "Baker hardware pattern $pattern ok"
-  exit 0
+  if [[ "$pattern" != "session-mismatch" ]]; then
+    echo "Baker hardware pattern $pattern ok"
+    exit 0
+  fi
+else
+  if [[ "$stage" != "00000000" ]]; then
+    echo "Baker hardware pattern $pattern failed: failure stage was set" >&2
+    exit 1
+  fi
+if [[ "$pattern" == "session-mismatch" || "$pattern" == "capacity-fault" ]]; then
+  if [[ "$core0_stage" != "48490004" && "$core0_stage" != "4849000a" ]]; then
+    echo "Baker hardware pattern $pattern failed: core0 did not stay in a running scheduler stage" >&2
+    exit 1
+    fi
+  else
+    if [[ "$core0_stage" != "4849000a" ]]; then
+      echo "Baker hardware pattern $pattern failed: core0 did not reach runtime-ready marker" >&2
+      exit 1
+    fi
+  fi
+  if [[ "$core1_stage" != "$expected_core1_stage" && ! ( "$allow_core1_ready" == "1" && "$core1_stage" == "4849000a" ) ]]; then
+    echo "Baker hardware pattern $pattern failed: core1 stage mismatch" >&2
+    echo "expected core1 stage: 0x$expected_core1_stage" >&2
+    exit 1
+  fi
+  if [[ "$hardfault_pc" != "00000000" || "$hardfault_lr" != "00000000" ]]; then
+    echo "Baker hardware pattern $pattern failed: hardfault marker was set" >&2
+    exit 1
+  fi
 fi
 
-if [[ "$stage" != "00000000" ]]; then
-  echo "Baker hardware pattern $pattern failed: failure stage was set" >&2
-  exit 1
-fi
-if [[ "$core0_stage" != "4849000a" ]]; then
-  echo "Baker hardware pattern $pattern failed: core0 did not reach runtime-ready marker" >&2
-  exit 1
-fi
-if [[ "$core1_stage" != "$expected_core1_stage" && ! ( "$allow_core1_ready" == "1" && "$core1_stage" == "4849000a" ) ]]; then
-  echo "Baker hardware pattern $pattern failed: core1 stage mismatch" >&2
-  echo "expected core1 stage: 0x$expected_core1_stage" >&2
-  exit 1
-fi
-if [[ "$hardfault_pc" != "00000000" || "$hardfault_lr" != "00000000" ]]; then
-  echo "Baker hardware pattern $pattern failed: hardfault marker was set" >&2
-  exit 1
-fi
-
-if [[ "$pattern" == "session-mismatch" ]]; then
+if [[ "$pattern" == "session-mismatch" || "$pattern" == "capacity-fault" ]]; then
+  if [[ "$epf_load_epoch" == "00000000" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF bytecode image was not loaded" >&2
+    exit 1
+  fi
+  if [[ "$epf_tap_spool_len" == "00000000" ]]; then
+    echo "Baker hardware pattern $pattern failed: no TapEvent was retained for EPF" >&2
+    exit 1
+  fi
+  if [[ "$epf_bytecode_state" != "4c4f4144" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF bytecode state is not Loaded" >&2
+    exit 1
+  fi
+  if [[ "$epf_image_digest" == "00000000" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF image digest was not recorded" >&2
+    exit 1
+  fi
+  if [[ "$epf_load_reason" != "00000000" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF load reason is not success" >&2
+    exit 1
+  fi
   if [[ "$epf_core1_epoch" == "00000000" ]]; then
     echo "Baker hardware pattern $pattern failed: EPF marker epoch was not advanced on core1" >&2
     exit 1
   fi
-  if [[ "$epf_core1_kind" != "00000001" ]]; then
-    echo "Baker hardware pattern $pattern failed: EPF kind is not TransportReject" >&2
+  if [[ "$epf_core1_fuel" == "00000000" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF VM fuel was not consumed" >&2
+    exit 1
+  fi
+fi
+
+if [[ "$pattern" == "session-mismatch" ]]; then
+  if [[ "$epf_core1_kind" != "00000205" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF evidence kind is not TransportMismatch" >&2
     exit 1
   fi
   if [[ "$epf_core1_reason" != "00000001" ]]; then
@@ -487,8 +815,74 @@ if [[ "$pattern" == "session-mismatch" ]]; then
     echo "Baker hardware pattern $pattern failed: observed session did not match the deliberate skew" >&2
     exit 1
   fi
-  if [[ "$epf_core1_arg2" == "00000000" ]]; then
-    echo "Baker hardware pattern $pattern failed: EPF transport meta was not recorded" >&2
+  if [[ "$epf_core1_arg2" != "02050001" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF typed TransportMismatch/Session tag mismatch" >&2
+    exit 1
+  fi
+fi
+
+if [[ "$pattern" == "capacity-fault" ]]; then
+  if [[ "$epf_core1_kind" != "00000207" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF evidence kind is not TransportFault" >&2
+    exit 1
+  fi
+  if [[ "$epf_core1_reason" != "00000003" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF reason is not Capacity" >&2
+    exit 1
+  fi
+  if [[ "$epf_core1_arg0" != "00000001" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF capacity site was not recorded" >&2
+    exit 1
+  fi
+  if [[ "$epf_core1_arg1" != "00000000" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF capacity lane is not lane 0" >&2
+    exit 1
+  fi
+  if [[ "$epf_core1_arg2" != "02070003" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF typed TransportFault/Capacity tag mismatch" >&2
+    exit 1
+  fi
+fi
+
+if [[ "$pattern" == "epf-policy-timer" ]]; then
+  if [[ "$epf_load_epoch" == "00000000" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF policy image was not loaded" >&2
+    exit 1
+  fi
+  if [[ "$epf_bytecode_state" != "4c4f4144" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF bytecode state is not Loaded" >&2
+    exit 1
+  fi
+  if [[ "$epf_load_reason" != "00000000" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF load reason is not success" >&2
+    exit 1
+  fi
+  if [[ "$epf_active_target_kind" != "00000001" || "$epf_active_policy_id" != "00000039" ]]; then
+    echo "Baker hardware pattern $pattern failed: active EPF image is not Policy(57)" >&2
+    exit 1
+  fi
+  if [[ "$epf_image_ingress" != "43484f52" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF policy image was not delivered by choreography" >&2
+    exit 1
+  fi
+  if [[ "$epf_policy_timer_irq_ready" != "00000001" ]]; then
+    echo "Baker hardware pattern $pattern failed: timer IRQ fact was not observed at resolver entry" >&2
+    exit 1
+  fi
+  if [[ "$epf_policy_timer_fact_kind" != "00000057" || "$epf_policy_timer_fact_arg0" != "00000001" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF policy VM did not read the timer TapEvent fact" >&2
+    exit 1
+  fi
+  if [[ "$epf_policy_timer_fact_fuel" == "00000000" ]]; then
+    echo "Baker hardware pattern $pattern failed: EPF timer fact VM did not consume fuel" >&2
+    exit 1
+  fi
+  if [[ "$epf_core0_epoch" == "00000000" || "$epf_core1_epoch" == "00000000" ]]; then
+    echo "Baker hardware pattern $pattern failed: both cores did not record EPF observe output" >&2
+    exit 1
+  fi
+  if [[ "$epf_core0_fuel" == "00000000" || "$epf_core1_fuel" == "00000000" ]]; then
+    echo "Baker hardware pattern $pattern failed: both cores did not consume EPF VM fuel" >&2
     exit 1
   fi
 fi

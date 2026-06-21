@@ -17,6 +17,10 @@ path = "src/bin/wasip1-led-choreofs-traffic-cycle.rs"
 name = "wasip1-led-choreofs-traffic-once"
 path = "src/bin/wasip1-led-choreofs-traffic-once.rs"
 
+[[bin]]
+name = "wasip1-session-mismatch-fd-write"
+path = "src/bin/wasip1-session-mismatch-fd-write.rs"
+
 [profile.release]
 panic = "abort"
 opt-level = "z"

@@ -1,82 +1,69 @@
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_std)]
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_main)]
 
-use baker_firmware::{BakerArtifacts, BakerCapsuleFacts, BakerPlacement};
+use baker_firmware::{BakerCapsuleFacts, BakerPlacement};
 use hibana::{
     g,
-    integration::{
-        cap::control::RouteDecisionKind,
-        policy::{DecisionArm, DecisionResolution, ResolverError, ResolverRef},
-    },
+    runtime::resolver::{DecisionArm, ResolverError, ResolverRef},
 };
 use hibana_pico::appkit;
 
-const LABEL_RESPONSE_READY: u8 = 120;
-const LABEL_TIMER_EXPIRED: u8 = 121;
 const LABEL_RESPONSE_MESSAGE: u8 = 133;
 const LABEL_TIMER_EXPIRED_MESSAGE: u8 = 134;
 const LABEL_TIMER_ROUTE_DONE: u8 = 135;
 const LABEL_TIMER_ROUTE_ACK: u8 = 137;
 const TIMER_ROUTE_POLICY: u16 = 56;
+const RESULT_TIMER_ROUTE_OK: u32 = 0x4849_5452;
+const ENDPOINT_ERROR_CODE: u32 = 0x5745_0f00;
+static TIMER_ROUTE_RESOLVER_STATE: () = ();
 
-type ResponseRoute = g::Msg<LABEL_RESPONSE_READY, (), RouteDecisionKind>;
-type TimerExpiredRoute = g::Msg<LABEL_TIMER_EXPIRED, (), RouteDecisionKind>;
 type ResponseReady = g::Msg<LABEL_RESPONSE_MESSAGE, u8>;
 type TimerExpired = g::Msg<LABEL_TIMER_EXPIRED_MESSAGE, u8>;
 type TimerRouteDone = g::Msg<LABEL_TIMER_ROUTE_DONE, u8>;
 type TimerRouteAck = g::Msg<LABEL_TIMER_ROUTE_ACK, u8>;
 
-pub struct TimerRoute;
-pub struct TimerRouteLocal;
+struct TimerRoute;
+struct TimerRouteLocal;
 
 #[derive(Clone, Copy, Debug)]
-pub enum TimerRouteError {
-    Endpoint(hibana::EndpointError),
-    Resolver(hibana::integration::policy::ResolverError),
+enum TimerRouteError {
+    Endpoint,
+    Resolver,
     RuntimeViolation,
 }
 
 impl From<hibana::EndpointError> for TimerRouteError {
-    fn from(error: hibana::EndpointError) -> Self {
-        baker_firmware::record_choreofs_engine_status(
-            0x5452_e000 | baker_firmware::choreofs_endpoint_error_code(&error),
-        );
-        Self::Endpoint(error)
+    fn from(_: hibana::EndpointError) -> Self {
+        baker_firmware::record_choreofs_engine_status(0x5452_e000 | ENDPOINT_ERROR_CODE);
+        Self::Endpoint
     }
 }
 
-impl From<hibana::integration::policy::ResolverError> for TimerRouteError {
-    fn from(error: hibana::integration::policy::ResolverError) -> Self {
+impl From<hibana::runtime::resolver::ResolverError> for TimerRouteError {
+    fn from(_: hibana::runtime::resolver::ResolverError) -> Self {
         baker_firmware::record_choreofs_engine_status(0x5452_f000);
-        Self::Resolver(error)
+        Self::Resolver
     }
 }
 
-fn timer_route_resolver() -> Result<DecisionResolution, ResolverError> {
-    Ok(DecisionResolution::Arm(DecisionArm::Right))
+fn timer_route_resolver(_: &()) -> Result<DecisionArm, ResolverError> {
+    Ok(DecisionArm::Right)
 }
 
 impl appkit::Capsule for TimerRoute {
-    type Universe = appkit::BuiltInUniverse;
     type Placement = BakerPlacement;
     type Local = TimerRouteLocal;
-    type Report = core::convert::Infallible;
 
-    fn choreography() -> impl hibana::integration::program::Projectable {
+    fn choreography() -> impl hibana::runtime::program::Projectable {
         g::seq(
             g::route(
-                g::seq(
-                    g::send::<1, 1, ResponseRoute, 1>().policy::<TIMER_ROUTE_POLICY>(),
-                    g::send::<1, 0, ResponseReady, 1>(),
-                ),
-                g::seq(
-                    g::send::<1, 1, TimerExpiredRoute, 1>().policy::<TIMER_ROUTE_POLICY>(),
-                    g::send::<1, 0, TimerExpired, 1>(),
-                ),
-            ),
+                g::send::<1, 0, ResponseReady>(),
+                g::send::<1, 0, TimerExpired>(),
+            )
+            .resolve::<TIMER_ROUTE_POLICY>(),
             g::seq(
-                g::send::<0, 1, TimerRouteDone, 1>(),
-                g::send::<1, 0, TimerRouteAck, 1>(),
+                g::send::<0, 1, TimerRouteDone>(),
+                g::send::<1, 0, TimerRouteAck>(),
             ),
         )
     }
@@ -86,19 +73,20 @@ impl appkit::Capsule for TimerRoute {
         R: appkit::ResolverRegistry<'cfg, Self>,
     {
         baker_firmware::record_choreofs_engine_status(0x5452_0200);
-        registry.policy::<TIMER_ROUTE_POLICY, 0>(ResolverRef::decision_fn(timer_route_resolver));
-        registry.policy::<TIMER_ROUTE_POLICY, 1>(ResolverRef::decision_fn(timer_route_resolver));
+        let resolver =
+            ResolverRef::decision_state(&TIMER_ROUTE_RESOLVER_STATE, timer_route_resolver);
+        registry.resolver::<TIMER_ROUTE_POLICY, 0>(resolver);
+        registry.resolver::<TIMER_ROUTE_POLICY, 1>(resolver);
         baker_firmware::record_choreofs_engine_status(0x5452_0201);
     }
 }
 
 impl BakerCapsuleFacts for TimerRoute {
-    type DriverArtifact = appkit::NoWasi;
-    type EngineArtifact = appkit::NoWasi;
+    const SUCCESS_RESULT: u32 = RESULT_TIMER_ROUTE_OK;
 
-    const DRIVER_IMAGE_ID: appkit::ImageId = appkit::ImageId(56);
-    const ENGINE_IMAGE_ID: appkit::ImageId = appkit::ImageId(57);
-    const SUCCESS_RESULT: u32 = baker_firmware::RESULT_TIMER_ROUTE_OK;
+    fn run_engine_image() {
+        baker_firmware::run_engine_no_wasi::<Self>();
+    }
 }
 
 impl appkit::Localside<TimerRoute> for TimerRouteLocal {
@@ -114,13 +102,9 @@ impl appkit::Localside<TimerRoute> for TimerRouteLocal {
                 while !baker_firmware::baker_timer_route_resolver_ready(100) {
                     baker_firmware::baker_poll_delay(1);
                 }
-
-                let route = ctx.endpoint().flow::<TimerExpiredRoute>()?;
-                route.send(&()).await?;
                 baker_firmware::record_choreofs_engine_status(0x5452_0111);
 
-                let expired = ctx.endpoint().flow::<TimerExpired>()?;
-                expired.send(&1).await?;
+                ctx.endpoint().send::<TimerExpired>(&1).await?;
                 baker_firmware::record_choreofs_engine_status(0x5452_0112);
 
                 let done = ctx.endpoint().recv::<TimerRouteDone>().await?;
@@ -129,8 +113,7 @@ impl appkit::Localside<TimerRoute> for TimerRouteLocal {
                 }
                 baker_firmware::record_choreofs_engine_status(0x5452_0113);
 
-                let ack = ctx.endpoint().flow::<TimerRouteAck>()?;
-                ack.send(&1).await?;
+                ctx.endpoint().send::<TimerRouteAck>(&1).await?;
                 baker_firmware::record_choreofs_engine_status(0x5452_0114);
 
                 baker_firmware::mark_runtime_ready();
@@ -152,14 +135,13 @@ impl appkit::Localside<TimerRoute> for TimerRouteLocal {
                 baker_firmware::record_choreofs_driver_trace(
                     0x5452_1000 | u32::from(branch.label()),
                 );
-                let expired = branch.decode::<TimerExpired>().await?;
+                let expired = branch.recv::<TimerExpired>().await?;
                 if expired != 1 {
                     return Err(TimerRouteError::RuntimeViolation);
                 }
                 baker_firmware::record_choreofs_driver_trace(0x5452_0012);
 
-                let done = ctx.endpoint().flow::<TimerRouteDone>()?;
-                done.send(&1).await?;
+                ctx.endpoint().send::<TimerRouteDone>(&1).await?;
                 baker_firmware::record_choreofs_driver_trace(0x5452_0013);
 
                 let ack = ctx.endpoint().recv::<TimerRouteAck>().await?;
@@ -180,27 +162,6 @@ impl appkit::Localside<TimerRoute> for TimerRouteLocal {
         ctx: appkit::BoundaryCtx<'a, TimerRoute, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
-    }
-
-    fn link<'a, const ROLE: u8>(
-        ctx: appkit::LinkCtx<'a, TimerRoute, ROLE>,
-    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
-    }
-
-    fn supervisor<'a, const ROLE: u8>(
-        ctx: appkit::SupervisorCtx<'a, TimerRoute, ROLE>,
-    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
-    }
-}
-
-impl<I> appkit::ArtifactForImage<TimerRoute, I> for BakerArtifacts
-where
-    I: appkit::LogicalImage<TimerRoute, Artifact = appkit::NoWasi>,
-{
-    fn artifact_for_image(&self) -> I::Artifact {
-        appkit::NoWasi
     }
 }
 

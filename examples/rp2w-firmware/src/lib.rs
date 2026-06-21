@@ -1,0 +1,4421 @@
+#![cfg_attr(all(target_arch = "arm", target_os = "none"), no_std)]
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+use core::{
+    arch::{asm, global_asm},
+    ptr::{read_volatile, write_volatile},
+};
+use core::{assert, assert_eq, mem::MaybeUninit};
+use hibana_pico::appkit;
+
+pub struct Rp2wPlacement;
+
+struct DriverImage;
+struct EngineImage;
+
+mod rp2350_sio {
+    const SIO_FRAME_MAGIC: u32 = 0x4849_5301;
+    const SIO_FRAME_BYTES: usize = 128;
+    const SIO_FRAME_HEADER_WORDS: usize = 4;
+    const SIO_FRAME_PAYLOAD_WORDS: usize = (SIO_FRAME_BYTES + 3) / 4;
+    const SIO_FRAME_WORDS: usize = SIO_FRAME_HEADER_WORDS + SIO_FRAME_PAYLOAD_WORDS;
+    const SIO_TRACE_NO_FRAME_LABEL: u8 = 0;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) struct SioTransport;
+
+    impl SioTransport {
+        pub(super) const fn new() -> Self {
+            Self
+        }
+
+        pub(super) fn open_with_tx_session_xor<'a>(
+            &'a self,
+            port: hibana::runtime::transport::PortOpen,
+            tx_session_xor: u32,
+            operational_deadline_ticks: u32,
+        ) -> (SioTx, SioRx) {
+            let local_role = port.local_role();
+            let session_id = port.session_id().raw();
+            let tx_session_id = session_id ^ tx_session_xor;
+            let lane = port.lane();
+            fifo::clear_errors();
+            (
+                SioTx {
+                    local_role,
+                    core_id: core_id() as u8,
+                    session_id: tx_session_id,
+                    sent_frames: 0,
+                    pending: None,
+                },
+                SioRx::new(
+                    local_role,
+                    session_id,
+                    lane,
+                    operational_deadline_ticks,
+                    core_id() as u8,
+                ),
+            )
+        }
+    }
+
+    #[cfg(all(target_arch = "arm", target_os = "none"))]
+    #[inline(always)]
+    fn signal_peer() {
+        unsafe {
+            core::arch::asm!("dsb sy", "sev", options(nostack, preserves_flags));
+        }
+    }
+
+    #[cfg(not(all(target_arch = "arm", target_os = "none")))]
+    #[inline(always)]
+    fn signal_peer() {}
+
+    #[derive(Debug)]
+    struct PendingTxFrame {
+        peer_role: u8,
+        frame_label: u8,
+        lane: u8,
+        len: usize,
+        word_index: usize,
+        bytes: [u8; SIO_FRAME_BYTES],
+    }
+
+    impl PendingTxFrame {
+        fn new(
+            peer_role: u8,
+            frame_label: u8,
+            lane: u8,
+            bytes: &[u8],
+        ) -> Result<Self, hibana::runtime::transport::TransportError> {
+            if bytes.len() > SIO_FRAME_BYTES {
+                return Err(hibana::runtime::transport::TransportError::Capacity);
+            }
+
+            let mut frame = Self {
+                peer_role,
+                frame_label,
+                lane,
+                len: bytes.len(),
+                word_index: 0,
+                bytes: [0; SIO_FRAME_BYTES],
+            };
+            frame.bytes[..bytes.len()].copy_from_slice(bytes);
+            Ok(frame)
+        }
+
+        fn total_words(&self) -> usize {
+            SIO_FRAME_HEADER_WORDS + payload_word_count(self.len)
+        }
+
+        fn word(&self, session_id: u32, local_role: u8, index: usize) -> u32 {
+            match index {
+                0 => SIO_FRAME_MAGIC,
+                1 => session_id,
+                2 => encode_meta(local_role, self.peer_role, self.frame_label, self.len),
+                3 => u32::from(self.lane),
+                _ => pack_payload_word(
+                    &self.bytes[..self.len],
+                    (index - SIO_FRAME_HEADER_WORDS) * 4,
+                ),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    pub(super) struct SioTx {
+        local_role: u8,
+        core_id: u8,
+        session_id: u32,
+        sent_frames: u16,
+        pending: Option<PendingTxFrame>,
+    }
+
+    #[derive(Debug)]
+    pub(super) struct SioRx {
+        local_role: u8,
+        core_id: u8,
+        lane: u8,
+        session_id: u32,
+        frame_session_id: u32,
+        frame_lane: u8,
+        requeued: bool,
+        delivered: bool,
+        pending_logged: bool,
+        pending_polls: u32,
+        sender_role: u8,
+        frame_label: Option<u8>,
+        operational_deadline_ticks: u32,
+        len: usize,
+        bytes: [u8; SIO_FRAME_BYTES],
+    }
+
+    impl SioRx {
+        const fn new(
+            local_role: u8,
+            session_id: u32,
+            lane: u8,
+            operational_deadline_ticks: u32,
+            core_id: u8,
+        ) -> Self {
+            Self {
+                local_role,
+                core_id,
+                lane,
+                session_id,
+                frame_session_id: session_id,
+                frame_lane: lane,
+                requeued: false,
+                delivered: false,
+                pending_logged: false,
+                pending_polls: 0,
+                sender_role: 0,
+                frame_label: None,
+                operational_deadline_ticks,
+                len: 0,
+                bytes: [0; SIO_FRAME_BYTES],
+            }
+        }
+
+        fn frame_header(&self) -> hibana::runtime::transport::FrameHeader {
+            let session = self.frame_session_id.to_be_bytes();
+            hibana::runtime::transport::FrameHeader::from_bytes([
+                session[0],
+                session[1],
+                session[2],
+                session[3],
+                self.frame_lane,
+                self.sender_role,
+                self.local_role,
+                self.frame_label
+                    .expect("rp2w SIO received frame must carry a frame label"),
+            ])
+        }
+
+        fn payload<'a>(&'a self) -> hibana::runtime::wire::Payload<'a> {
+            hibana::runtime::wire::Payload::new(&self.bytes[..self.len])
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct DecodedSioFrame {
+        session_id: u32,
+        sender_role: u8,
+        peer_role: u8,
+        frame_label: u8,
+        lane: u8,
+        len: usize,
+        bytes: [u8; SIO_FRAME_BYTES],
+    }
+
+    impl DecodedSioFrame {
+        const EMPTY: Self = Self {
+            session_id: 0,
+            sender_role: 0,
+            peer_role: 0,
+            frame_label: 0,
+            lane: 0,
+            len: 0,
+            bytes: [0; SIO_FRAME_BYTES],
+        };
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct StashedSioFrame {
+        occupied: bool,
+        frame: DecodedSioFrame,
+    }
+
+    impl StashedSioFrame {
+        const EMPTY: Self = Self {
+            occupied: false,
+            frame: DecodedSioFrame::EMPTY,
+        };
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct SioRxAccumulator {
+        words: [u32; SIO_FRAME_WORDS],
+        word_count: usize,
+        expected_words: usize,
+    }
+
+    impl SioRxAccumulator {
+        const EMPTY: Self = Self {
+            words: [0; SIO_FRAME_WORDS],
+            word_count: 0,
+            expected_words: 0,
+        };
+
+        fn reset(&mut self) {
+            self.word_count = 0;
+            self.expected_words = 0;
+        }
+
+        fn is_partial(&self) -> bool {
+            self.word_count != 0
+        }
+
+        fn push_word(
+            &mut self,
+            word: u32,
+        ) -> Result<Option<DecodedSioFrame>, hibana::runtime::transport::TransportError> {
+            if self.word_count >= SIO_FRAME_WORDS {
+                self.reset();
+                return Err(hibana::runtime::transport::TransportError::Capacity);
+            }
+
+            self.words[self.word_count] = word;
+            self.word_count += 1;
+
+            if self.word_count == 1 && word != SIO_FRAME_MAGIC {
+                self.reset();
+                return Err(hibana::runtime::transport::TransportError::Failed);
+            }
+
+            if self.word_count == SIO_FRAME_HEADER_WORDS {
+                let (sender_role, peer_role, _, len) = decode_meta(self.words[2]);
+                if peer_role == sender_role || len > SIO_FRAME_BYTES {
+                    self.reset();
+                    if len > SIO_FRAME_BYTES {
+                        return Err(hibana::runtime::transport::TransportError::Capacity);
+                    }
+                    return Err(hibana::runtime::transport::TransportError::Failed);
+                }
+                self.expected_words = SIO_FRAME_HEADER_WORDS + payload_word_count(len);
+            }
+
+            if self.expected_words == 0 || self.word_count < self.expected_words {
+                return Ok(None);
+            }
+
+            let session_id = self.words[1];
+            let meta_word = self.words[2];
+            let lane_word = self.words[3];
+            let (sender_role, peer_role, frame_label, len) = decode_meta(meta_word);
+            let lane = lane_word as u8;
+            let mut bytes = [0; SIO_FRAME_BYTES];
+            let mut offset = 0usize;
+            while offset < len {
+                let word_index = SIO_FRAME_HEADER_WORDS + offset / 4;
+                unpack_payload_word(self.words[word_index], &mut bytes[..len], offset);
+                offset += 4;
+            }
+            self.reset();
+
+            Ok(Some(DecodedSioFrame {
+                session_id,
+                sender_role,
+                peer_role,
+                frame_label,
+                lane,
+                len,
+                bytes,
+            }))
+        }
+    }
+
+    const SIO_RX_STASH_ROLES: usize = 16;
+    static mut SIO_RX_ACCUM_CORE0: SioRxAccumulator = SioRxAccumulator::EMPTY;
+    static mut SIO_RX_ACCUM_CORE1: SioRxAccumulator = SioRxAccumulator::EMPTY;
+    static mut SIO_RX_STASH_CORE0: [StashedSioFrame; SIO_RX_STASH_ROLES] =
+        [StashedSioFrame::EMPTY; SIO_RX_STASH_ROLES];
+    static mut SIO_RX_STASH_CORE1: [StashedSioFrame; SIO_RX_STASH_ROLES] =
+        [StashedSioFrame::EMPTY; SIO_RX_STASH_ROLES];
+
+    fn rx_accumulator(core_id: u8) -> *mut SioRxAccumulator {
+        if core_id == 0 {
+            core::ptr::addr_of_mut!(SIO_RX_ACCUM_CORE0)
+        } else {
+            core::ptr::addr_of_mut!(SIO_RX_ACCUM_CORE1)
+        }
+    }
+
+    fn rx_stash(core_id: u8) -> *mut StashedSioFrame {
+        if core_id == 0 {
+            core::ptr::addr_of_mut!(SIO_RX_STASH_CORE0) as *mut StashedSioFrame
+        } else {
+            core::ptr::addr_of_mut!(SIO_RX_STASH_CORE1) as *mut StashedSioFrame
+        }
+    }
+
+    fn stash_slot(core_id: u8, role: u8) -> Option<*mut StashedSioFrame> {
+        if (role as usize) < SIO_RX_STASH_ROLES {
+            Some(unsafe { rx_stash(core_id).add(role as usize) })
+        } else {
+            None
+        }
+    }
+
+    fn take_stashed_frame(core_id: u8, role: u8) -> Option<DecodedSioFrame> {
+        let slot = stash_slot(core_id, role)?;
+        unsafe {
+            if !(*slot).occupied {
+                return None;
+            }
+            let frame = (*slot).frame;
+            (*slot) = StashedSioFrame::EMPTY;
+            Some(frame)
+        }
+    }
+
+    fn stash_frame(
+        core_id: u8,
+        frame: DecodedSioFrame,
+    ) -> Result<(), hibana::runtime::transport::TransportError> {
+        let Some(slot) = stash_slot(core_id, frame.peer_role) else {
+            return Err(hibana::runtime::transport::TransportError::Capacity);
+        };
+        unsafe {
+            if (*slot).occupied {
+                return Err(hibana::runtime::transport::TransportError::Capacity);
+            }
+            (*slot) = StashedSioFrame {
+                occupied: true,
+                frame,
+            };
+        }
+        Ok(())
+    }
+
+    fn stage_frame(rx: &mut SioRx, frame: DecodedSioFrame) {
+        rx.frame_session_id = frame.session_id;
+        rx.frame_lane = frame.lane;
+        rx.frame_label = Some(frame.frame_label);
+        rx.sender_role = frame.sender_role;
+        rx.len = frame.len;
+        rx.delivered = true;
+        rx.bytes[..frame.len].copy_from_slice(&frame.bytes[..frame.len]);
+    }
+
+    fn frame_targets_rx_lane(frame: &DecodedSioFrame, rx: &SioRx) -> bool {
+        frame.lane == rx.lane
+    }
+
+    fn rp2w_role_core(role: u8) -> u8 {
+        match role {
+            0 | 2 => 0,
+            1 => 1,
+            other => panic!("rp2w SIO transport has no core assignment for role {other}"),
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn core_id() -> u32 {
+        #[cfg(all(target_arch = "arm", target_os = "none"))]
+        {
+            const SIO_CPUID: *const u32 = 0xd000_0000 as *const u32;
+            unsafe { core::ptr::read_volatile(SIO_CPUID) & 1 }
+        }
+        #[cfg(not(all(target_arch = "arm", target_os = "none")))]
+        {
+            0
+        }
+    }
+
+    #[cfg(all(target_arch = "arm", target_os = "none"))]
+    mod fifo {
+        use core::ptr::{read_volatile, write_volatile};
+
+        const SIO_BASE: usize = 0xd000_0000;
+        const SIO_FIFO_ST: *const u32 = (SIO_BASE + 0x50) as *const u32;
+        const SIO_FIFO_ST_WRITE: *mut u32 = (SIO_BASE + 0x50) as *mut u32;
+        const SIO_FIFO_WR: *mut u32 = (SIO_BASE + 0x54) as *mut u32;
+        const SIO_FIFO_RD: *const u32 = (SIO_BASE + 0x58) as *const u32;
+        const FIFO_VLD: u32 = 1 << 0;
+        const FIFO_RDY: u32 = 1 << 1;
+        const FIFO_WOF: u32 = 1 << 2;
+        const FIFO_ROE: u32 = 1 << 3;
+
+        #[inline(always)]
+        fn ready_to_recv() -> bool {
+            status() & FIFO_VLD != 0
+        }
+
+        #[inline(always)]
+        fn ready_to_send() -> bool {
+            status() & FIFO_RDY != 0
+        }
+
+        #[inline(always)]
+        pub(super) fn status() -> u32 {
+            unsafe { read_volatile(SIO_FIFO_ST) }
+        }
+
+        #[inline(always)]
+        pub(super) fn clear_errors() {
+            unsafe {
+                write_volatile(SIO_FIFO_ST_WRITE, FIFO_WOF | FIFO_ROE);
+            }
+        }
+
+        #[inline(always)]
+        pub(super) fn try_push(word: u32) -> bool {
+            if !ready_to_send() {
+                return false;
+            }
+            unsafe {
+                write_volatile(SIO_FIFO_WR, word);
+            }
+            true
+        }
+
+        #[inline(always)]
+        pub(super) fn try_pop() -> Option<u32> {
+            if ready_to_recv() {
+                Some(unsafe { read_volatile(SIO_FIFO_RD) })
+            } else {
+                None
+            }
+        }
+    }
+
+    #[cfg(not(all(target_arch = "arm", target_os = "none")))]
+    mod fifo {
+        #[inline(always)]
+        pub(super) fn status() -> u32 {
+            0
+        }
+
+        #[inline(always)]
+        pub(super) fn clear_errors() {}
+
+        #[inline(always)]
+        pub(super) fn try_push(word: u32) -> bool {
+            core::hint::black_box(word);
+            false
+        }
+
+        #[inline(always)]
+        pub(super) fn try_pop() -> Option<u32> {
+            None
+        }
+    }
+
+    #[cfg(all(target_arch = "arm", target_os = "none"))]
+    fn try_pop_until_deadline(timeout_ms: u32) -> Option<u32> {
+        super::rp2w_timer_route_arm(timeout_ms as u64);
+        loop {
+            if let Some(word) = fifo::try_pop() {
+                super::rp2w_timer_route_finish();
+                return Some(word);
+            }
+            if super::rp2w_timer_route_ready() {
+                super::rp2w_timer_route_finish();
+                return None;
+            }
+            unsafe {
+                core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
+            }
+        }
+    }
+
+    #[cfg(not(all(target_arch = "arm", target_os = "none")))]
+    fn try_pop_until_deadline(timeout_ms: u32) -> Option<u32> {
+        core::hint::black_box(timeout_ms);
+        fifo::try_pop()
+    }
+
+    fn encode_meta(sender_role: u8, peer_role: u8, frame_label: u8, len: usize) -> u32 {
+        ((frame_label as u32) << 24)
+            | ((peer_role as u32) << 16)
+            | ((sender_role as u32) << 8)
+            | (len as u32)
+    }
+
+    fn decode_meta(word: u32) -> (u8, u8, u8, usize) {
+        let frame_label = (word >> 24) as u8;
+        let peer_role = ((word >> 16) & 0xff) as u8;
+        let sender_role = ((word >> 8) & 0xff) as u8;
+        let len = (word & 0xff) as usize;
+        (sender_role, peer_role, frame_label, len)
+    }
+
+    fn payload_word_count(len: usize) -> usize {
+        (len + 3) / 4
+    }
+
+    fn pack_payload_word(bytes: &[u8], offset: usize) -> u32 {
+        let mut word = 0u32;
+        let mut idx = 0usize;
+        while idx < 4 {
+            let source = offset + idx;
+            if source < bytes.len() {
+                word |= (bytes[source] as u32) << (idx * 8);
+            }
+            idx += 1;
+        }
+        word
+    }
+
+    fn unpack_payload_word(word: u32, bytes: &mut [u8], offset: usize) {
+        let mut idx = 0usize;
+        while idx < 4 {
+            let target = offset + idx;
+            if target < bytes.len() {
+                bytes[target] = ((word >> (idx * 8)) & 0xff) as u8;
+            }
+            idx += 1;
+        }
+    }
+
+    fn trace_frame(event: u8, local_role: u8, peer_role: u8, len: usize, frame_label: u8) -> u32 {
+        0x5000_0000
+            | ((event as u32) << 24)
+            | ((local_role as u32) << 20)
+            | ((peer_role as u32) << 16)
+            | (((len as u32) & 0xff) << 8)
+            | frame_label as u32
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn pending_sio_frame_materializes_header_and_payload_words() {
+            let label = 7;
+            let frame = match PendingTxFrame::new(1, label, 3, b"abcd") {
+                Ok(frame) => frame,
+                Err(error) => panic!("{error:?}"),
+            };
+
+            assert_eq!(frame.total_words(), SIO_FRAME_HEADER_WORDS + 1);
+            assert_eq!(frame.word(42, 0, 0), SIO_FRAME_MAGIC);
+            assert_eq!(frame.word(42, 0, 1), 42);
+            assert_eq!(frame.word(42, 0, 2), encode_meta(0, 1, label, 4));
+            assert_eq!(frame.word(42, 0, 3), 3);
+            assert_eq!(frame.word(42, 0, 4), u32::from_le_bytes(*b"abcd"));
+        }
+
+        #[test]
+        fn sio_rx_accumulator_decodes_peer_role_for_same_core_demux() {
+            let label = 9;
+            let frame = match PendingTxFrame::new(1, label, 3, b"abcd") {
+                Ok(frame) => frame,
+                Err(error) => panic!("{error:?}"),
+            };
+            let mut accumulator = SioRxAccumulator::EMPTY;
+
+            assert!(
+                accumulator
+                    .push_word(frame.word(42, 0, 0))
+                    .expect("magic accepted")
+                    .is_none()
+            );
+            assert!(
+                accumulator
+                    .push_word(frame.word(42, 0, 1))
+                    .expect("session accepted")
+                    .is_none()
+            );
+            assert!(accumulator.is_partial());
+
+            assert!(
+                accumulator
+                    .push_word(frame.word(42, 0, 2))
+                    .expect("metadata accepted")
+                    .is_none()
+            );
+            assert!(
+                accumulator
+                    .push_word(frame.word(42, 0, 3))
+                    .expect("lane accepted")
+                    .is_none()
+            );
+            let decoded = match accumulator
+                .push_word(frame.word(42, 0, 4))
+                .expect("payload accepted")
+            {
+                Some(decoded) => decoded,
+                None => panic!("complete frame must be decoded after payload word"),
+            };
+
+            assert_eq!(decoded.session_id, 42);
+            assert_eq!(decoded.sender_role, 0);
+            assert_eq!(decoded.peer_role, 1);
+            assert_eq!(decoded.frame_label, label);
+            assert_eq!(decoded.lane, 3);
+            assert_eq!(&decoded.bytes[..decoded.len], b"abcd");
+            assert!(!accumulator.is_partial());
+        }
+
+        #[test]
+        fn staged_sio_payload_returns_payload_and_frame_observation() {
+            let transport = SioTransport::new();
+            let label = 7;
+            let mut rx = SioRx::new(0, 42, 1, 0, 0);
+            let rx_ptr = core::ptr::addr_of!(rx);
+            rx.sender_role = 1;
+            rx.frame_label = Some(label);
+            rx.len = 4;
+            rx.bytes[..4].copy_from_slice(b"test");
+            rx.delivered = false;
+
+            let waker = core::task::Waker::noop();
+            let mut context = core::task::Context::from_waker(waker);
+            let payload_bytes = {
+                let received =
+                    match <SioTransport as hibana::runtime::transport::Transport>::poll_recv(
+                        &transport,
+                        &mut rx,
+                        &mut context,
+                    ) {
+                        core::task::Poll::Ready(Ok(received)) => received,
+                        other => panic!("expected staged SIO payload, got {other:?}"),
+                    };
+                received.payload().as_bytes().to_vec()
+            };
+            core::hint::black_box(rx_ptr);
+            assert_eq!(rx.frame_header().bytes(), [0, 0, 0, 42, 1, 1, 0, label]);
+            assert_eq!(payload_bytes, b"test");
+        }
+
+        #[test]
+        fn requeued_sio_payload_returns_same_frame_observation() {
+            let transport = SioTransport::new();
+            let label = 7;
+            let mut rx = SioRx::new(0, 42, 1, 0, 0);
+            let rx_ptr = core::ptr::addr_of!(rx);
+            rx.sender_role = 1;
+            rx.frame_label = Some(label);
+            rx.len = 4;
+            rx.bytes[..4].copy_from_slice(b"test");
+            rx.delivered = true;
+            rx.requeued = true;
+
+            let waker = core::task::Waker::noop();
+            let mut context = core::task::Context::from_waker(waker);
+            let payload_bytes = {
+                let received =
+                    match <SioTransport as hibana::runtime::transport::Transport>::poll_recv(
+                        &transport,
+                        &mut rx,
+                        &mut context,
+                    ) {
+                        core::task::Poll::Ready(Ok(received)) => received,
+                        other => panic!("expected requeued staged payload, got {other:?}"),
+                    };
+                received.payload().as_bytes().to_vec()
+            };
+            core::hint::black_box(rx_ptr);
+            assert_eq!(rx.frame_header().bytes(), [0, 0, 0, 42, 1, 1, 0, label]);
+            assert_eq!(payload_bytes, b"test");
+            assert!(rx.delivered);
+            assert!(!rx.requeued);
+        }
+
+        #[test]
+        fn stashed_sio_frame_waits_for_matching_lane() {
+            let transport = SioTransport::new();
+            let label = 9;
+            let _ = take_stashed_frame(0, 0);
+            let mut frame = DecodedSioFrame::EMPTY;
+            frame.session_id = 42;
+            frame.sender_role = 1;
+            frame.peer_role = 0;
+            frame.frame_label = label;
+            frame.lane = 2;
+            frame.len = 4;
+            frame.bytes[..4].copy_from_slice(b"lane");
+            stash_frame(0, frame).unwrap();
+
+            let waker = core::task::Waker::noop();
+            let mut context = core::task::Context::from_waker(waker);
+            let mut lane0 = SioRx::new(0, 42, 1, 0, 0);
+            assert!(matches!(
+                <SioTransport as hibana::runtime::transport::Transport>::poll_recv(
+                    &transport,
+                    &mut lane0,
+                    &mut context,
+                ),
+                core::task::Poll::Pending
+            ));
+
+            let mut lane2 = SioRx::new(0, 42, 2, 0, 0);
+            let payload_bytes = {
+                let received =
+                    match <SioTransport as hibana::runtime::transport::Transport>::poll_recv(
+                        &transport,
+                        &mut lane2,
+                        &mut context,
+                    ) {
+                        core::task::Poll::Ready(Ok(received)) => received,
+                        other => panic!("expected stashed matching lane frame, got {other:?}"),
+                    };
+                received.payload().as_bytes().to_vec()
+            };
+            assert_eq!(lane2.frame_header().bytes(), [0, 0, 0, 42, 2, 1, 0, label]);
+            assert_eq!(payload_bytes, b"lane");
+        }
+
+        #[test]
+        fn same_lane_session_mismatch_reaches_endpoint_evidence() {
+            let transport = SioTransport::new();
+            let label = 9;
+            let _ = take_stashed_frame(0, 0);
+            let mut frame = DecodedSioFrame::EMPTY;
+            frame.session_id = 0x1111_2222;
+            frame.sender_role = 1;
+            frame.peer_role = 0;
+            frame.frame_label = label;
+            frame.lane = 1;
+            frame.len = 4;
+            frame.bytes[..4].copy_from_slice(b"sess");
+            stash_frame(0, frame).unwrap();
+
+            let waker = core::task::Waker::noop();
+            let mut context = core::task::Context::from_waker(waker);
+            let mut rx = SioRx::new(0, 0x3333_4444, 1, 0, 0);
+            let payload_bytes = {
+                let received =
+                    match <SioTransport as hibana::runtime::transport::Transport>::poll_recv(
+                        &transport,
+                        &mut rx,
+                        &mut context,
+                    ) {
+                        core::task::Poll::Ready(Ok(received)) => received,
+                        other => panic!("expected same-lane session mismatch frame, got {other:?}"),
+                    };
+                received.payload().as_bytes().to_vec()
+            };
+            assert_eq!(
+                rx.frame_header().bytes(),
+                [0x11, 0x11, 0x22, 0x22, 1, 1, 0, label]
+            );
+            assert_eq!(payload_bytes, b"sess");
+        }
+    }
+
+    impl hibana::runtime::transport::Transport for SioTransport {
+        type Tx<'a>
+            = SioTx
+        where
+            Self: 'a;
+        type Rx<'a>
+            = SioRx
+        where
+            Self: 'a;
+        fn open<'a>(
+            &'a self,
+            port: hibana::runtime::transport::PortOpen,
+        ) -> (Self::Tx<'a>, Self::Rx<'a>) {
+            let local_role = port.local_role();
+            let session_id = port.session_id().raw();
+            let lane = port.lane();
+            fifo::clear_errors();
+            (
+                SioTx {
+                    local_role,
+                    core_id: core_id() as u8,
+                    session_id,
+                    sent_frames: 0,
+                    pending: None,
+                },
+                SioRx::new(local_role, session_id, lane, 0, core_id() as u8),
+            )
+        }
+
+        fn poll_send<'a, 'f>(
+            &self,
+            tx: &'a mut Self::Tx<'a>,
+            outgoing: hibana::runtime::transport::Outgoing<'f>,
+            context: &mut core::task::Context<'_>,
+        ) -> core::task::Poll<Result<(), hibana::runtime::transport::TransportError>>
+        where
+            'a: 'f,
+        {
+            core::hint::black_box(core::ptr::addr_of!(*context));
+            let bytes = outgoing.payload().as_bytes();
+            let target_role = outgoing.target_role();
+            if target_role == tx.local_role {
+                super::record_choreofs_sio_trace(trace_frame(
+                    6,
+                    tx.local_role,
+                    target_role,
+                    bytes.len(),
+                    outgoing.frame_label().raw(),
+                ));
+                tx.sent_frames = tx.sent_frames.saturating_add(1);
+                return core::task::Poll::Ready(Ok(()));
+            }
+            if bytes.len() > SIO_FRAME_BYTES {
+                return core::task::Poll::Ready(Err(
+                    hibana::runtime::transport::TransportError::Capacity,
+                ));
+            }
+            if rp2w_role_core(target_role) == tx.core_id {
+                let mut frame = DecodedSioFrame::EMPTY;
+                frame.session_id = tx.session_id;
+                frame.sender_role = tx.local_role;
+                frame.peer_role = target_role;
+                frame.frame_label = outgoing.frame_label().raw();
+                frame.lane = outgoing.lane();
+                frame.len = bytes.len();
+                frame.bytes[..bytes.len()].copy_from_slice(bytes);
+                if let Err(error) = stash_frame(tx.core_id, frame) {
+                    return core::task::Poll::Ready(Err(error));
+                }
+                super::record_choreofs_sio_trace(trace_frame(
+                    14,
+                    tx.local_role,
+                    target_role,
+                    bytes.len(),
+                    outgoing.frame_label().raw(),
+                ));
+                context.waker().wake_by_ref();
+                tx.sent_frames = tx.sent_frames.saturating_add(1);
+                return core::task::Poll::Ready(Ok(()));
+            }
+
+            if tx.pending.is_none() {
+                super::record_choreofs_sio_trace(trace_frame(
+                    1,
+                    tx.local_role,
+                    target_role,
+                    bytes.len(),
+                    outgoing.frame_label().raw(),
+                ));
+                super::record_choreofs_sio_trace(trace_frame(
+                    11,
+                    tx.local_role,
+                    target_role,
+                    outgoing.lane() as usize,
+                    outgoing.frame_label().raw(),
+                ));
+                let pending = match PendingTxFrame::new(
+                    target_role,
+                    outgoing.frame_label().raw(),
+                    outgoing.lane(),
+                    bytes,
+                ) {
+                    Ok(pending) => pending,
+                    Err(error) => return core::task::Poll::Ready(Err(error)),
+                };
+                tx.pending = Some(pending);
+            }
+
+            let mut completed = false;
+            while let Some(pending) = tx.pending.as_mut() {
+                if pending.word_index >= pending.total_words() {
+                    completed = true;
+                    break;
+                }
+
+                let word = pending.word(tx.session_id, tx.local_role, pending.word_index);
+                if !fifo::try_push(word) {
+                    context.waker().wake_by_ref();
+                    return core::task::Poll::Pending;
+                }
+                pending.word_index += 1;
+            }
+
+            if !completed {
+                return core::task::Poll::Ready(Err(
+                    hibana::runtime::transport::TransportError::Failed,
+                ));
+            }
+
+            let finished = match tx.pending.take() {
+                Some(finished) => finished,
+                None => {
+                    return core::task::Poll::Ready(Err(
+                        hibana::runtime::transport::TransportError::Failed,
+                    ));
+                }
+            };
+            super::record_choreofs_sio_trace(trace_frame(
+                8,
+                tx.local_role,
+                finished.peer_role,
+                (fifo::status() & 0xff) as usize,
+                finished.frame_label,
+            ));
+            super::record_sio_direction_tx(tx.local_role, finished.peer_role);
+            signal_peer();
+            tx.sent_frames = tx.sent_frames.saturating_add(1);
+            core::task::Poll::Ready(Ok(()))
+        }
+
+        fn cancel_send<'a>(&self, tx: &'a mut Self::Tx<'a>) {
+            tx.sent_frames = 0;
+            tx.pending = None;
+        }
+
+        fn poll_recv<'a>(
+            &'a self,
+            rx: &'a mut Self::Rx<'a>,
+            context: &mut core::task::Context<'_>,
+        ) -> core::task::Poll<
+            Result<
+                hibana::runtime::transport::ReceivedFrame<'a>,
+                hibana::runtime::transport::TransportError,
+            >,
+        > {
+            core::hint::black_box(core::ptr::addr_of!(*context));
+            if rx.local_role == 1 {
+                let seen_tx = super::read_core0_to_core1_tx_count();
+                unsafe {
+                    core::ptr::write_volatile(
+                        core::ptr::addr_of_mut!(
+                            super::HIBANA_CHOREOFS_SIO_ROLE1_POLL_SEEN_CORE0_TX
+                        ),
+                        seen_tx,
+                    );
+                }
+            }
+            if rx.frame_label.is_some() && (rx.requeued || !rx.delivered) {
+                rx.requeued = false;
+                rx.delivered = true;
+                rx.pending_logged = false;
+                rx.pending_polls = 0;
+                super::record_choreofs_sio_trace(trace_frame(
+                    3,
+                    rx.local_role,
+                    rx.local_role,
+                    rx.len,
+                    rx.frame_label
+                        .expect("rp2w SIO requeued frame must carry a frame label"),
+                ));
+                let header = rx.frame_header();
+                return core::task::Poll::Ready(Ok(
+                    hibana::runtime::transport::ReceivedFrame::framed(header, rx.payload()),
+                ));
+            }
+            if rx.frame_label.is_some() {
+                rx.frame_label = None;
+                rx.delivered = false;
+                rx.pending_logged = false;
+                rx.pending_polls = 0;
+                rx.len = 0;
+                rx.frame_session_id = rx.session_id;
+                rx.frame_lane = rx.lane;
+            }
+            if let Some(frame) = take_stashed_frame(rx.core_id, rx.local_role) {
+                if !frame_targets_rx_lane(&frame, rx) {
+                    stash_frame(rx.core_id, frame)?;
+                    super::record_choreofs_sio_trace(trace_frame(
+                        15,
+                        rx.local_role,
+                        frame.sender_role,
+                        frame.lane as usize,
+                        frame.frame_label,
+                    ));
+                    context.waker().wake_by_ref();
+                    return core::task::Poll::Pending;
+                }
+                stage_frame(rx, frame);
+                super::record_sio_direction_rx(rx.local_role, frame.sender_role);
+                super::record_choreofs_sio_trace(trace_frame(
+                    13,
+                    rx.local_role,
+                    frame.sender_role,
+                    frame.len,
+                    frame.frame_label,
+                ));
+                let header = rx.frame_header();
+                return core::task::Poll::Ready(Ok(
+                    hibana::runtime::transport::ReceivedFrame::framed(header, rx.payload()),
+                ));
+            }
+            loop {
+                let word = match fifo::try_pop() {
+                    Some(word) => word,
+                    None => {
+                        rx.pending_polls = rx.pending_polls.wrapping_add(1);
+                        if rx.local_role == 1 {
+                            let seen_tx = super::read_core0_to_core1_tx_count();
+                            unsafe {
+                                core::ptr::write_volatile(
+                                    core::ptr::addr_of_mut!(
+                                        super::HIBANA_CHOREOFS_SIO_ROLE1_PENDING_SEEN_CORE0_TX
+                                    ),
+                                    seen_tx,
+                                );
+                            }
+                            super::record_choreofs_engine_status(
+                                0x5452_8000
+                                    | ((fifo::status() & 0xff) << 12)
+                                    | (rx.pending_polls & 0x0fff),
+                            );
+                        }
+                        if !rx.pending_logged {
+                            super::record_choreofs_sio_trace(trace_frame(
+                                7,
+                                rx.local_role,
+                                rx.local_role,
+                                rx.lane as usize,
+                                SIO_TRACE_NO_FRAME_LABEL,
+                            ));
+                            rx.pending_logged = true;
+                        }
+                        let has_partial_frame =
+                            unsafe { (*rx_accumulator(rx.core_id)).is_partial() };
+                        if has_partial_frame {
+                            context.waker().wake_by_ref();
+                        }
+                        if rx.operational_deadline_ticks != 0 {
+                            match try_pop_until_deadline(rx.operational_deadline_ticks) {
+                                Some(word) => {
+                                    rx.pending_logged = false;
+                                    rx.pending_polls = 0;
+                                    word
+                                }
+                                None => {
+                                    return core::task::Poll::Ready(Err(
+                                        hibana::runtime::transport::TransportError::Deadline,
+                                    ));
+                                }
+                            }
+                        } else {
+                            return core::task::Poll::Pending;
+                        }
+                    }
+                };
+
+                if rx.local_role == 1 {
+                    let seen_tx = super::read_core0_to_core1_tx_count();
+                    unsafe {
+                        core::ptr::write_volatile(
+                            core::ptr::addr_of_mut!(
+                                super::HIBANA_CHOREOFS_SIO_ROLE1_READY_SEEN_CORE0_TX
+                            ),
+                            seen_tx,
+                        );
+                    }
+                }
+                rx.pending_logged = false;
+                rx.pending_polls = 0;
+
+                let frame = match unsafe { (&mut *rx_accumulator(rx.core_id)).push_word(word) } {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => continue,
+                    Err(error) => return core::task::Poll::Ready(Err(error)),
+                };
+
+                if frame.peer_role != rx.local_role {
+                    stash_frame(rx.core_id, frame)?;
+                    super::record_choreofs_sio_trace(trace_frame(
+                        12,
+                        rx.local_role,
+                        frame.peer_role,
+                        frame.len,
+                        frame.frame_label,
+                    ));
+                    context.waker().wake_by_ref();
+                    continue;
+                }
+
+                if !frame_targets_rx_lane(&frame, rx) {
+                    stash_frame(rx.core_id, frame)?;
+                    super::record_choreofs_sio_trace(trace_frame(
+                        10,
+                        rx.local_role,
+                        frame.sender_role,
+                        frame.lane as usize,
+                        frame.frame_label,
+                    ));
+                    context.waker().wake_by_ref();
+                    continue;
+                }
+
+                stage_frame(rx, frame);
+                super::record_sio_direction_rx(rx.local_role, frame.sender_role);
+                super::record_choreofs_sio_trace(trace_frame(
+                    2,
+                    rx.local_role,
+                    frame.sender_role,
+                    frame.len,
+                    frame.frame_label,
+                ));
+                let header = rx.frame_header();
+                return core::task::Poll::Ready(Ok(
+                    hibana::runtime::transport::ReceivedFrame::framed(header, rx.payload()),
+                ));
+            }
+        }
+
+        fn requeue<'a>(
+            &self,
+            rx: &mut Self::Rx<'a>,
+        ) -> Result<(), hibana::runtime::transport::TransportError> {
+            rx.requeued = rx.frame_label.is_some();
+            if rx.requeued {
+                rx.delivered = false;
+                super::record_choreofs_sio_trace(trace_frame(
+                    4,
+                    rx.local_role,
+                    rx.local_role,
+                    rx.len,
+                    rx.frame_label
+                        .expect("rp2w SIO requeued frame must carry a frame label"),
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(feature = "wasm-engine-core")]
+static mut RP2W_ENGINE_WASI_GUEST_ARENA: appkit::WasiGuestArena = appkit::WasiGuestArena::empty();
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RP2W_DRIVER_ATTACH_SLAB_BYTES: usize = 48 * 1024;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RP2W_ENGINE_ATTACH_SLAB_BYTES: usize = 48 * 1024;
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+static RP2W_DRIVER_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<RP2W_DRIVER_ATTACH_SLAB_BYTES> =
+    appkit::EmbeddedAttachStorage::empty();
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+static RP2W_ENGINE_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<RP2W_ENGINE_ATTACH_SLAB_BYTES> =
+    appkit::EmbeddedAttachStorage::empty();
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_driver_attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
+    RP2W_DRIVER_ATTACH_STORAGE.lease()
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_engine_attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
+    RP2W_ENGINE_ATTACH_STORAGE.lease()
+}
+
+#[cfg(feature = "wasm-engine-core")]
+fn rp2w_engine_wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
+    core::hint::black_box(ROLE);
+    let arena = unsafe { &mut *core::ptr::addr_of_mut!(RP2W_ENGINE_WASI_GUEST_ARENA) };
+    arena.lease()
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+type Handler = unsafe extern "C" fn() -> !;
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+type IrqHandler = unsafe extern "C" fn();
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+#[repr(C)]
+struct Rp2wImageDefBlock {
+    marker_start: u32,
+    image_type: u32,
+    length: u32,
+    offset: *const u32,
+    marker_end: u32,
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+unsafe impl Sync for Rp2wImageDefBlock {}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+#[used]
+#[unsafe(link_section = ".start_block")]
+static RP2W_IMAGE_DEF: Rp2wImageDefBlock = Rp2wImageDefBlock {
+    marker_start: 0xffff_ded3,
+    image_type: (0x1021 << 16) | (1 << 8) | 0x42,
+    length: (1 << 8) | 0xff,
+    offset: core::ptr::null(),
+    marker_end: 0xab12_3579,
+};
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UART0_IRQ_HANDLER: IrqHandler = uart0_irq_handler;
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RP2W_EXTERNAL_IRQS: usize = 52;
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RP2W_UART0_IRQ_INDEX: usize = 33;
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+#[repr(C)]
+struct VectorTable {
+    initial_stack_pointer: *const u32,
+    reset: Handler,
+    exceptions: [Handler; 14],
+    external_irqs: [IrqHandler; RP2W_EXTERNAL_IRQS],
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+unsafe impl Sync for VectorTable {}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const fn external_irqs() -> [IrqHandler; RP2W_EXTERNAL_IRQS] {
+    let mut handlers = [unhandled_irq_handler as IrqHandler; RP2W_EXTERNAL_IRQS];
+    handlers[0] = timer_alarm0_irq_handler;
+    handlers[RP2W_UART0_IRQ_INDEX] = UART0_IRQ_HANDLER;
+    handlers
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+global_asm!(
+    r#"
+    .global hard_fault_trampoline
+    .type hard_fault_trampoline,%function
+    .thumb_func
+hard_fault_trampoline:
+    mrs r0, msp
+    ldr r1, =HIBANA_DEMO_HARDFAULT_R4
+    str r4, [r1]
+    ldr r1, =HIBANA_DEMO_HARDFAULT_R5
+    str r5, [r1]
+    ldr r1, =HIBANA_DEMO_HARDFAULT_R6
+    str r6, [r1]
+    ldr r1, =HIBANA_DEMO_HARDFAULT_R7
+    str r7, [r1]
+    ldr r1, 1f
+    bx r1
+    .align 2
+1:
+    .word hard_fault_handler_with_sp
+"#
+);
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TIMER_BASE: usize = 0x400b_0000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const XOSC_BASE: usize = 0x4004_8000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const XOSC_CTRL: *mut u32 = XOSC_BASE as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const XOSC_STATUS: *const u32 = (XOSC_BASE + 0x04) as *const u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const XOSC_STARTUP: *mut u32 = (XOSC_BASE + 0x0c) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const XOSC_CTRL_FREQ_RANGE_1_15MHZ: u32 = 0x0000_0aa0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const XOSC_CTRL_ENABLE: u32 = 0x00fa_b000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const XOSC_STATUS_STABLE: u32 = 1 << 31;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const XOSC_STARTUP_12MHZ_CONSERVATIVE: u32 = 0x0000_0b80;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_BASE: usize = 0x4001_0000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_SYS_RESUS_CTRL: *mut u32 = (CLOCKS_BASE + 0x84) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_REF_CTRL: *mut u32 = (CLOCKS_BASE + 0x30) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_REF_DIV: *mut u32 = (CLOCKS_BASE + 0x34) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_REF_SELECTED: *const u32 = (CLOCKS_BASE + 0x38) as *const u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_REF_SRC_XOSC: u32 = 2;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_REF_SELECTED_XOSC: u32 = 1 << CLOCKS_CLK_REF_SRC_XOSC;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_REF_DIV_1: u32 = 1 << 16;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_SYS_CTRL: *mut u32 = (CLOCKS_BASE + 0x3c) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_SYS_DIV: *mut u32 = (CLOCKS_BASE + 0x40) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_SYS_SELECTED: *const u32 = (CLOCKS_BASE + 0x44) as *const u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_SYS_SRC_REF: u32 = 0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_SYS_SRC_AUX: u32 = 1;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_SYS_AUXSRC_PLL_SYS: u32 = 0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_SYS_SELECTED_REF: u32 = 1 << CLOCKS_CLK_SYS_SRC_REF;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_SYS_SELECTED_AUX: u32 = 1 << CLOCKS_CLK_SYS_SRC_AUX;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_SYS_DIV_1: u32 = 1 << 16;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_PERI_CTRL: *mut u32 = (CLOCKS_BASE + 0x48) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_PERI_SELECTED: *const u32 = (CLOCKS_BASE + 0x50) as *const u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_PERI_AUXSRC_CLK_SYS: u32 = 0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_PERI_ENABLE: u32 = 1 << 11;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CLOCKS_CLK_PERI_SELECTED_CLK_SYS: u32 = 1;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const PLL_SYS_BASE: usize = 0x4005_0000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const PLL_SYS_CS: *mut u32 = PLL_SYS_BASE as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const PLL_SYS_PWR: *mut u32 = (PLL_SYS_BASE + 0x04) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const PLL_SYS_FBDIV_INT: *mut u32 = (PLL_SYS_BASE + 0x08) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const PLL_SYS_PRIM: *mut u32 = (PLL_SYS_BASE + 0x0c) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const PLL_CS_LOCK: u32 = 1 << 31;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const PLL_PWR_PD: u32 = 1 << 0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const PLL_PWR_POSTDIVPD: u32 = 1 << 3;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const PLL_PWR_VCOPD: u32 = 1 << 5;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const PLL_SYS_REFDIV_1: u32 = 1;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const PLL_SYS_FBDIV_125: u32 = 125;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const PLL_SYS_POSTDIV_125MHZ: u32 = (6 << 16) | (2 << 12);
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TIMER_ALARM0: *mut u32 = (TIMER_BASE + 0x10) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TIMER_TIMERAWL: *const u32 = (TIMER_BASE + 0x28) as *const u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TIMER_DBGPAUSE: *mut u32 = (TIMER_BASE + 0x2c) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TIMER_INTR: *mut u32 = (TIMER_BASE + 0x3c) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TIMER_INTE: *mut u32 = (TIMER_BASE + 0x40) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TIMER_ALARM0_BIT: u32 = 1 << 0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const NVIC_ISER_BASE: usize = 0xe000_e100;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const NVIC_ICPR_BASE: usize = 0xe000_e280;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const NVIC_TIMER_IRQ0: u8 = 0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const NVIC_UART0_IRQ: u8 = 33;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RP2W_XOSC_HZ: u32 = 12_000_000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RP2W_TIMER_TICK_CYCLES: u32 = RP2W_XOSC_HZ / 1_000_000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RP2W_TIMER_TICKS_PER_MS: u64 = 1_000;
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TICKS_BASE: usize = 0x4010_8000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TICKS_TIMER0_CTRL: *mut u32 = (TICKS_BASE + 0x18) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TICKS_TIMER0_CYCLES: *mut u32 = (TICKS_BASE + 0x1c) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const TICKS_TIMER0_CTRL_ENABLE: u32 = 1 << 0;
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn nvic_register(base: usize, irq: u8) -> *mut u32 {
+    (base + (usize::from(irq) / 32) * 4) as *mut u32
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn nvic_bit(irq: u8) -> u32 {
+    1u32 << (u32::from(irq) & 31)
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn nvic_clear_pending(irq: u8) {
+    unsafe {
+        write_volatile(nvic_register(NVIC_ICPR_BASE, irq), nvic_bit(irq));
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn nvic_enable_irq(irq: u8) {
+    unsafe {
+        write_volatile(nvic_register(NVIC_ISER_BASE, irq), nvic_bit(irq));
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+static mut RP2W_TIMER_ALARM0_READY: u32 = 0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+static mut RP2W_TIMER_ROUTE_ARMED: u32 = 0;
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+unsafe extern "C" {
+    fn hard_fault_trampoline() -> !;
+    fn rp2w_selected_run() -> !;
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+unsafe extern "C" {
+    static __stack_top: u32;
+    static __core1_stack_top: u32;
+    static __stack_limit: u32;
+    static __data_load_start: u8;
+    static mut __data_start: u8;
+    static mut __data_end: u8;
+    static mut __bss_start: u8;
+    static mut __bss_end: u8;
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+#[used]
+#[unsafe(link_section = ".vector_table.reset_vector")]
+static VECTOR_TABLE: VectorTable = VectorTable {
+    initial_stack_pointer: core::ptr::addr_of!(__stack_top),
+    reset: Reset,
+    exceptions: [
+        unhandled_exception_handler,
+        hard_fault_trampoline,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+    ],
+    external_irqs: external_irqs(),
+};
+
+const RESULT_SUCCESS: u32 = 0x4849_4f4b;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RESULT_FAILURE: u32 = 0x4849_4641;
+
+const EPF_POLICY_SLOTS: usize = 1;
+const EPF_BYTECODE_BYTES: usize = 64;
+const EPF_TAP_SPOOL_EVENTS: usize = 16;
+const EPF_BYTECODE_STATE_EMPTY: u32 = 0;
+const EPF_BYTECODE_STATE_COMMIT: u32 = 0x434f_4d54;
+const EPF_BYTECODE_STATE_LOADED: u32 = 0x4c4f_4144;
+const EPF_BYTECODE_STATE_REJECTED: u32 = 0x5245_4a54;
+const EPF_LOAD_REASON_NONE: u32 = 0;
+const EPF_LOAD_REASON_BAD_LEN: u32 = 1;
+const EPF_LOAD_REASON_BAD_HASH: u32 = 2;
+const EPF_LOAD_REASON_VM_TRAP: u32 = 3;
+const EPF_LOAD_REASON_LOAD_ERROR: u32 = 4;
+const EPF_TARGET_OBSERVE: u32 = 0;
+const EPF_TARGET_POLICY: u32 = 1;
+const EPF_INGRESS_NONE: u32 = 0;
+const EPF_INGRESS_MAILBOX: u32 = 0x4d41_494c;
+const EPF_INGRESS_CHOREOGRAPHY: u32 = 0x4348_4f52;
+const EPF_INGRESS_UART_CHOREOGRAPHY: u32 = 0x5543_4852;
+const EPF_TIMER_IRQ_FACT_ID: u16 = 0x0057;
+const EPF_TIMER_IRQ_FACT_TAG: u32 = 0x5449_4d52;
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const STAGE_CORE0_START: u32 = 0x4849_0001;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const STAGE_CORE1_LAUNCHED: u32 = 0x4849_0002;
+const STAGE_RUNTIME_BEGIN: u32 = 0x4849_0004;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const STAGE_PROGRAM_READY: u32 = 0x4849_0006;
+const STAGE_RUNTIME_READY: u32 = 0x4849_000a;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const STAGE_ENGINE_RUNTIME_READY_SEEN: u32 = 0x4849_0033;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const STAGE_HARD_PANIC: u32 = 0x4849_0f00;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const STAGE_CORE1_LAUNCH_ERR: u32 = 0x4849_0f01;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const STAGE_CORE1_START_TIMEOUT: u32 = 0x4849_0f02;
+
+const PANIC_MESSAGE_BYTES: usize = 384;
+
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_RESULT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_FAILURE_STAGE: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_PC: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_LR: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_R0: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_R1: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_R2: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_R3: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_R12: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_SP: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_R4: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_R5: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_R6: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_R7: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_HARDFAULT_STACK: [u32; 80] = [0; 80];
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_CORE0_STACK_MAX_USED_BYTES: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_CORE1_STACK_MAX_USED_BYTES: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_CORE0_STAGE: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_CORE1_STAGE: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_PANIC_FILE_HASH: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_PANIC_LINE: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_PANIC_COLUMN: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_PANIC_MESSAGE_HASH: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_PANIC_MESSAGE_LEN: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_PANIC_MESSAGE_TOTAL_LEN: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_DEMO_PANIC_MESSAGE: [u8; PANIC_MESSAGE_BYTES] = [0; PANIC_MESSAGE_BYTES];
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE0_EPOCH: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE0_KIND: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE0_REASON: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE0_ARG0: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE0_ARG1: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE0_ARG2: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE0_FUEL_USED: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE1_EPOCH: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE1_KIND: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE1_REASON: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE1_ARG0: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE1_ARG1: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE1_ARG2: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE1_FUEL_USED: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_LOAD_EPOCH: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_IMAGE_DIGEST: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_LOAD_REASON: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_ACTIVE_TARGET_KIND: u32 = EPF_TARGET_OBSERVE;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_ACTIVE_POLICY_ID: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_POLICY_TIMER_IRQ_READY: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_POLICY_TIMER_FACT_KIND: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_POLICY_TIMER_FACT_ARG0: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_POLICY_TIMER_FACT_FUEL: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_UART0_READY: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_UART_RX_BYTES: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_UART_RX_READY: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_UART_RX_REJECTS: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_UART_RX_LAST_BYTE: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_UART_RX_LAST_REJECT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_UART_RX_PARSER_POS: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_UART_FR: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_UART_CR: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_UART_IMSC: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_UART_RIS: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_UART_MIS: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_UART_IMAGE_LEN: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_UART_IMAGE_HASH: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_UART_TX_RECORDS: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_UART_TX_HEARTBEATS: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_UART_IMAGE: [u8; EPF_BYTECODE_BYTES] = [0; EPF_BYTECODE_BYTES];
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+static mut HIBANA_EPF_UART_RX_POS: u32 = 0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+static mut HIBANA_EPF_UART_RX_LEN: u32 = 0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+static mut HIBANA_EPF_UART_RX_HASH: u32 = 0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+static mut HIBANA_EPF_UART_RX_RUNNING_HASH: u32 = 0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+static mut HIBANA_EPF_UART_INGRESS: hibana_epf::ImageIngress<EPF_BYTECODE_BYTES> =
+    hibana_epf::ImageIngress::new();
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_IMAGE_INGRESS: u32 = EPF_INGRESS_NONE;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_BYTECODE_STATE: u32 = EPF_BYTECODE_STATE_EMPTY;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_BYTECODE_LEN: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_BYTECODE_HASH: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_BYTECODE_IMAGE: [u8; EPF_BYTECODE_BYTES] = [0; EPF_BYTECODE_BYTES];
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_ACTIVE_IMAGE: [u8; EPF_BYTECODE_BYTES] = [0; EPF_BYTECODE_BYTES];
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_ACTIVE_LEN: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE0_TAP_SPOOL: [MaybeUninit<hibana::runtime::tap::TapEvent>;
+    EPF_TAP_SPOOL_EVENTS] = [const { MaybeUninit::uninit() }; EPF_TAP_SPOOL_EVENTS];
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE0_TAP_SPOOL_LEN: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE0_TAP_SPOOL_READ: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE0_IMAGE_DIGEST: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_TAP_SPOOL: [MaybeUninit<hibana::runtime::tap::TapEvent>;
+    EPF_TAP_SPOOL_EVENTS] = [const { MaybeUninit::uninit() }; EPF_TAP_SPOOL_EVENTS];
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_TAP_SPOOL_LEN: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_TAP_SPOOL_READ: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE1_IMAGE_DIGEST: u32 = 0;
+static mut HIBANA_EPF_CORE0_STORAGE: hibana_epf::EpfStorage<
+    EPF_POLICY_SLOTS,
+    EPF_BYTECODE_BYTES,
+    0,
+    4,
+> = hibana_epf::EpfStorage::new();
+static mut HIBANA_EPF_CORE1_STORAGE: hibana_epf::EpfStorage<
+    EPF_POLICY_SLOTS,
+    EPF_BYTECODE_BYTES,
+    0,
+    4,
+> = hibana_epf::EpfStorage::new();
+static mut HIBANA_EPF_CORE0_VIEW_INIT: u32 = 0;
+static mut HIBANA_EPF_CORE1_VIEW_INIT: u32 = 0;
+static mut HIBANA_EPF_CORE0_VIEW: core::mem::MaybeUninit<
+    hibana_epf::Epf<'static, EPF_POLICY_SLOTS, EPF_BYTECODE_BYTES, 0, 4>,
+> = core::mem::MaybeUninit::uninit();
+static mut HIBANA_EPF_CORE1_VIEW: core::mem::MaybeUninit<
+    hibana_epf::Epf<'static, EPF_POLICY_SLOTS, EPF_BYTECODE_BYTES, 0, 4>,
+> = core::mem::MaybeUninit::uninit();
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_ENGINE_STATUS: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_ENGINE_ERROR_CODE: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_DRIVER_TRACE: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TRACE_CORE0_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TRACE_CORE0: [u32; 16] = [0; 16];
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TRACE_CORE1_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TRACE_CORE1: [u32; 16] = [0; 16];
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_CORE0_TO_CORE1_TX_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_CORE0_TO_CORE1_RX_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_CORE1_TO_CORE0_TX_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_CORE1_TO_CORE0_RX_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_ROLE1_PENDING_SEEN_CORE0_TX: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_ROLE1_POLL_SEEN_CORE0_TX: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_ROLE1_READY_SEEN_CORE0_TX: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_PATH_OPEN_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_FD_WRITE_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_POLL_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_LAST_POLL_TICKS_LO: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_LAST_POLL_TICKS_HI: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_LAST_OBJECT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_LED_MASK: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SEEN_LED_MASK: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_RP2W_DISPLAY_PAYLOAD_LEN: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_RP2W_DISPLAY_PAYLOAD_HASH: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_RP2W_DISPLAY_HW_STATUS: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_RP2W_DISPLAY_HW_WRITES: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_RP2W_DISPLAY_HW_ADDR: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_RP2W_DISPLAY_HW_PINS: u32 = 0;
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+static mut CORE1_STARTED: u32 = 0;
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const SIO_BASE: usize = 0xd000_0000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const SIO_FIFO_ST: *const u32 = (SIO_BASE + 0x50) as *const u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const SIO_FIFO_ST_WRITE: *mut u32 = (SIO_BASE + 0x50) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const SIO_FIFO_WR: *mut u32 = (SIO_BASE + 0x54) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const SIO_FIFO_RD: *const u32 = (SIO_BASE + 0x58) as *const u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const FIFO_VLD: u32 = 1 << 0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const FIFO_RDY: u32 = 1 << 1;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const FIFO_WOF: u32 = 1 << 2;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const FIFO_ROE: u32 = 1 << 3;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const PSM_BASE: usize = 0x4001_8000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const PSM_FRCE_OFF: *mut u32 = (PSM_BASE + 0x04) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const PSM_PROC1: u32 = 1 << 24;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const CORE1_LAUNCH_RETRIES: u8 = 16;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const IO_BANK0_BASE: usize = 0x4002_8000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const PADS_BANK0_BASE: usize = 0x4003_8000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RESETS_BASE: usize = 0x4002_0000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RESETS_RESET_SET: *mut u32 = (RESETS_BASE + 0x2000) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RESETS_RESET_CLR: *mut u32 = (RESETS_BASE + 0x3000) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RESETS_RESET_DONE: *const u32 = (RESETS_BASE + 0x08) as *const u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RESETS_PLL_SYS: u32 = 1 << 14;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RESETS_IO_BANK0: u32 = 1 << 6;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RESETS_PADS_BANK0: u32 = 1 << 9;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RESETS_I2C0: u32 = 1 << 4;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RESETS_I2C1: u32 = 1 << 5;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RESETS_UART0: u32 = 1 << 26;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const GPIO_OUT_SET: *mut u32 = (SIO_BASE + 0x18) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const GPIO_OUT_CLR: *mut u32 = (SIO_BASE + 0x20) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const GPIO_OE_SET: *mut u32 = (SIO_BASE + 0x38) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const GPIO_FUNC_SIO: u32 = 5;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const GPIO_FUNC_I2C: u32 = 3;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const GPIO_FUNC_UART: u32 = 2;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const GPIO_PAD_DEFAULT: u32 = 0x56;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UART0_BASE: usize = 0x4007_0000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UART0_DR: *mut u32 = UART0_BASE as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UART0_FR: *const u32 = (UART0_BASE + 0x18) as *const u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UART0_IBRD: *mut u32 = (UART0_BASE + 0x24) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UART0_FBRD: *mut u32 = (UART0_BASE + 0x28) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UART0_LCR_H: *mut u32 = (UART0_BASE + 0x2c) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UART0_CR: *mut u32 = (UART0_BASE + 0x30) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UART0_IMSC: *mut u32 = (UART0_BASE + 0x38) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UART0_RIS: *const u32 = (UART0_BASE + 0x3c) as *const u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UART0_MIS: *const u32 = (UART0_BASE + 0x40) as *const u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UART0_ICR: *mut u32 = (UART0_BASE + 0x44) as *mut u32;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UART0_DMACR: *mut u32 = (UART0_BASE + 0x48) as *mut u32;
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const I2C0_BASE: usize = 0x4009_0000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const I2C1_BASE: usize = 0x4009_8000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UARTFR_RXFE: u32 = 1 << 4;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UARTFR_TXFF: u32 = 1 << 5;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UARTLCR_H_WLEN_8: u32 = 0x60;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UARTLCR_H_FEN: u32 = 1 << 4;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UARTCR_UARTEN: u32 = 1 << 0;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UARTCR_TXE: u32 = 1 << 8;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UARTCR_RXE: u32 = 1 << 9;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UARTIMSC_RXIM: u32 = 1 << 4;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UARTIMSC_RTIM: u32 = 1 << 6;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const UARTICR_ALL: u32 = 0x07ff;
+
+const RP2W_SAFE_STATE_LED_PINS: [u8; 3] = [22, 21, 20];
+
+pub trait Rp2wCapsuleFacts: appkit::Capsule<Placement = Rp2wPlacement> + 'static {
+    const SUCCESS_RESULT: u32 = RESULT_SUCCESS;
+    const SIO_OPERATIONAL_DEADLINE_TICKS: u32 = 0;
+    const SIO_ROLE0_TX_SESSION_XOR: u32 = 0;
+    const SIO_ROLE1_TX_SESSION_XOR: u32 = 0;
+    const DRIVER_REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(0);
+    const ENGINE_REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(1);
+
+    fn run_engine_image();
+
+    fn driver_facts() -> appkit::DriverFacts<'static> {
+        appkit::DriverFacts::new(
+            appkit::ChoreoFsFacts::new(&[]),
+            appkit::LedgerFacts::new(&[]),
+        )
+    }
+}
+
+struct Rp2wSioTransport<C>
+where
+    C: Rp2wCapsuleFacts + 'static,
+{
+    inner: rp2350_sio::SioTransport,
+    capsule: core::marker::PhantomData<fn() -> C>,
+}
+
+impl<C> Rp2wSioTransport<C>
+where
+    C: Rp2wCapsuleFacts + 'static,
+{
+    const fn new() -> Self {
+        Self {
+            inner: rp2350_sio::SioTransport::new(),
+            capsule: core::marker::PhantomData,
+        }
+    }
+}
+
+impl<C> Clone for Rp2wSioTransport<C>
+where
+    C: Rp2wCapsuleFacts,
+{
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
+impl<C> Copy for Rp2wSioTransport<C> where C: Rp2wCapsuleFacts {}
+
+impl<C> hibana::runtime::transport::Transport for Rp2wSioTransport<C>
+where
+    C: Rp2wCapsuleFacts,
+{
+    type Tx<'a>
+        = <rp2350_sio::SioTransport as hibana::runtime::transport::Transport>::Tx<'a>
+    where
+        Self: 'a;
+    type Rx<'a>
+        = <rp2350_sio::SioTransport as hibana::runtime::transport::Transport>::Rx<'a>
+    where
+        Self: 'a;
+    fn open<'a>(
+        &'a self,
+        port: hibana::runtime::transport::PortOpen,
+    ) -> (Self::Tx<'a>, Self::Rx<'a>) {
+        let tx_session_xor = match port.local_role() {
+            0 => C::SIO_ROLE0_TX_SESSION_XOR,
+            1 => C::SIO_ROLE1_TX_SESSION_XOR,
+            2 => 0,
+            other => panic!("rp2w SIO transport has no tx session xor for role {other}"),
+        };
+        self.inner
+            .open_with_tx_session_xor(port, tx_session_xor, C::SIO_OPERATIONAL_DEADLINE_TICKS)
+    }
+
+    fn poll_send<'a, 'f>(
+        &self,
+        tx: &'a mut Self::Tx<'a>,
+        outgoing: hibana::runtime::transport::Outgoing<'f>,
+        context: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Result<(), hibana::runtime::transport::TransportError>>
+    where
+        'a: 'f,
+    {
+        hibana::runtime::transport::Transport::poll_send(&self.inner, tx, outgoing, context)
+    }
+
+    fn cancel_send<'a>(&self, tx: &'a mut Self::Tx<'a>) {
+        hibana::runtime::transport::Transport::cancel_send(&self.inner, tx);
+    }
+
+    fn poll_recv<'a>(
+        &'a self,
+        rx: &'a mut Self::Rx<'a>,
+        context: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<
+        Result<
+            hibana::runtime::transport::ReceivedFrame<'a>,
+            hibana::runtime::transport::TransportError,
+        >,
+    > {
+        hibana::runtime::transport::Transport::poll_recv(&self.inner, rx, context)
+    }
+
+    fn requeue<'a>(
+        &self,
+        rx: &mut Self::Rx<'a>,
+    ) -> Result<(), hibana::runtime::transport::TransportError> {
+        hibana::runtime::transport::Transport::requeue(&self.inner, rx)
+    }
+}
+
+impl<C> appkit::Placement<C> for Rp2wPlacement
+where
+    C: appkit::Capsule<Placement = Rp2wPlacement>,
+{
+    fn role_kind(role: u8) -> appkit::RoleKind {
+        match role {
+            1 => appkit::RoleKind::Engine,
+            0 => appkit::RoleKind::Driver,
+            2 => appkit::RoleKind::Boundary,
+            other => panic!("rp2w placement has no role {other}"),
+        }
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn rp2w_poll_delay(timeout_ms: u64) {
+    rp2w_timer_route_arm(timeout_ms);
+    while !rp2w_timer_route_ready() {
+        unsafe {
+            asm!("wfi", options(nomem, nostack, preserves_flags));
+        }
+    }
+    rp2w_timer_route_finish();
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub fn rp2w_poll_delay(timeout_ms: u64) {
+    core::hint::black_box(timeout_ms);
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn rp2w_timer_route_resolver_ready(timeout_ms: u64) -> bool {
+    unsafe {
+        if read_volatile(core::ptr::addr_of!(RP2W_TIMER_ROUTE_ARMED)) == 0 {
+            write_volatile(core::ptr::addr_of_mut!(RP2W_TIMER_ROUTE_ARMED), 1);
+            rp2w_timer_route_arm(timeout_ms);
+            return false;
+        }
+    }
+
+    if !rp2w_timer_route_ready() {
+        return false;
+    }
+
+    rp2w_timer_route_finish();
+    unsafe {
+        write_volatile(core::ptr::addr_of_mut!(RP2W_TIMER_ROUTE_ARMED), 0);
+    }
+    true
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub fn rp2w_timer_route_resolver_ready(timeout_ms: u64) -> bool {
+    core::hint::black_box(timeout_ms);
+    true
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn rp2w_timer_route_irq_observed() -> bool {
+    unsafe { read_volatile(core::ptr::addr_of!(RP2W_TIMER_ALARM0_READY)) != 0 }
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub fn rp2w_timer_route_irq_observed() -> bool {
+    true
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn rp2w_wait_timer_route_irq_observed(timeout_ms: u64) -> bool {
+    let start = unsafe { read_volatile(TIMER_TIMERAWL) };
+    let timeout_ticks = core::cmp::min(
+        timeout_ms.saturating_mul(RP2W_TIMER_TICKS_PER_MS),
+        u32::MAX as u64,
+    ) as u32;
+    loop {
+        if rp2w_timer_route_irq_observed() {
+            return true;
+        }
+        let now = unsafe { read_volatile(TIMER_TIMERAWL) };
+        if now.wrapping_sub(start) >= timeout_ticks {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub fn rp2w_wait_timer_route_irq_observed(timeout_ms: u64) -> bool {
+    core::hint::black_box(timeout_ms);
+    true
+}
+
+fn record_epf_policy_timer_irq_ready() {
+    let ready = if rp2w_timer_route_irq_observed() {
+        1
+    } else {
+        0
+    };
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_POLICY_TIMER_IRQ_READY),
+        ready,
+    );
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn reset_deassert(mask: u32) {
+    unsafe {
+        write_volatile(RESETS_RESET_CLR, mask);
+        while read_volatile(RESETS_RESET_DONE) & mask != mask {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn rp2w_epf_uart0_init() {
+    rp2w_gpio_bank_init();
+    reset_deassert(RESETS_UART0);
+    unsafe {
+        write_volatile(gpio_pad(0), GPIO_PAD_DEFAULT);
+        write_volatile(gpio_pad(1), GPIO_PAD_DEFAULT);
+        write_volatile(gpio_ctrl(0), GPIO_FUNC_UART);
+        write_volatile(gpio_ctrl(1), GPIO_FUNC_UART);
+        write_volatile(UART0_CR, 0);
+        write_volatile(UART0_ICR, UARTICR_ALL);
+        write_volatile(UART0_DMACR, 0);
+        write_volatile(UART0_IBRD, 67);
+        write_volatile(UART0_FBRD, 52);
+        write_volatile(UART0_LCR_H, UARTLCR_H_WLEN_8 | UARTLCR_H_FEN);
+        write_volatile(UART0_IMSC, UARTIMSC_RXIM | UARTIMSC_RTIM);
+        write_volatile(UART0_CR, UARTCR_UARTEN | UARTCR_TXE | UARTCR_RXE);
+        record_uart0_register_markers();
+        nvic_clear_pending(NVIC_UART0_IRQ);
+        nvic_enable_irq(NVIC_UART0_IRQ);
+        write_volatile(core::ptr::addr_of_mut!(HIBANA_EPF_UART0_READY), 1);
+        asm!("cpsie i", options(nomem, nostack, preserves_flags));
+    }
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub fn rp2w_epf_uart0_init() {
+    write_marker(core::ptr::addr_of_mut!(HIBANA_EPF_UART0_READY), 1);
+}
+
+pub fn rp2w_epf_uart_image_ready() -> bool {
+    read_marker(core::ptr::addr_of!(HIBANA_EPF_UART_RX_READY)) != 0
+}
+
+pub fn rp2w_epf_uart_clear_image_ready() {
+    write_marker(core::ptr::addr_of_mut!(HIBANA_EPF_UART_RX_READY), 0);
+}
+
+pub fn rp2w_epf_policy_image_ready() -> bool {
+    let committed_state = read_marker(core::ptr::addr_of!(HIBANA_EPF_BYTECODE_STATE));
+    let committed_len = read_marker(core::ptr::addr_of!(HIBANA_EPF_BYTECODE_LEN)) as usize;
+    if committed_state == EPF_BYTECODE_STATE_COMMIT && committed_len == EPF_BYTECODE_BYTES {
+        return true;
+    }
+    let active_len = read_marker(core::ptr::addr_of!(HIBANA_EPF_ACTIVE_LEN)) as usize;
+    active_len == EPF_BYTECODE_BYTES
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn record_uart0_register_markers() {
+    unsafe {
+        write_volatile(
+            core::ptr::addr_of_mut!(HIBANA_EPF_UART_FR),
+            read_volatile(UART0_FR),
+        );
+        write_volatile(
+            core::ptr::addr_of_mut!(HIBANA_EPF_UART_CR),
+            read_volatile(UART0_CR),
+        );
+        write_volatile(
+            core::ptr::addr_of_mut!(HIBANA_EPF_UART_IMSC),
+            read_volatile(UART0_IMSC),
+        );
+        write_volatile(
+            core::ptr::addr_of_mut!(HIBANA_EPF_UART_RIS),
+            read_volatile(UART0_RIS),
+        );
+        write_volatile(
+            core::ptr::addr_of_mut!(HIBANA_EPF_UART_MIS),
+            read_volatile(UART0_MIS),
+        );
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_uart0_drain_rx() {
+    unsafe {
+        while read_volatile(UART0_FR) & UARTFR_RXFE == 0 {
+            let byte = (read_volatile(UART0_DR) & 0xff) as u8;
+            rp2w_uart_rx_byte(byte);
+        }
+        record_uart0_register_markers();
+    }
+}
+
+pub fn rp2w_wait_epf_uart_image_ready(timeout_ms: u64) -> bool {
+    #[cfg(all(target_arch = "arm", target_os = "none"))]
+    {
+        let start = unsafe { read_volatile(TIMER_TIMERAWL) };
+        let mut next_heartbeat = start;
+        let timeout_ticks = core::cmp::min(
+            timeout_ms.saturating_mul(RP2W_TIMER_TICKS_PER_MS),
+            u32::MAX as u64,
+        ) as u32;
+        loop {
+            rp2w_uart0_drain_rx();
+            if rp2w_epf_uart_image_ready() {
+                return true;
+            }
+            let now = unsafe { read_volatile(TIMER_TIMERAWL) };
+            if now.wrapping_sub(next_heartbeat) < 0x8000_0000 {
+                rp2w_uart0_write_heartbeat();
+                next_heartbeat = now.wrapping_add(250_000);
+            }
+            if now.wrapping_sub(start) >= timeout_ticks {
+                return false;
+            }
+            core::hint::spin_loop();
+        }
+    }
+    #[cfg(not(all(target_arch = "arm", target_os = "none")))]
+    {
+        core::hint::black_box(timeout_ms);
+        true
+    }
+}
+
+pub fn read_epf_uart_image<const N: usize>(out: &mut [u8; N]) -> bool {
+    let len = read_marker(core::ptr::addr_of!(HIBANA_EPF_UART_IMAGE_LEN)) as usize;
+    if len != N || len > EPF_BYTECODE_BYTES {
+        return false;
+    }
+    let base = core::ptr::addr_of!(HIBANA_EPF_UART_IMAGE).cast::<u8>();
+    let mut index = 0usize;
+    while index < N {
+        out[index] = unsafe { core::ptr::read_volatile(base.add(index)) };
+        index += 1;
+    }
+    true
+}
+
+pub fn read_epf_policy_image<const N: usize>(out: &mut [u8; N]) -> bool {
+    if N > EPF_BYTECODE_BYTES {
+        return false;
+    }
+    let committed_state = read_marker(core::ptr::addr_of!(HIBANA_EPF_BYTECODE_STATE));
+    let committed_len = read_marker(core::ptr::addr_of!(HIBANA_EPF_BYTECODE_LEN)) as usize;
+    if committed_state == EPF_BYTECODE_STATE_COMMIT && committed_len == N {
+        let base = core::ptr::addr_of!(HIBANA_EPF_BYTECODE_IMAGE).cast::<u8>();
+        let mut index = 0usize;
+        while index < N {
+            out[index] = unsafe { core::ptr::read_volatile(base.add(index)) };
+            index += 1;
+        }
+        return true;
+    }
+    let active_len = read_marker(core::ptr::addr_of!(HIBANA_EPF_ACTIVE_LEN)) as usize;
+    if active_len == N {
+        let base = core::ptr::addr_of!(HIBANA_EPF_ACTIVE_IMAGE).cast::<u8>();
+        let mut index = 0usize;
+        while index < N {
+            out[index] = unsafe { core::ptr::read_volatile(base.add(index)) };
+            index += 1;
+        }
+        return true;
+    }
+    false
+}
+
+pub fn load_epf_uart_choreography_image(image: &[u8]) -> bool {
+    let digest = epf_hash_image(image.as_ptr(), image.len());
+    epf_load_image(image, digest, EPF_INGRESS_UART_CHOREOGRAPHY)
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_uart0_write_byte(byte: u8) {
+    while unsafe { read_volatile(UART0_FR) } & UARTFR_TXFF != 0 {
+        core::hint::spin_loop();
+    }
+    unsafe {
+        write_volatile(UART0_DR, u32::from(byte));
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_uart0_write_epf_out(out: hibana_epf::Out) {
+    if unsafe { read_volatile(core::ptr::addr_of!(HIBANA_EPF_UART0_READY)) } == 0 {
+        return;
+    }
+    let record = hibana_epf::CompactOutRecord::from_out(marker_core_id() as u8, out);
+    let mut bytes = [0u8; hibana_epf::CompactOutRecord::SIZE];
+    record.encode(&mut bytes);
+    for byte in bytes {
+        rp2w_uart0_write_byte(byte);
+    }
+    increment_marker(core::ptr::addr_of_mut!(HIBANA_EPF_UART_TX_RECORDS));
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_uart0_write_heartbeat() {
+    if unsafe { read_volatile(core::ptr::addr_of!(HIBANA_EPF_UART0_READY)) } == 0 {
+        return;
+    }
+    rp2w_uart0_write_byte(b'H');
+    rp2w_uart0_write_byte(b'E');
+    rp2w_uart0_write_byte(b'P');
+    rp2w_uart0_write_byte(b'R');
+    increment_marker(core::ptr::addr_of_mut!(HIBANA_EPF_UART_TX_HEARTBEATS));
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+fn rp2w_uart0_write_epf_out(out: hibana_epf::Out) {
+    core::hint::black_box(out);
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_uart_rx_reject(reason: hibana_epf::ImageIngressReject, byte: u8) {
+    increment_marker(core::ptr::addr_of_mut!(HIBANA_EPF_UART_RX_REJECTS));
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_UART_RX_LAST_REJECT),
+        epf_uart_reject_code(reason, byte),
+    );
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn epf_uart_reject_code(reason: hibana_epf::ImageIngressReject, byte: u8) -> u32 {
+    let code = match reason {
+        hibana_epf::ImageIngressReject::BadMagic { position, .. } => {
+            0x0100_0000 | u32::from(position)
+        }
+        hibana_epf::ImageIngressReject::EmptyImage => 0x0200_0000,
+        hibana_epf::ImageIngressReject::ImageTooLarge { .. } => 0x0300_0000,
+        hibana_epf::ImageIngressReject::HashMismatch { .. } => 0x0400_0000,
+        hibana_epf::ImageIngressReject::Overrun => 0x0500_0000,
+    };
+    code | u32::from(byte)
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_uart_rx_byte(byte: u8) {
+    increment_marker(core::ptr::addr_of_mut!(HIBANA_EPF_UART_RX_BYTES));
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_UART_RX_LAST_BYTE),
+        u32::from(byte),
+    );
+    let ingress = unsafe { &mut *core::ptr::addr_of_mut!(HIBANA_EPF_UART_INGRESS) };
+    let status = ingress.push(byte);
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_UART_RX_PARSER_POS),
+        ingress.position() as u32,
+    );
+    unsafe {
+        write_volatile(
+            core::ptr::addr_of_mut!(HIBANA_EPF_UART_RX_POS),
+            ingress.position() as u32,
+        );
+        write_volatile(
+            core::ptr::addr_of_mut!(HIBANA_EPF_UART_RX_LEN),
+            ingress.staged_len() as u32,
+        );
+        write_volatile(
+            core::ptr::addr_of_mut!(HIBANA_EPF_UART_RX_HASH),
+            ingress.expected_hash(),
+        );
+        write_volatile(
+            core::ptr::addr_of_mut!(HIBANA_EPF_UART_RX_RUNNING_HASH),
+            ingress.running_hash(),
+        );
+    }
+
+    match status {
+        hibana_epf::ImageIngressStatus::Pending => {}
+        hibana_epf::ImageIngressStatus::Rejected(reason) => {
+            rp2w_uart_rx_reject(reason, byte);
+            unsafe {
+                write_volatile(
+                    core::ptr::addr_of_mut!(HIBANA_EPF_UART_RX_POS),
+                    ingress.position() as u32,
+                );
+                write_volatile(
+                    core::ptr::addr_of_mut!(HIBANA_EPF_UART_RX_LEN),
+                    ingress.staged_len() as u32,
+                );
+                write_volatile(
+                    core::ptr::addr_of_mut!(HIBANA_EPF_UART_RX_HASH),
+                    ingress.expected_hash(),
+                );
+                write_volatile(
+                    core::ptr::addr_of_mut!(HIBANA_EPF_UART_RX_RUNNING_HASH),
+                    ingress.running_hash(),
+                );
+            }
+        }
+        hibana_epf::ImageIngressStatus::Ready { len, hash } => {
+            let Some(image) = ingress.image() else {
+                return;
+            };
+            unsafe {
+                let target = core::ptr::addr_of_mut!(HIBANA_EPF_UART_IMAGE).cast::<u8>();
+                let mut index = 0usize;
+                while index < len {
+                    write_volatile(target.add(index), image[index]);
+                    index += 1;
+                }
+                write_volatile(
+                    core::ptr::addr_of_mut!(HIBANA_EPF_UART_IMAGE_LEN),
+                    len as u32,
+                );
+                write_volatile(core::ptr::addr_of_mut!(HIBANA_EPF_UART_IMAGE_HASH), hash);
+                write_volatile(core::ptr::addr_of_mut!(HIBANA_EPF_UART_RX_READY), 1);
+                write_volatile(core::ptr::addr_of_mut!(HIBANA_EPF_UART_RX_POS), 0);
+            }
+            ingress.clear_ready();
+            event();
+        }
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_timer_route_arm(timeout_ms: u64) {
+    let delay_ticks = core::cmp::min(
+        timeout_ms.saturating_mul(RP2W_TIMER_TICKS_PER_MS),
+        u32::MAX as u64,
+    );
+    let delay_ticks = core::cmp::max(delay_ticks as u32, 1);
+    let alarm = unsafe { read_volatile(TIMER_TIMERAWL) }.wrapping_add(delay_ticks);
+    unsafe {
+        write_volatile(TIMER_DBGPAUSE, 0);
+        write_volatile(core::ptr::addr_of_mut!(RP2W_TIMER_ALARM0_READY), 0);
+        write_volatile(TIMER_INTR, TIMER_ALARM0_BIT);
+        nvic_clear_pending(NVIC_TIMER_IRQ0);
+        write_volatile(TIMER_INTE, read_volatile(TIMER_INTE) | TIMER_ALARM0_BIT);
+        nvic_enable_irq(NVIC_TIMER_IRQ0);
+        write_volatile(TIMER_ALARM0, alarm);
+        asm!("cpsie i", options(nomem, nostack, preserves_flags));
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_timer_route_ready() -> bool {
+    unsafe { read_volatile(core::ptr::addr_of!(RP2W_TIMER_ALARM0_READY)) != 0 }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_timer_route_finish() {
+    unsafe {
+        write_volatile(TIMER_INTE, read_volatile(TIMER_INTE) & !TIMER_ALARM0_BIT);
+        write_volatile(TIMER_INTR, TIMER_ALARM0_BIT);
+    }
+}
+
+fn park() -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn epf_panic_park() -> ! {
+    loop {
+        poll_epf_panic_diagnostic();
+        core::hint::spin_loop();
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+unsafe extern "C" fn unhandled_exception_handler() -> ! {
+    record_failure_stage(STAGE_HARD_PANIC);
+    mark_result(RESULT_FAILURE);
+    park()
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+unsafe extern "C" fn unhandled_irq_handler() {
+    unsafe {
+        unhandled_exception_handler();
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+unsafe extern "C" fn timer_alarm0_irq_handler() {
+    unsafe {
+        write_volatile(TIMER_INTR, TIMER_ALARM0_BIT);
+        write_volatile(core::ptr::addr_of_mut!(RP2W_TIMER_ALARM0_READY), 1);
+        asm!("sev", options(nomem, nostack, preserves_flags));
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+unsafe extern "C" fn uart0_irq_handler() {
+    unsafe {
+        rp2w_uart0_drain_rx();
+        write_volatile(UART0_ICR, UARTICR_ALL);
+        asm!("sev", options(nomem, nostack, preserves_flags));
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn hard_fault_handler_with_sp(sp: *const u32) -> ! {
+    record_hard_fault_frame(sp);
+    record_failure_stage(STAGE_HARD_PANIC);
+    mark_result(RESULT_FAILURE);
+    park()
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn record_hard_fault_frame(sp: *const u32) {
+    unsafe {
+        let stacked_r0 = core::ptr::read_volatile(sp);
+        let stacked_r1 = core::ptr::read_volatile(sp.add(1));
+        let stacked_r2 = core::ptr::read_volatile(sp.add(2));
+        let stacked_r3 = core::ptr::read_volatile(sp.add(3));
+        let stacked_r12 = core::ptr::read_volatile(sp.add(4));
+        let stacked_lr = core::ptr::read_volatile(sp.add(5));
+        let stacked_pc = core::ptr::read_volatile(sp.add(6));
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_HARDFAULT_R0),
+            stacked_r0,
+        );
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_HARDFAULT_R1),
+            stacked_r1,
+        );
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_HARDFAULT_R2),
+            stacked_r2,
+        );
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_HARDFAULT_R3),
+            stacked_r3,
+        );
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_HARDFAULT_R12),
+            stacked_r12,
+        );
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_HARDFAULT_LR),
+            stacked_lr,
+        );
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_HARDFAULT_PC),
+            stacked_pc,
+        );
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(HIBANA_DEMO_HARDFAULT_SP), sp as u32);
+        let mut index = 0usize;
+        while index < 80 {
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!(HIBANA_DEMO_HARDFAULT_STACK[index]),
+                core::ptr::read_volatile(sp.add(index)),
+            );
+            index += 1;
+        }
+    }
+}
+
+fn marker_core_id() -> u32 {
+    rp2350_sio::core_id()
+}
+
+fn marker_stage_slot() -> *mut u32 {
+    if marker_core_id() == 0 {
+        core::ptr::addr_of_mut!(HIBANA_DEMO_CORE0_STAGE)
+    } else {
+        core::ptr::addr_of_mut!(HIBANA_DEMO_CORE1_STAGE)
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn marker_stack_slot() -> *mut u32 {
+    if marker_core_id() == 0 {
+        core::ptr::addr_of_mut!(HIBANA_DEMO_CORE0_STACK_MAX_USED_BYTES)
+    } else {
+        core::ptr::addr_of_mut!(HIBANA_DEMO_CORE1_STACK_MAX_USED_BYTES)
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn record_stack_high_water() {
+    let sp: u32;
+    unsafe {
+        asm!("mov {0}, sp", out(reg) sp, options(nomem, nostack, preserves_flags));
+    }
+    let (top, limit) = if marker_core_id() == 0 {
+        (
+            core::ptr::addr_of!(__stack_top) as u32,
+            core::ptr::addr_of!(__core1_stack_top) as u32,
+        )
+    } else {
+        (
+            core::ptr::addr_of!(__core1_stack_top) as u32,
+            core::ptr::addr_of!(__stack_limit) as u32,
+        )
+    };
+    if sp < limit || sp > top {
+        return;
+    }
+    let used = top.saturating_sub(sp);
+    let slot = marker_stack_slot();
+    unsafe {
+        let current = read_volatile(slot);
+        if used > current {
+            write_volatile(slot, used);
+        }
+    }
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+fn record_stack_high_water() {}
+
+fn mark_stage(stage: u32) {
+    record_stack_high_water();
+    unsafe {
+        core::ptr::write_volatile(marker_stage_slot(), stage);
+    }
+    #[cfg(all(target_arch = "arm", target_os = "none"))]
+    event();
+}
+
+fn mark_result(result: u32) {
+    record_stack_high_water();
+    unsafe {
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(HIBANA_DEMO_RESULT), result);
+    }
+    #[cfg(all(target_arch = "arm", target_os = "none"))]
+    event();
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn record_failure_stage(stage: u32) {
+    unsafe {
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(HIBANA_DEMO_FAILURE_STAGE), stage);
+    }
+}
+
+fn write_marker(slot: *mut u32, value: u32) {
+    unsafe {
+        core::ptr::write_volatile(slot, value);
+    }
+}
+
+fn epf_hash_image(ptr: *const u8, len: usize) -> u32 {
+    if len > EPF_BYTECODE_BYTES {
+        return 0;
+    }
+    let mut image = [0u8; EPF_BYTECODE_BYTES];
+    let mut index = 0usize;
+    while index < len {
+        image[index] = unsafe { core::ptr::read_volatile(ptr.add(index)) };
+        index += 1;
+    }
+    hibana_epf::compute_hash(&image[..len])
+}
+
+fn epf_load_epoch_slot() -> *mut u32 {
+    core::ptr::addr_of_mut!(HIBANA_EPF_LOAD_EPOCH)
+}
+
+fn epf_bytecode_image_ptr() -> *const u8 {
+    core::ptr::addr_of!(HIBANA_EPF_BYTECODE_IMAGE) as *const u8
+}
+
+fn epf_active_image_ptr() -> *mut u8 {
+    core::ptr::addr_of_mut!(HIBANA_EPF_ACTIVE_IMAGE) as *mut u8
+}
+
+type Rp2wEpf = hibana_epf::Epf<'static, EPF_POLICY_SLOTS, EPF_BYTECODE_BYTES, 0, 4>;
+type Rp2wEpfStorage = hibana_epf::EpfStorage<'static, EPF_POLICY_SLOTS, EPF_BYTECODE_BYTES, 0, 4>;
+
+fn epf_view(
+    init: *mut u32,
+    view: *mut core::mem::MaybeUninit<Rp2wEpf>,
+    storage: *mut Rp2wEpfStorage,
+) -> &'static Rp2wEpf {
+    unsafe {
+        if core::ptr::read_volatile(init) == 0 {
+            (*view).write(Rp2wEpf::from_raw_storage(storage));
+            core::ptr::write_volatile(init, 1);
+        }
+        &*(*view).as_ptr()
+    }
+}
+
+fn epf() -> &'static Rp2wEpf {
+    if marker_core_id() == 0 {
+        epf_view(
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_VIEW_INIT),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_VIEW),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_STORAGE),
+        )
+    } else {
+        epf_view(
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE1_VIEW_INIT),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE1_VIEW),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE1_STORAGE),
+        )
+    }
+}
+
+pub fn epf_policy_resolver<const POLICY_ID: u16>(
+    base: hibana::runtime::resolver::ResolverRef<'static, POLICY_ID>,
+) -> hibana::runtime::resolver::ResolverRef<'static, POLICY_ID> {
+    epf().resolver(base)
+}
+
+fn epf_local_image_digest_slot() -> *mut u32 {
+    if marker_core_id() == 0 {
+        core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_IMAGE_DIGEST)
+    } else {
+        core::ptr::addr_of_mut!(HIBANA_EPF_CORE1_IMAGE_DIGEST)
+    }
+}
+
+fn epf_loaded_for_core() -> bool {
+    let active_len =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_ACTIVE_LEN)) };
+    let active_digest =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_IMAGE_DIGEST)) };
+    let local_digest = unsafe { core::ptr::read_volatile(epf_local_image_digest_slot()) };
+    active_len != 0 && active_digest != 0 && local_digest == active_digest
+}
+
+pub fn epf_policy_loaded(policy_id: u16) -> bool {
+    let target =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_ACTIVE_TARGET_KIND)) };
+    let active_policy =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_ACTIVE_POLICY_ID)) };
+    epf_loaded_for_core() && target == EPF_TARGET_POLICY && active_policy == u32::from(policy_id)
+}
+
+pub fn poll_epf_image_load() {
+    epf_try_load_committed_image();
+}
+
+fn epf_spool_slots() -> (
+    *mut MaybeUninit<hibana::runtime::tap::TapEvent>,
+    *mut u32,
+    *mut u32,
+) {
+    if marker_core_id() == 0 {
+        (
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_TAP_SPOOL)
+                .cast::<MaybeUninit<hibana::runtime::tap::TapEvent>>(),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_TAP_SPOOL_LEN),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_TAP_SPOOL_READ),
+        )
+    } else {
+        (
+            core::ptr::addr_of_mut!(HIBANA_EPF_TAP_SPOOL)
+                .cast::<MaybeUninit<hibana::runtime::tap::TapEvent>>(),
+            core::ptr::addr_of_mut!(HIBANA_EPF_TAP_SPOOL_LEN),
+            core::ptr::addr_of_mut!(HIBANA_EPF_TAP_SPOOL_READ),
+        )
+    }
+}
+
+fn epf_spool_tap_event(event: hibana::runtime::tap::TapEvent) {
+    let (spool, len_slot, _) = epf_spool_slots();
+    let len = unsafe { core::ptr::read_volatile(len_slot) } as usize;
+    if len >= EPF_TAP_SPOOL_EVENTS {
+        return;
+    }
+    unsafe {
+        let slot = spool.add(len);
+        core::ptr::write_volatile(slot, MaybeUninit::new(event));
+        core::ptr::write_volatile(len_slot, (len + 1) as u32);
+    }
+}
+
+fn epf_spooled_tap_event(index: usize) -> hibana::runtime::tap::TapEvent {
+    let (spool, _, _) = epf_spool_slots();
+    unsafe {
+        let slot = spool.add(index);
+        core::ptr::read_volatile(slot).assume_init()
+    }
+}
+
+fn epf_reject_load(reason: u32) {
+    write_marker(core::ptr::addr_of_mut!(HIBANA_EPF_LOAD_REASON), reason);
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_BYTECODE_STATE),
+        EPF_BYTECODE_STATE_REJECTED,
+    );
+}
+
+fn epf_load_image(image: &[u8], digest: u32, ingress: u32) -> bool {
+    if image.is_empty() || image.len() > EPF_BYTECODE_BYTES {
+        epf_reject_load(EPF_LOAD_REASON_BAD_LEN);
+        return false;
+    }
+
+    let loaded = match epf().load(image) {
+        Ok(loaded) => loaded,
+        Err(_) => {
+            epf_reject_load(EPF_LOAD_REASON_LOAD_ERROR);
+            return false;
+        }
+    };
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(image.as_ptr(), epf_active_image_ptr(), image.len());
+    }
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_ACTIVE_LEN),
+        image.len() as u32,
+    );
+    write_marker(core::ptr::addr_of_mut!(HIBANA_EPF_IMAGE_DIGEST), digest);
+    let (target_kind, policy_id) = loaded.target().encode();
+    write_marker(epf_local_image_digest_slot(), digest);
+    write_marker(epf_load_epoch_slot(), loaded.epoch());
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_ACTIVE_TARGET_KIND),
+        u32::from(target_kind),
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_ACTIVE_POLICY_ID),
+        u32::from(policy_id),
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_LOAD_REASON),
+        EPF_LOAD_REASON_NONE,
+    );
+    write_marker(core::ptr::addr_of_mut!(HIBANA_EPF_IMAGE_INGRESS), ingress);
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_BYTECODE_STATE),
+        EPF_BYTECODE_STATE_LOADED,
+    );
+    true
+}
+
+pub fn load_epf_choreography_image(image: &[u8]) -> bool {
+    let digest = epf_hash_image(image.as_ptr(), image.len());
+    epf_load_image(image, digest, EPF_INGRESS_CHOREOGRAPHY)
+}
+
+fn epf_prepare_committed_image() {
+    let state = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_BYTECODE_STATE)) };
+    if state != EPF_BYTECODE_STATE_COMMIT {
+        return;
+    }
+
+    let len =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_BYTECODE_LEN)) } as usize;
+    if len == 0 || len > EPF_BYTECODE_BYTES {
+        epf_reject_load(EPF_LOAD_REASON_BAD_LEN);
+        return;
+    }
+
+    let image_ptr = epf_bytecode_image_ptr();
+    let expected =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_BYTECODE_HASH)) };
+    let digest = epf_hash_image(image_ptr, len);
+    if digest != expected {
+        epf_reject_load(EPF_LOAD_REASON_BAD_HASH);
+        return;
+    }
+
+    let mut image = [0u8; EPF_BYTECODE_BYTES];
+    let mut index = 0usize;
+    while index < len {
+        image[index] = unsafe { core::ptr::read_volatile(image_ptr.add(index)) };
+        index += 1;
+    }
+
+    let _ = epf_load_image(&image[..len], digest, EPF_INGRESS_MAILBOX);
+}
+
+fn epf_load_active_image_for_core() {
+    let len =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_ACTIVE_LEN)) } as usize;
+    if len == 0 || len > EPF_BYTECODE_BYTES {
+        return;
+    }
+    let digest = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_IMAGE_DIGEST)) };
+    if digest == 0 {
+        return;
+    }
+    let local_digest = unsafe { core::ptr::read_volatile(epf_local_image_digest_slot()) };
+    if local_digest == digest {
+        return;
+    }
+
+    let image_ptr = core::ptr::addr_of!(HIBANA_EPF_ACTIVE_IMAGE) as *const u8;
+    let mut image = [0u8; EPF_BYTECODE_BYTES];
+    let mut index = 0usize;
+    while index < len {
+        image[index] = unsafe { core::ptr::read_volatile(image_ptr.add(index)) };
+        index += 1;
+    }
+
+    let loaded = match epf().load(&image[..len]) {
+        Ok(loaded) => loaded,
+        Err(_) => {
+            epf_reject_load(EPF_LOAD_REASON_LOAD_ERROR);
+            return;
+        }
+    };
+    write_marker(epf_local_image_digest_slot(), digest);
+    write_marker(epf_load_epoch_slot(), loaded.epoch());
+}
+
+fn epf_try_load_committed_image() {
+    epf_prepare_committed_image();
+    epf_load_active_image_for_core();
+}
+
+fn run_epf_tap_event(event: hibana::runtime::tap::TapEvent) -> bool {
+    if !epf_loaded_for_core() {
+        return false;
+    }
+    let out = epf().run(event);
+    if out.emitted() {
+        record_epf_compact_out(out);
+        if out.trap_reason().is_some() {
+            write_marker(
+                core::ptr::addr_of_mut!(HIBANA_EPF_LOAD_REASON),
+                EPF_LOAD_REASON_VM_TRAP,
+            );
+        }
+        return true;
+    }
+    false
+}
+
+pub fn run_epf_timer_irq_fact() -> bool {
+    if !epf_loaded_for_core() {
+        return false;
+    }
+    record_epf_policy_timer_irq_ready();
+    let ready = if rp2w_timer_route_irq_observed() {
+        1
+    } else {
+        0
+    };
+    let out = epf().run_evidence(hibana_epf::EvidenceInput::new(
+        EPF_TIMER_IRQ_FACT_ID,
+        ready as u8,
+        [
+            ready,
+            EPF_TIMER_IRQ_FACT_TAG,
+            0,
+            (u32::from(EPF_TIMER_IRQ_FACT_ID) << 16) | ((marker_core_id() as u32) << 8) | ready,
+        ],
+    ));
+    if !out.emitted() || out.trap_reason().is_some() {
+        return false;
+    }
+    record_epf_compact_out(out);
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_POLICY_TIMER_FACT_KIND),
+        out.kind(),
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_POLICY_TIMER_FACT_ARG0),
+        out.arg0(),
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_POLICY_TIMER_FACT_FUEL),
+        u32::from(out.fuel_used()),
+    );
+    true
+}
+
+pub fn poll_epf_diagnostic(tap: &mut hibana::runtime::tap::TapPort<'_>) {
+    epf_try_load_committed_image();
+    if poll_epf_spool_diagnostic() {
+        return;
+    }
+    let mut drained = 0usize;
+    while drained < EPF_TAP_SPOOL_EVENTS {
+        drained += 1;
+        let Some(event) = tap.next() else {
+            break;
+        };
+        epf_spool_tap_event(event);
+        if run_epf_tap_event(event) {
+            break;
+        }
+    }
+}
+
+fn poll_epf_spool_diagnostic() -> bool {
+    if !epf_loaded_for_core() {
+        return false;
+    }
+    let (_, len_slot, read_slot) = epf_spool_slots();
+    let len = unsafe { core::ptr::read_volatile(len_slot) } as usize;
+    let mut read = unsafe { core::ptr::read_volatile(read_slot) } as usize;
+    let mut drained = 0usize;
+    while read < len && read < EPF_TAP_SPOOL_EVENTS && drained < EPF_TAP_SPOOL_EVENTS {
+        let event = epf_spooled_tap_event(read);
+        read += 1;
+        drained += 1;
+        unsafe {
+            core::ptr::write_volatile(read_slot, read as u32);
+        }
+        if run_epf_tap_event(event) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn poll_epf_panic_diagnostic() {
+    epf_try_load_committed_image();
+    let _ = poll_epf_spool_diagnostic();
+}
+
+fn epf_marker_slots() -> (
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+) {
+    if marker_core_id() == 0 {
+        (
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_EPOCH),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_KIND),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_REASON),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_ARG0),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_ARG1),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_ARG2),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_FUEL_USED),
+        )
+    } else {
+        (
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE1_EPOCH),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE1_KIND),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE1_REASON),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE1_ARG0),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE1_ARG1),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE1_ARG2),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE1_FUEL_USED),
+        )
+    }
+}
+
+fn record_epf_compact_out(out: hibana_epf::Out) {
+    let (epoch_slot, kind_slot, reason_slot, arg0_slot, arg1_slot, arg2_slot, fuel_slot) =
+        epf_marker_slots();
+    let epoch = unsafe { core::ptr::read_volatile(epoch_slot) }.wrapping_add(1);
+    write_marker(epoch_slot, epoch);
+    write_marker(kind_slot, out.kind());
+    write_marker(reason_slot, out.reason());
+    write_marker(arg0_slot, out.arg0());
+    write_marker(arg1_slot, out.arg1());
+    write_marker(arg2_slot, out.arg2());
+    write_marker(fuel_slot, u32::from(out.fuel_used()));
+    rp2w_uart0_write_epf_out(out);
+    #[cfg(all(target_arch = "arm", target_os = "none"))]
+    event();
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn panic_hash_byte(hash: u32, byte: u8) -> u32 {
+    (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn panic_hash_str(text: &str) -> u32 {
+    let mut hash = 0x811c_9dc5;
+    for byte in text.as_bytes() {
+        hash = panic_hash_byte(hash, *byte);
+    }
+    hash
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+struct PanicMessageRecorder {
+    stored: usize,
+    total: usize,
+    hash: u32,
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+impl PanicMessageRecorder {
+    fn new() -> Self {
+        let mut index = 0usize;
+        while index < PANIC_MESSAGE_BYTES {
+            unsafe {
+                let base = core::ptr::addr_of_mut!(HIBANA_DEMO_PANIC_MESSAGE).cast::<u8>();
+                core::ptr::write_volatile(base.add(index), 0);
+            }
+            index += 1;
+        }
+        Self {
+            stored: 0,
+            total: 0,
+            hash: 0x811c_9dc5,
+        }
+    }
+
+    fn finish(self) {
+        write_marker(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_PANIC_MESSAGE_LEN),
+            self.stored as u32,
+        );
+        write_marker(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_PANIC_MESSAGE_TOTAL_LEN),
+            self.total as u32,
+        );
+        write_marker(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_PANIC_MESSAGE_HASH),
+            self.hash,
+        );
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+impl core::fmt::Write for PanicMessageRecorder {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        for byte in text.as_bytes() {
+            self.hash = panic_hash_byte(self.hash, *byte);
+            if self.stored < PANIC_MESSAGE_BYTES {
+                unsafe {
+                    let base = core::ptr::addr_of_mut!(HIBANA_DEMO_PANIC_MESSAGE).cast::<u8>();
+                    core::ptr::write_volatile(base.add(self.stored), *byte);
+                }
+                self.stored += 1;
+            }
+            self.total = self.total.saturating_add(1);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn record_panic_info(info: &core::panic::PanicInfo<'_>) {
+    if let Some(location) = info.location() {
+        write_marker(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_PANIC_FILE_HASH),
+            panic_hash_str(location.file()),
+        );
+        write_marker(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_PANIC_LINE),
+            location.line(),
+        );
+        write_marker(
+            core::ptr::addr_of_mut!(HIBANA_DEMO_PANIC_COLUMN),
+            location.column(),
+        );
+    }
+
+    let mut recorder = PanicMessageRecorder::new();
+    match core::fmt::Write::write_fmt(&mut recorder, format_args!("{info}")) {
+        Ok(()) => {}
+        Err(error) => {
+            core::hint::black_box(error);
+        }
+    }
+    recorder.finish();
+}
+
+fn record_choreofs_sio_trace(code: u32) {
+    unsafe {
+        let (count_slot, trace_slot) = if marker_core_id() == 0 {
+            (
+                core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TRACE_CORE0_COUNT),
+                core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TRACE_CORE0),
+            )
+        } else {
+            (
+                core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TRACE_CORE1_COUNT),
+                core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TRACE_CORE1),
+            )
+        };
+        let count = core::ptr::read_volatile(count_slot);
+        let index = (count as usize) & 15;
+        core::ptr::write_volatile(core::ptr::addr_of_mut!((*trace_slot)[index]), code);
+        core::ptr::write_volatile(count_slot, count.wrapping_add(1));
+    }
+}
+
+fn increment_sio_counter(slot: *mut u32) {
+    let next = unsafe { core::ptr::read_volatile(slot) }.wrapping_add(1);
+    unsafe {
+        core::ptr::write_volatile(slot, next);
+    }
+}
+
+fn record_sio_direction_unmapped(local_role: u8, peer_role: u8, direction: u8) {
+    record_choreofs_sio_trace(
+        0x5000_0000
+            | (14u32 << 24)
+            | ((local_role as u32) << 20)
+            | ((peer_role as u32) << 16)
+            | ((direction as u32) << 8),
+    );
+}
+
+fn record_sio_direction_tx(local_role: u8, peer_role: u8) {
+    match (local_role, peer_role) {
+        (0, 1) => increment_sio_counter(core::ptr::addr_of_mut!(
+            HIBANA_CHOREOFS_SIO_CORE0_TO_CORE1_TX_COUNT
+        )),
+        (1, 0) => increment_sio_counter(core::ptr::addr_of_mut!(
+            HIBANA_CHOREOFS_SIO_CORE1_TO_CORE0_TX_COUNT
+        )),
+        _ => record_sio_direction_unmapped(local_role, peer_role, 0),
+    }
+}
+
+fn record_sio_direction_rx(local_role: u8, sender_role: u8) {
+    match (sender_role, local_role) {
+        (0, 1) => increment_sio_counter(core::ptr::addr_of_mut!(
+            HIBANA_CHOREOFS_SIO_CORE0_TO_CORE1_RX_COUNT
+        )),
+        (1, 0) => increment_sio_counter(core::ptr::addr_of_mut!(
+            HIBANA_CHOREOFS_SIO_CORE1_TO_CORE0_RX_COUNT
+        )),
+        _ => record_sio_direction_unmapped(local_role, sender_role, 1),
+    }
+}
+
+fn read_core0_to_core1_tx_count() -> u32 {
+    read_marker(core::ptr::addr_of!(
+        HIBANA_CHOREOFS_SIO_CORE0_TO_CORE1_TX_COUNT
+    ))
+}
+
+fn read_marker(slot: *const u32) -> u32 {
+    unsafe { core::ptr::read_volatile(slot) }
+}
+
+fn increment_marker(slot: *mut u32) -> u32 {
+    let next = read_marker(slot).saturating_add(1);
+    write_marker(slot, next);
+    next
+}
+
+pub fn reset_choreofs_markers() {
+    write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_STATUS), 0);
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_ERROR_CODE),
+        0,
+    );
+    write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_DRIVER_TRACE), 0);
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TRACE_CORE0_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TRACE_CORE1_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_CORE0_TO_CORE1_TX_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_CORE0_TO_CORE1_RX_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_CORE1_TO_CORE0_TX_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_CORE1_TO_CORE0_RX_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_ROLE1_PENDING_SEEN_CORE0_TX),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_ROLE1_POLL_SEEN_CORE0_TX),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_ROLE1_READY_SEEN_CORE0_TX),
+        0,
+    );
+    let mut trace_index = 0usize;
+    while trace_index < 16 {
+        unsafe {
+            write_marker(
+                core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TRACE_CORE0[trace_index]),
+                0,
+            );
+            write_marker(
+                core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TRACE_CORE1[trace_index]),
+                0,
+            );
+        }
+        trace_index += 1;
+    }
+    write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_PATH_OPEN_COUNT), 0);
+    write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_FD_WRITE_COUNT), 0);
+    write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_POLL_COUNT), 0);
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_POLL_TICKS_LO),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_POLL_TICKS_HI),
+        0,
+    );
+    write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_OBJECT), 0);
+    write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LED_MASK), 0);
+    write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SEEN_LED_MASK), 0);
+    write_marker(core::ptr::addr_of_mut!(HIBANA_RP2W_DISPLAY_PAYLOAD_LEN), 0);
+    write_marker(core::ptr::addr_of_mut!(HIBANA_RP2W_DISPLAY_PAYLOAD_HASH), 0);
+    write_marker(core::ptr::addr_of_mut!(HIBANA_RP2W_DISPLAY_HW_STATUS), 0);
+    write_marker(core::ptr::addr_of_mut!(HIBANA_RP2W_DISPLAY_HW_WRITES), 0);
+    write_marker(core::ptr::addr_of_mut!(HIBANA_RP2W_DISPLAY_HW_ADDR), 0);
+    write_marker(core::ptr::addr_of_mut!(HIBANA_RP2W_DISPLAY_HW_PINS), 0);
+}
+
+pub fn record_choreofs_engine_status(status: u32) {
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_STATUS),
+        status,
+    );
+}
+
+pub fn record_choreofs_engine_error_code(code: u32) {
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_ERROR_CODE),
+        code,
+    );
+}
+
+pub fn record_choreofs_driver_trace(trace: u32) {
+    write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_DRIVER_TRACE), trace);
+}
+
+pub fn record_choreofs_path_open(object: appkit::ObjectId) {
+    increment_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_PATH_OPEN_COUNT));
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_OBJECT),
+        object.0,
+    );
+}
+
+pub fn record_choreofs_fd_write(object: appkit::ObjectId) {
+    increment_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_FD_WRITE_COUNT));
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_OBJECT),
+        object.0,
+    );
+}
+
+fn record_rp2w_display_payload(bytes: &[u8]) {
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_RP2W_DISPLAY_PAYLOAD_LEN),
+        bytes.len() as u32,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_RP2W_DISPLAY_PAYLOAD_HASH),
+        epf_hash_image(bytes.as_ptr(), bytes.len()),
+    );
+}
+
+const RP2W_DISPLAY_STATUS_OK: u32 = 0x4c43_444f;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RP2W_DISPLAY_STATUS_NO_ACK: u32 = 0x4c43_444e;
+
+pub fn rp2w_display_write_payload(bytes: &[u8]) -> bool {
+    record_rp2w_display_payload(bytes);
+    let ok = rp2w_display_write_payload_hw(bytes);
+    if ok {
+        increment_marker(core::ptr::addr_of_mut!(HIBANA_RP2W_DISPLAY_HW_WRITES));
+    }
+    ok
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+fn rp2w_display_write_payload_hw(bytes: &[u8]) -> bool {
+    core::hint::black_box(bytes);
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_RP2W_DISPLAY_HW_STATUS),
+        RP2W_DISPLAY_STATUS_OK,
+    );
+    write_marker(core::ptr::addr_of_mut!(HIBANA_RP2W_DISPLAY_HW_ADDR), 0);
+    write_marker(core::ptr::addr_of_mut!(HIBANA_RP2W_DISPLAY_HW_PINS), 0);
+    true
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_display_write_payload_hw(bytes: &[u8]) -> bool {
+    let mut line0 = [b' '; 16];
+    let mut line1 = [b' '; 16];
+    rp2w_lcd_lines(bytes, &mut line0, &mut line1);
+    for bus in RP2W_LCD_I2C_BUSES {
+        rp2w_lcd_i2c_init(bus);
+        for address in [0x27u8, 0x3fu8] {
+            if rp2w_lcd_write_pcf8574_lines(bus, address, &line0, &line1) {
+                rp2w_display_write_success(address, bus);
+                return true;
+            }
+        }
+        for address in [0x3eu8] {
+            if rp2w_lcd_write_st7032_lines(bus, address, &line0, &line1) {
+                rp2w_display_write_success(address, bus);
+                return true;
+            }
+        }
+    }
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_RP2W_DISPLAY_HW_STATUS),
+        RP2W_DISPLAY_STATUS_NO_ACK,
+    );
+    false
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_display_write_success(address: u8, bus: Rp2wI2cBus) {
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_RP2W_DISPLAY_HW_STATUS),
+        RP2W_DISPLAY_STATUS_OK,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_RP2W_DISPLAY_HW_ADDR),
+        u32::from(address),
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_RP2W_DISPLAY_HW_PINS),
+        bus.pin_marker(),
+    );
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_lcd_lines(bytes: &[u8], line0: &mut [u8; 16], line1: &mut [u8; 16]) {
+    if bytes == b"rp2w sample t=23.4 h=45\n" {
+        rp2w_lcd_copy(line0, b"rp2w sample");
+        rp2w_lcd_copy(line1, b"t=23.4 h=45");
+        return;
+    }
+    let mut src = 0usize;
+    let mut dst = 0usize;
+    while src < bytes.len() && dst < line0.len() {
+        let byte = bytes[src];
+        if byte == b'\n' || byte == b'\r' {
+            break;
+        }
+        line0[dst] = rp2w_lcd_printable(byte);
+        src += 1;
+        dst += 1;
+    }
+    while src < bytes.len() && (bytes[src] == b'\n' || bytes[src] == b'\r') {
+        src += 1;
+    }
+    dst = 0;
+    while src < bytes.len() && dst < line1.len() {
+        let byte = bytes[src];
+        if byte == b'\n' || byte == b'\r' {
+            break;
+        }
+        line1[dst] = rp2w_lcd_printable(byte);
+        src += 1;
+        dst += 1;
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_lcd_copy(dst: &mut [u8; 16], src: &[u8]) {
+    let mut index = 0usize;
+    while index < dst.len() && index < src.len() {
+        dst[index] = src[index];
+        index += 1;
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_lcd_printable(byte: u8) -> u8 {
+    if (0x20..=0x7e).contains(&byte) {
+        byte
+    } else {
+        b' '
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+#[derive(Clone, Copy)]
+struct Rp2wI2cBus {
+    base: usize,
+    reset: u32,
+    sda: u8,
+    scl: u8,
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+impl Rp2wI2cBus {
+    const fn pin_marker(self) -> u32 {
+        (self.sda as u32) << 8 | self.scl as u32
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const RP2W_LCD_I2C_BUSES: [Rp2wI2cBus; 10] = [
+    Rp2wI2cBus {
+        base: I2C0_BASE,
+        reset: RESETS_I2C0,
+        sda: 4,
+        scl: 5,
+    },
+    Rp2wI2cBus {
+        base: I2C1_BASE,
+        reset: RESETS_I2C1,
+        sda: 2,
+        scl: 3,
+    },
+    Rp2wI2cBus {
+        base: I2C1_BASE,
+        reset: RESETS_I2C1,
+        sda: 6,
+        scl: 7,
+    },
+    Rp2wI2cBus {
+        base: I2C0_BASE,
+        reset: RESETS_I2C0,
+        sda: 8,
+        scl: 9,
+    },
+    Rp2wI2cBus {
+        base: I2C1_BASE,
+        reset: RESETS_I2C1,
+        sda: 10,
+        scl: 11,
+    },
+    Rp2wI2cBus {
+        base: I2C0_BASE,
+        reset: RESETS_I2C0,
+        sda: 12,
+        scl: 13,
+    },
+    Rp2wI2cBus {
+        base: I2C1_BASE,
+        reset: RESETS_I2C1,
+        sda: 14,
+        scl: 15,
+    },
+    Rp2wI2cBus {
+        base: I2C0_BASE,
+        reset: RESETS_I2C0,
+        sda: 16,
+        scl: 17,
+    },
+    Rp2wI2cBus {
+        base: I2C1_BASE,
+        reset: RESETS_I2C1,
+        sda: 18,
+        scl: 19,
+    },
+    Rp2wI2cBus {
+        base: I2C1_BASE,
+        reset: RESETS_I2C1,
+        sda: 26,
+        scl: 27,
+    },
+];
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn i2c_reg_mut(base: usize, offset: usize) -> *mut u32 {
+    (base + offset) as *mut u32
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn i2c_reg(base: usize, offset: usize) -> *const u32 {
+    (base + offset) as *const u32
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_lcd_i2c_init(bus: Rp2wI2cBus) {
+    rp2w_gpio_bank_init();
+    reset_deassert(bus.reset);
+    unsafe {
+        write_volatile(gpio_pad(bus.sda), GPIO_PAD_DEFAULT);
+        write_volatile(gpio_pad(bus.scl), GPIO_PAD_DEFAULT);
+        write_volatile(gpio_ctrl(bus.sda), GPIO_FUNC_I2C);
+        write_volatile(gpio_ctrl(bus.scl), GPIO_FUNC_I2C);
+        write_volatile(i2c_reg_mut(bus.base, 0x6c), 0);
+        let _ = rp2w_lcd_wait_enable(bus, false);
+        write_volatile(
+            i2c_reg_mut(bus.base, 0x00),
+            (1 << 0) | (1 << 1) | (1 << 5) | (1 << 6),
+        );
+        write_volatile(i2c_reg_mut(bus.base, 0x14), 0x0280);
+        write_volatile(i2c_reg_mut(bus.base, 0x18), 0x02f0);
+        write_volatile(i2c_reg_mut(bus.base, 0x30), 0);
+        write_volatile(i2c_reg_mut(bus.base, 0x6c), 1);
+        let _ = rp2w_lcd_wait_enable(bus, true);
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_lcd_wait_enable(bus: Rp2wI2cBus, enabled: bool) -> bool {
+    let wanted = if enabled { 1 } else { 0 };
+    let mut spins = 0u32;
+    while spins < 10_000 {
+        if unsafe { read_volatile(i2c_reg(bus.base, 0x9c)) } & 1 == wanted {
+            return true;
+        }
+        spins += 1;
+        core::hint::spin_loop();
+    }
+    false
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_lcd_set_target(bus: Rp2wI2cBus, address: u8) -> bool {
+    unsafe {
+        write_volatile(i2c_reg_mut(bus.base, 0x6c), 0);
+    }
+    if !rp2w_lcd_wait_enable(bus, false) {
+        return false;
+    }
+    unsafe {
+        write_volatile(i2c_reg_mut(bus.base, 0x04), u32::from(address));
+        write_volatile(i2c_reg_mut(bus.base, 0x6c), 1);
+    }
+    rp2w_lcd_wait_enable(bus, true)
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_lcd_write_pcf8574_lines(
+    bus: Rp2wI2cBus,
+    address: u8,
+    line0: &[u8; 16],
+    line1: &[u8; 16],
+) -> bool {
+    if !rp2w_lcd_set_target(bus, address) {
+        return false;
+    }
+    if !rp2w_lcd_init_hd44780(bus) {
+        return false;
+    }
+    if !rp2w_lcd_command(bus, 0x80) {
+        return false;
+    }
+    for byte in line0 {
+        if !rp2w_lcd_data(bus, *byte) {
+            return false;
+        }
+    }
+    if !rp2w_lcd_command(bus, 0xc0) {
+        return false;
+    }
+    for byte in line1 {
+        if !rp2w_lcd_data(bus, *byte) {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_lcd_write_st7032_lines(
+    bus: Rp2wI2cBus,
+    address: u8,
+    line0: &[u8; 16],
+    line1: &[u8; 16],
+) -> bool {
+    if !rp2w_lcd_set_target(bus, address) {
+        return false;
+    }
+    if !rp2w_st7032_init(bus) {
+        return false;
+    }
+    if !rp2w_st7032_command(bus, 0x80) {
+        return false;
+    }
+    for byte in line0 {
+        if !rp2w_st7032_data(bus, *byte) {
+            return false;
+        }
+    }
+    if !rp2w_st7032_command(bus, 0xc0) {
+        return false;
+    }
+    for byte in line1 {
+        if !rp2w_st7032_data(bus, *byte) {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_st7032_init(bus: Rp2wI2cBus) -> bool {
+    rp2w_lcd_delay(50_000);
+    rp2w_st7032_command(bus, 0x38)
+        && rp2w_st7032_command(bus, 0x39)
+        && rp2w_st7032_command(bus, 0x14)
+        && rp2w_st7032_command(bus, 0x70)
+        && rp2w_st7032_command(bus, 0x56)
+        && rp2w_st7032_command(bus, 0x6c)
+        && {
+            rp2w_lcd_delay(200_000);
+            true
+        }
+        && rp2w_st7032_command(bus, 0x38)
+        && rp2w_st7032_command(bus, 0x0c)
+        && rp2w_st7032_command(bus, 0x01)
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_st7032_command(bus: Rp2wI2cBus, command: u8) -> bool {
+    rp2w_lcd_i2c_write_raw(bus, 0x00, false) && rp2w_lcd_i2c_write_raw(bus, command, true)
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_st7032_data(bus: Rp2wI2cBus, data: u8) -> bool {
+    rp2w_lcd_i2c_write_raw(bus, 0x40, false) && rp2w_lcd_i2c_write_raw(bus, data, true)
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_lcd_init_hd44780(bus: Rp2wI2cBus) -> bool {
+    rp2w_lcd_delay(50_000);
+    for _ in 0..3 {
+        if !rp2w_lcd_nibble(bus, 0x30, false) {
+            return false;
+        }
+        rp2w_lcd_delay(20_000);
+    }
+    if !rp2w_lcd_nibble(bus, 0x20, false) {
+        return false;
+    }
+    rp2w_lcd_delay(5_000);
+    rp2w_lcd_command(bus, 0x28)
+        && rp2w_lcd_command(bus, 0x0c)
+        && rp2w_lcd_command(bus, 0x06)
+        && rp2w_lcd_command(bus, 0x01)
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_lcd_command(bus: Rp2wI2cBus, command: u8) -> bool {
+    rp2w_lcd_byte(bus, command, false)
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_lcd_data(bus: Rp2wI2cBus, data: u8) -> bool {
+    rp2w_lcd_byte(bus, data, true)
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_lcd_byte(bus: Rp2wI2cBus, byte: u8, rs: bool) -> bool {
+    rp2w_lcd_nibble(bus, byte & 0xf0, rs) && rp2w_lcd_nibble(bus, (byte << 4) & 0xf0, rs)
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_lcd_nibble(bus: Rp2wI2cBus, nibble: u8, rs: bool) -> bool {
+    const RS: u8 = 0x01;
+    const EN: u8 = 0x04;
+    const BL: u8 = 0x08;
+    let control = if rs { RS } else { 0 };
+    let base = (nibble & 0xf0) | BL | control;
+    rp2w_lcd_i2c_write(bus, base | EN) && {
+        rp2w_lcd_delay(500);
+        rp2w_lcd_i2c_write(bus, base)
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_lcd_i2c_write(bus: Rp2wI2cBus, byte: u8) -> bool {
+    rp2w_lcd_i2c_write_raw(bus, byte, true)
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_lcd_i2c_write_raw(bus: Rp2wI2cBus, byte: u8, stop: bool) -> bool {
+    let mut spins = 0u32;
+    while spins < 10_000 {
+        if rp2w_lcd_i2c_aborted(bus) {
+            return false;
+        }
+        if unsafe { read_volatile(i2c_reg(bus.base, 0x70)) } & (1 << 1) != 0 {
+            break;
+        }
+        spins += 1;
+        core::hint::spin_loop();
+    }
+    if spins == 10_000 {
+        return false;
+    }
+    let stop_bit = if stop { 1 << 9 } else { 0 };
+    unsafe {
+        write_volatile(i2c_reg_mut(bus.base, 0x10), u32::from(byte) | stop_bit);
+    }
+    spins = 0;
+    while spins < 50_000 {
+        if rp2w_lcd_i2c_aborted(bus) {
+            return false;
+        }
+        let status = unsafe { read_volatile(i2c_reg(bus.base, 0x70)) };
+        if !stop {
+            return true;
+        }
+        if status & (1 << 2) != 0 && status & 1 == 0 {
+            return true;
+        }
+        spins += 1;
+        core::hint::spin_loop();
+    }
+    false
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_lcd_i2c_aborted(bus: Rp2wI2cBus) -> bool {
+    if unsafe { read_volatile(i2c_reg(bus.base, 0x34)) } & (1 << 6) == 0 {
+        return false;
+    }
+    let _ = unsafe { read_volatile(i2c_reg(bus.base, 0x54)) };
+    true
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_lcd_delay(cycles: u32) {
+    let mut remaining = cycles;
+    while remaining > 0 {
+        core::hint::spin_loop();
+        remaining -= 1;
+    }
+}
+
+pub fn record_choreofs_poll() {
+    increment_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_POLL_COUNT));
+}
+
+pub fn record_choreofs_poll_timeout(timeout_ticks: u64) {
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_POLL_TICKS_LO),
+        timeout_ticks as u32,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_POLL_TICKS_HI),
+        (timeout_ticks >> 32) as u32,
+    );
+}
+
+pub fn record_choreofs_led_mask(mask: u32, high: bool) {
+    let bit = mask;
+    let slot = core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LED_MASK);
+    let current = read_marker(slot);
+    let next = if high { current | bit } else { current & !bit };
+    write_marker(slot, next);
+    if high {
+        let seen_slot = core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SEEN_LED_MASK);
+        write_marker(seen_slot, read_marker(seen_slot) | bit);
+    }
+}
+
+pub fn mark_runtime_ready() {
+    mark_stage(STAGE_RUNTIME_READY);
+}
+
+pub fn mark_success(result: u32) {
+    mark_stage(STAGE_RUNTIME_READY);
+    mark_result(result);
+}
+
+pub fn assert_choreofs_markers(
+    expected_path_opens: u32,
+    expected_writes: u32,
+    expected_final_led_mask: u32,
+    expected_seen_led_mask: u32,
+) {
+    let path_opens = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_PATH_OPEN_COUNT));
+    let writes = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_FD_WRITE_COUNT));
+    let polls = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_POLL_COUNT));
+    let led_mask = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_LED_MASK));
+    let seen_led_mask = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_SEEN_LED_MASK));
+    assert!(path_opens == expected_path_opens);
+    assert!(writes == expected_writes);
+    assert!(polls == expected_writes);
+    assert!(led_mask == expected_final_led_mask);
+    assert!(seen_led_mask == expected_seen_led_mask);
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn gpio_ctrl(pin: u8) -> *mut u32 {
+    (IO_BANK0_BASE + 0x04 + pin as usize * 8) as *mut u32
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn gpio_pad(pin: u8) -> *mut u32 {
+    (PADS_BANK0_BASE + 0x04 + pin as usize * 4) as *mut u32
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn rp2w_gpio_bank_init() {
+    unsafe {
+        write_volatile(RESETS_RESET_CLR, RESETS_IO_BANK0 | RESETS_PADS_BANK0);
+    }
+    while unsafe { read_volatile(RESETS_RESET_DONE) } & (RESETS_IO_BANK0 | RESETS_PADS_BANK0)
+        != (RESETS_IO_BANK0 | RESETS_PADS_BANK0)
+    {
+        core::hint::spin_loop();
+    }
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+fn rp2w_gpio_bank_init() {}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn rp2w_gpio_init_output(pin: u8) {
+    rp2w_gpio_bank_init();
+    unsafe {
+        write_volatile(gpio_pad(pin), GPIO_PAD_DEFAULT);
+        write_volatile(gpio_ctrl(pin), GPIO_FUNC_SIO);
+        write_volatile(GPIO_OE_SET, 1u32 << pin);
+        write_volatile(GPIO_OUT_CLR, 1u32 << pin);
+    }
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub fn rp2w_gpio_init_output(pin: u8) {
+    rp2w_gpio_bank_init();
+    core::hint::black_box(pin);
+}
+
+fn init_rp2w_safe_state_outputs() {
+    let mut index = 0usize;
+    while index < RP2W_SAFE_STATE_LED_PINS.len() {
+        rp2w_gpio_init_output(RP2W_SAFE_STATE_LED_PINS[index]);
+        index += 1usize;
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn rp2w_gpio_write(pin: u8, high: bool) {
+    let bit = 1u32 << pin;
+    unsafe {
+        if high {
+            write_volatile(GPIO_OUT_SET, bit);
+        } else {
+            write_volatile(GPIO_OUT_CLR, bit);
+        }
+    }
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub fn rp2w_gpio_write(pin: u8, high: bool) {
+    core::hint::black_box((pin, high));
+}
+
+fn write_rp2w_safe_state_leds() {
+    let mut index = 0usize;
+    while index < RP2W_SAFE_STATE_LED_PINS.len() {
+        rp2w_gpio_write(RP2W_SAFE_STATE_LED_PINS[index], false);
+        index += 1usize;
+    }
+}
+
+pub fn mark_safe_state() {
+    init_rp2w_safe_state_outputs();
+    write_rp2w_safe_state_leds();
+    record_stack_high_water();
+}
+
+pub fn run_engine_no_wasi<C>()
+where
+    C: Rp2wCapsuleFacts + 'static,
+{
+    check_image::<EngineImage, C>(1);
+    appkit::run::<EngineImage, C>(appkit::NoWasi);
+}
+
+pub fn run_engine_wasi<'a, C>(image: appkit::WasiImage<'a>)
+where
+    C: Rp2wCapsuleFacts + 'static,
+{
+    check_image::<EngineImage, C>(1);
+    appkit::run::<EngineImage, C>(image);
+}
+
+fn check_image<I, C>(required_role: u8)
+where
+    C: Rp2wCapsuleFacts + 'static,
+    I: appkit::LogicalImage<C>,
+{
+    assert!(I::REQUESTED_ROLES.contains(required_role));
+}
+
+impl<C> appkit::LogicalImage<C> for DriverImage
+where
+    C: Rp2wCapsuleFacts + 'static,
+{
+    type Carrier<'a>
+        = Rp2wSioTransport<C>
+    where
+        C: 'a;
+    const REQUESTED_ROLES: appkit::RoleSet = C::DRIVER_REQUESTED_ROLES;
+
+    fn init() -> Self {
+        Self
+    }
+
+    fn safe_state(&mut self) {
+        mark_safe_state();
+    }
+
+    fn carrier<'a>() -> Self::Carrier<'a>
+    where
+        C: 'a,
+    {
+        Rp2wSioTransport::<C>::new()
+    }
+
+    #[cfg(all(target_arch = "arm", target_os = "none"))]
+    fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
+        rp2w_driver_attach_storage()
+    }
+
+    fn driver_facts() -> appkit::DriverFacts<'static> {
+        C::driver_facts()
+    }
+}
+
+impl<C> appkit::LogicalImage<C> for EngineImage
+where
+    C: Rp2wCapsuleFacts + 'static,
+{
+    type Carrier<'a>
+        = Rp2wSioTransport<C>
+    where
+        C: 'a;
+    const REQUESTED_ROLES: appkit::RoleSet = C::ENGINE_REQUESTED_ROLES;
+
+    fn init() -> Self {
+        Self
+    }
+
+    fn safe_state(&mut self) {
+        mark_safe_state();
+    }
+
+    fn carrier<'a>() -> Self::Carrier<'a>
+    where
+        C: 'a,
+    {
+        Rp2wSioTransport::<C>::new()
+    }
+
+    #[cfg(all(target_arch = "arm", target_os = "none"))]
+    fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
+        rp2w_engine_attach_storage()
+    }
+}
+
+#[cfg(feature = "wasm-engine-core")]
+impl<C> appkit::WasiGuestImage<C> for EngineImage
+where
+    C: Rp2wCapsuleFacts + 'static,
+{
+    fn wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
+        rp2w_engine_wasi_guest_lease::<ROLE>()
+    }
+}
+
+pub fn run<C>() -> !
+where
+    C: Rp2wCapsuleFacts + 'static,
+{
+    mark_stage(STAGE_RUNTIME_BEGIN);
+    if rp2350_sio::core_id() == 0 {
+        check_image::<DriverImage, C>(0);
+        appkit::run::<DriverImage, C>(appkit::NoWasi);
+    } else {
+        C::run_engine_image();
+    }
+    mark_stage(STAGE_RUNTIME_READY);
+    mark_result(C::SUCCESS_RESULT);
+    park()
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
+    let stage = match info.location() {
+        Some(location) => 0x4c00_0000 | (location.line() & 0x0000_ffff),
+        None => STAGE_HARD_PANIC,
+    };
+    record_failure_stage(stage);
+    mark_result(RESULT_FAILURE);
+    record_panic_info(info);
+    epf_panic_park()
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn init_ram() {
+    unsafe {
+        let data_src = core::ptr::addr_of!(__data_load_start);
+        let data_start = core::ptr::addr_of_mut!(__data_start);
+        let data_end = core::ptr::addr_of_mut!(__data_end);
+        let data_len = data_end as usize - data_start as usize;
+        core::ptr::copy_nonoverlapping(data_src, data_start, data_len);
+
+        let bss_start = core::ptr::addr_of_mut!(__bss_start);
+        let bss_end = core::ptr::addr_of_mut!(__bss_end);
+        let bss_len = bss_end as usize - bss_start as usize;
+        core::ptr::write_bytes(bss_start, 0, bss_len);
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn init_rp2w_clock_tick() {
+    unsafe {
+        write_volatile(XOSC_STARTUP, XOSC_STARTUP_12MHZ_CONSERVATIVE);
+        write_volatile(XOSC_CTRL, XOSC_CTRL_FREQ_RANGE_1_15MHZ | XOSC_CTRL_ENABLE);
+        while read_volatile(XOSC_STATUS) & XOSC_STATUS_STABLE == 0 {
+            core::hint::spin_loop();
+        }
+
+        write_volatile(CLOCKS_CLK_SYS_RESUS_CTRL, 0);
+        write_volatile(CLOCKS_CLK_REF_DIV, CLOCKS_CLK_REF_DIV_1);
+        write_volatile(CLOCKS_CLK_REF_CTRL, CLOCKS_CLK_REF_SRC_XOSC);
+        while read_volatile(CLOCKS_CLK_REF_SELECTED) & CLOCKS_CLK_REF_SELECTED_XOSC == 0 {
+            core::hint::spin_loop();
+        }
+
+        write_volatile(CLOCKS_CLK_SYS_CTRL, CLOCKS_CLK_SYS_SRC_REF);
+        while read_volatile(CLOCKS_CLK_SYS_SELECTED) & CLOCKS_CLK_SYS_SELECTED_REF == 0 {
+            core::hint::spin_loop();
+        }
+
+        write_volatile(RESETS_RESET_SET, RESETS_PLL_SYS);
+        write_volatile(RESETS_RESET_CLR, RESETS_PLL_SYS);
+        while read_volatile(RESETS_RESET_DONE) & RESETS_PLL_SYS == 0 {
+            core::hint::spin_loop();
+        }
+
+        write_volatile(PLL_SYS_CS, PLL_SYS_REFDIV_1);
+        write_volatile(PLL_SYS_FBDIV_INT, PLL_SYS_FBDIV_125);
+        write_volatile(
+            PLL_SYS_PWR,
+            read_volatile(PLL_SYS_PWR) & !(PLL_PWR_PD | PLL_PWR_VCOPD),
+        );
+        while read_volatile(PLL_SYS_CS) & PLL_CS_LOCK == 0 {
+            core::hint::spin_loop();
+        }
+        write_volatile(PLL_SYS_PRIM, PLL_SYS_POSTDIV_125MHZ);
+        write_volatile(PLL_SYS_PWR, read_volatile(PLL_SYS_PWR) & !PLL_PWR_POSTDIVPD);
+
+        write_volatile(CLOCKS_CLK_SYS_DIV, CLOCKS_CLK_SYS_DIV_1);
+        write_volatile(
+            CLOCKS_CLK_SYS_CTRL,
+            CLOCKS_CLK_SYS_SRC_AUX | (CLOCKS_CLK_SYS_AUXSRC_PLL_SYS << 5),
+        );
+        while read_volatile(CLOCKS_CLK_SYS_SELECTED) & CLOCKS_CLK_SYS_SELECTED_AUX == 0 {
+            core::hint::spin_loop();
+        }
+
+        write_volatile(
+            CLOCKS_CLK_PERI_CTRL,
+            CLOCKS_CLK_PERI_ENABLE | (CLOCKS_CLK_PERI_AUXSRC_CLK_SYS << 5),
+        );
+        while read_volatile(CLOCKS_CLK_PERI_SELECTED) & CLOCKS_CLK_PERI_SELECTED_CLK_SYS == 0 {
+            core::hint::spin_loop();
+        }
+
+        write_volatile(TICKS_TIMER0_CYCLES, RP2W_TIMER_TICK_CYCLES & 0x01ff);
+        write_volatile(TICKS_TIMER0_CTRL, TICKS_TIMER0_CTRL_ENABLE);
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn event() {
+    unsafe {
+        asm!("sev", options(nomem, nostack, preserves_flags));
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn fifo_drain() {
+    while unsafe { read_volatile(SIO_FIFO_ST) } & FIFO_VLD != 0 {
+        unsafe {
+            read_volatile(SIO_FIFO_RD);
+        }
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn fifo_clear_errors() {
+    unsafe {
+        write_volatile(SIO_FIFO_ST_WRITE, FIFO_WOF | FIFO_ROE);
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn reset_core1_to_bootrom() {
+    let force_off = unsafe { read_volatile(PSM_FRCE_OFF) };
+    unsafe {
+        write_volatile(PSM_FRCE_OFF, force_off | PSM_PROC1);
+    }
+    for spin in 0..32 {
+        core::hint::black_box(spin);
+        core::hint::spin_loop();
+    }
+    unsafe {
+        write_volatile(PSM_FRCE_OFF, force_off & !PSM_PROC1);
+    }
+    for spin in 0..32 {
+        core::hint::black_box(spin);
+        core::hint::spin_loop();
+    }
+    fifo_drain();
+    fifo_clear_errors();
+    event();
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn fifo_push_blocking(word: u32) {
+    while unsafe { read_volatile(SIO_FIFO_ST) } & FIFO_RDY == 0 {
+        core::hint::spin_loop();
+    }
+    unsafe {
+        write_volatile(SIO_FIFO_WR, word);
+    }
+    event();
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn fifo_pop_blocking() -> u32 {
+    while unsafe { read_volatile(SIO_FIFO_ST) } & FIFO_VLD == 0 {
+        core::hint::spin_loop();
+    }
+    unsafe { read_volatile(SIO_FIFO_RD) }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn launch_core1(vector_table: u32, stack_top: u32, entry: u32) -> bool {
+    reset_core1_to_bootrom();
+
+    let sequence = [0, 0, 1, vector_table, stack_top, entry];
+    let mut index = 0usize;
+    let mut failures = 0u8;
+    while index < sequence.len() {
+        let word = sequence[index];
+        if word == 0 {
+            fifo_drain();
+            fifo_clear_errors();
+            event();
+        }
+        fifo_push_blocking(word);
+        if fifo_pop_blocking() == word {
+            index += 1;
+            continue;
+        }
+        index = 0;
+        failures = failures.saturating_add(1);
+        if failures > CORE1_LAUNCH_RETRIES {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn mark_core1_started() {
+    unsafe {
+        write_volatile(core::ptr::addr_of_mut!(CORE1_STARTED), 1);
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn clear_core1_started() {
+    unsafe {
+        write_volatile(core::ptr::addr_of_mut!(CORE1_STARTED), 0);
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn core1_started() -> bool {
+    unsafe { read_volatile(core::ptr::addr_of!(CORE1_STARTED)) != 0 }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn ensure_core1_launched() {
+    clear_core1_started();
+    let launched = launch_core1(
+        core::ptr::addr_of!(VECTOR_TABLE) as u32,
+        core::ptr::addr_of!(__core1_stack_top) as u32,
+        core1_entry as *const () as usize as u32,
+    );
+    if !launched {
+        record_failure_stage(STAGE_CORE1_LAUNCH_ERR);
+        mark_result(RESULT_FAILURE);
+        park();
+    }
+    for spin in 0..100_000 {
+        core::hint::black_box(spin);
+        if core1_started() {
+            mark_stage(STAGE_CORE1_LAUNCHED);
+            return;
+        }
+        core::hint::spin_loop();
+    }
+    record_failure_stage(STAGE_CORE1_START_TIMEOUT);
+    mark_result(RESULT_FAILURE);
+    park();
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+unsafe extern "C" fn core1_entry() -> ! {
+    fifo_drain();
+    mark_core1_started();
+    event();
+    mark_stage(STAGE_ENGINE_RUNTIME_READY_SEEN);
+    unsafe { rp2w_selected_run() }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Reset() -> ! {
+    init_ram();
+    init_rp2w_clock_tick();
+    mark_stage(STAGE_CORE0_START);
+    ensure_core1_launched();
+    mark_stage(STAGE_PROGRAM_READY);
+    unsafe { rp2w_selected_run() }
+}

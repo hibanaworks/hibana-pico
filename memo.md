@@ -37,7 +37,7 @@ WASI guest
 禁止:
 
 - Engine side が syscall を直接完了する
-- host FS fallback
+- host FS authority
 - raw socket authority
 - guest から raw MMIO
 - driver-side route inference
@@ -57,57 +57,42 @@ core1 logical image もその capacity だけを in-place materialize する。
 
 ## Public Root
 
-最終 public root は三つだけ。
+最終 public root は一つだけ。
 
 ```rust
-pub mod choreography;
 pub mod appkit;
-pub mod site;
-mod kernel;
-mod machine;
-mod port;
-mod projects;
 ```
 
-削るもの:
-
-- `pub mod proof`
-- `appkit::Choreo`
-- `appkit::Program`
-- `appkit::support`
-- `proof::baker_link::support`
-- any intermediate escape hatch
+root は appkit 以外の vocabulary を持たない。raw Hibana
+programming、WASI P1 runtime、board firmware support はそれぞれの所有層に置く。
 
 ## Module Responsibilities
 
-`choreography`:
+raw Hibana choreography:
 
-- protocol vocabulary
-- optional raw `hibana::g` helper functions
-- no DSL
-- no wrapper
+- owned by `hibana`
+- written directly with `hibana::g`
+- no `hibana-pico` wrapper
+- no `hibana-pico` re-exported protocol vocabulary
 
 `appkit`:
 
 - `Capsule`
 - `LogicalImage`
 - `Placement`
-- `ArtifactBundle`
 - `Localside`
 - sealed contexts
 - `run::<LogicalImage, Capsule>()`
 
-`site`:
+`appkit::Local<Image>`:
 
-- host / linux / mcu / rp2040 / swarm site families
-- carrier facts
-- site facts
+- logical image marker only
 - may host engine implementation capacity
 - must not complete or authorize WASI imports
 
-`kernel` / `machine` / `port` / `projects`:
+`choreography` / `kernel` / `machine` / `port` / `projects`:
 
-- private implementation
+- deleted root paths; do not reintroduce them as public or private side languages
 
 ## Hibana Completeness
 
@@ -120,7 +105,7 @@ mod projects;
 - placement mismatch
 - unsupported linked implementation capacity
 - WASI artifact import mismatch against choreography-derived requirements
-- target / site incompatibility
+- target / site mismatch
 
 禁止:
 
@@ -128,7 +113,7 @@ mod projects;
 - fragment を使わないと capacity が導けない設計
 - `g::par` を落とす
 - policy resolver を落とす
-- custom payload / control kind を落とす
+- custom payload / resolver evidence を落とす
 - binding evidence / transport observation を落とす
 
 ## Capsule Shape
@@ -139,20 +124,18 @@ Capsule は associated Program を持たない。
 実際の trait 名は hibana 側 API に合わせる。
 
 ```rust
-pub trait Capsule {
-    type Universe: hibana::integration::runtime::LabelUniverse;
+pub trait Capsule: Sized {
     type Placement: appkit::Placement<Self>;
     type Local: appkit::Localside<Self>;
-    type Report;
 
-    fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe>;
+    fn choreography() -> impl hibana::runtime::program::Projectable;
 }
 ```
 
 注意:
 
 - `Projectable` は appkit 側の逃げ trait にしない
-- hibana/projection 側の正式 trait にする
+- hibana runtime 側の正式 trait にする
 - appkit が独自に blanket impl して wrapper 化しない
 - user-facing API に `g::steps` や `Program<steps::...>` 型名を出さない
 - `Artifacts` は `Capsule` の associated type にしない
@@ -166,17 +149,23 @@ pub trait Capsule {
 
 ```rust
 pub trait LogicalImage<C: appkit::Capsule> {
-    type Exit<R>;
+    type Carrier<'a>: hibana::runtime::transport::Transport + 'a
+    where
+        Self: 'a,
+        C: 'a;
 
-    const IMAGE_ID: appkit::ImageId;
-    const SITE_ID: appkit::SiteId;
     const REQUESTED_ROLES: appkit::RoleSet;
-    const CARRIER: appkit::CarrierKind;
 
     fn init() -> Self;
     fn safe_state(&mut self);
+    fn carrier<'a>() -> Self::Carrier<'a>
+    where
+        C: 'a;
 }
 ```
+
+`run` は requested roles の projection / attach が成立した後に `safe_state`
+を呼ぶ。caller に logical image の mutable access は渡さない。
 
 `REQUESTED_ROLES` は必ず次で検証する。
 
@@ -219,48 +208,40 @@ image の `REQUESTED_ROLES` だけ。peer core / peer process の role を同じ
 RP2040 Baker proof の固定方針:
 
 ```text
-core0 = kernel-driver logical image = role 0 slice
+core0 = driver logical image = role 0 slice
 core1 = WASI P1 engine logical image = role 1 slice
-carrier = site::rp2040::SIO
+carrier = example-defined RP2040 SIO transport
 ```
 
 同じ physical firmware に両方の logical images が入っていても、core0 と
 core1 はそれぞれ自分の projection slice だけを materialize する。進行は
-`Endpoint` / `site::rp2040::SIO` を通る typed choreography frame だけで
+`Endpoint` / example-defined SIO transport を通る typed choreography frame だけで
 成立する。
 
-## ArtifactBundle
+## Artifact Binding
 
-`ArtifactBundle` は通常の Rust 値。
+artifact は logical image の実行入力であり、authority ではない。
+Baker/RP2W の固定 2-image firmware では driver image は常に `NoWasi`、
+engine image は capsule の `run_engine_image()` が `NoWasi` または `WasiImage` を
+`appkit::run` に直接渡す。
 
-```rust
-pub trait ArtifactBundle<C: appkit::Capsule> {
-    fn for_image<I>(&self) -> I::Artifact
-    where
-        I: appkit::LogicalImage<C>,
-        Self: appkit::ArtifactForImage<C, I>;
-}
-
-pub trait ArtifactForImage<C: appkit::Capsule, I: appkit::LogicalImage<C>> {
-    fn artifact_for_image(&self) -> I::Artifact;
-}
-```
-
-artifact selection は logical image ごとに型で固定する。
+artifact selection は `run` の入力値で固定する。
 driver image に `NoWasi`、engine image に `WasiImage` を渡すような split を
-bundle 側の曖昧な associated type で誤魔化さない。
+空 marker や別 bundle trait に逃がさない。
 
-`run` の引数型は実装時に明確化する。
-ここが曖昧だと mode enum が戻る。
+複数の site image を持つ example でも、artifact は image marker の inherent
+constructor か `appkit::NoWasi` で直接渡す。別 bundle trait は正規 vocabulary にしない。
+
+`run` は artifact 値を直接受け取る。driver は `NoWasi`、WASI engine は
+`WasiImage` を渡し、mode enum や bundle trait は作らない。
 
 ## Execution API
 
 public execution path は一本だけ。
 
 ```rust
-appkit::run::<LogicalImage, Capsule>(
-    artifacts.for_image::<LogicalImage>(),
-)
+appkit::run::<LogicalImage, Capsule>(artifact);
+Capsule::run_engine_image();
 ```
 
 作らないもの:
@@ -276,7 +257,7 @@ appkit::run::<LogicalImage, Capsule>(
 
 ## Projection Metadata / Capacity Derivation
 
-ここが blocking item。
+ここは appkit が消費する検証事実であり、appkit 独自 DSL の入口ではない。
 
 capacity / imports / roles / routes は raw hibana choreography または projected `RoleProgram` の metadata から導く。
 
@@ -293,13 +274,14 @@ capacity / imports / roles / routes は raw hibana choreography または projec
 - lane_set
 - label_set
 - typed message specs
-- control specs
 - policy_set
 - route shapes
 - par ownership
+- roll / reentry shape
 - wasi_imports implied by typed messages
 - route witness inputs
 - descriptor fingerprints
+- tap / evidence specs
 
 hibana 側に metadata visitor が足りないなら、足す場所は appkit ではない。
 hibana / projection 側に neutral projection metadata visitor を足す。
@@ -321,30 +303,12 @@ choreography:
 Only choreography can authorize protocol progress.
 All other facts are consumed only at choreography-open phases.
 
-## RouteKey
+## Route / Topology Witnesses
 
-route coordinate family は一つ。
+Route / topology coordinates are derived witnesses from Hibana projection,
+resolver evidence, transport observation, or example-local facts. They are not
+an appkit public routing vocabulary.
 
-```rust
-pub struct RouteKey<Target> {
-    target: Target,
-    lane: Lane,
-    label: RouteLabel,
-    generation: SessionGeneration,
-    policy: PolicySlot,
-}
-
-pub struct RoleTarget {
-    site: SiteId,
-    role: RoleId,
-}
-
-pub struct NodeTarget {
-    node: NodeId,
-}
-```
-
-`RouteKey` は導出 witness。
 app author に通常 path で手書きさせない。
 
 削除:
@@ -371,39 +335,32 @@ proof は public API ではなく、public API が十分であることの証明
 
 - `examples/`
 - `tests/`
-- private `projects/`
 
 Baker は実機デモなので、physical firmware package も `examples/baker-firmware`
 に置く。これは Cargo の単発 `examples/*.rs` target ではなく、no_std firmware
 を build する workspace package。
 
-example が import してよいもの:
+example が import してよい root:
 
 ```rust
-use hibana_pico::{choreography, appkit, site};
+use hibana_pico::appkit;
 ```
 
-## Implementation Order
+## Current Settled Shape
 
-初手はこの順序で固定する。
-
-1. root freeze: `choreography` / `appkit` / `site` only
-2. delete `appkit::Choreo` and `appkit::Program`
-3. delete `pub mod proof`
-4. introduce `Capsule` / `LogicalImage` / `Placement` / `ArtifactBundle` / `run`
-5. move Baker to private projects + examples/tests proof
-6. move metadata derivation to hibana/projection side
-7. Cargo workspace physical artifact packages
-8. attached engine invariant
-9. same-artifact boundary preservation
-10. sealed `Localside` contexts
-11. raw hibana helper functions only
-12. projection-derived logical images
-13. `RouteKey` unification
-14. ChoreoFS as fact resolver
-15. site families
-16. heterogeneous example
-17. deletion / hygiene
+- root freeze: `appkit` only
+- no `appkit::Choreo`, `appkit::Program`, `pub mod proof`, or appkit side DSL
+- `Capsule` / `LogicalImage` / `Placement` / `Localside` / `run`
+- metadata derivation stays in hibana/projection
+- Cargo workspace physical artifact packages
+- attached engine invariant
+- same-artifact boundary preservation
+- sealed `Localside` contexts
+- raw `hibana::g` choreography only
+- projection-derived logical images
+- ChoreoFS as fact resolver
+- one generic `appkit::Local<Image>` marker
+- heterogeneous examples remain proofs, not core API
 
 No custom CLI phase.
 No codegen phase.
@@ -424,21 +381,21 @@ No macro DSL phase.
 - Same artifact never means direct call or authority merge.
 - Core / process / address-space split is always represented as distinct logical images.
 - Each `appkit::run::<LogicalImage, Capsule>()` attaches only that image's requested role slice.
-- RP2040 core0/core1 split uses `site::rp2040::SIO` as a real carrier, not appkit in-process queues.
+- RP2040 core0/core1 split uses an example-defined SIO transport as a real carrier, not appkit in-process queues.
 - Every cross-site link carries typed choreography frames only.
 - Every external boundary is typed and endpoint-driven.
 - Site may host engine capacity but may not complete or authorize WASI imports.
-- `RouteKey<Target>` is a derived witness, not app-level authority.
+- Route / topology evidence is a derived witness, not app-level authority.
 - ChoreoFS resolves facts; it does not own progress authority.
 - Ledger materializes fd/lease/session facts.
-- Site provides site facts only.
+- Appkit Local provides site facts only.
 - Placement decides location, not legality.
 - Localside receives sealed contexts only.
 - Capacity derives from hibana/projection metadata, not appkit DSL.
-- Metadata derivation is a blocking item.
+- Appkit validates requested roles against projected Hibana role witnesses.
 - Cargo features select implementation capacity, not Capsule meaning.
 - Rust/Cargo build physical artifacts; no custom CLI exists.
 - Domain semantics live in examples/Capsules, not core.
 - No public kernel/machine/port/projects/proof path.
-- No compatibility aliases.
+- No aliases for deleted public paths.
 - No heuristic recovery.

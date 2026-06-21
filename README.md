@@ -16,23 +16,23 @@ It is not an OS, host runner, board framework, custom build tool, custom
 choreography DSL, domain runtime, or general Wasm runtime.
 
 The only runnable Wasm artifact target is `wasm32-wasip1` / WASI Preview 1.
-Core Wasm execution is a private VM implementation detail, not a public module
-runner. There is no Preview 2, WIT, or Component Model public path.
+Wasm execution, WASI P1 import payloads, and ChoreoFS driver facts are owned by
+the sibling `hibana-wasip1-runtime` crate. `hibana-pico` only attaches those
+facts to Hibana Endpoint/carrier progress. There is no Preview 2, WIT, or
+Component Model public path.
 
 ## Public Surface
 
 The crate exposes only:
 
 ```rust
-pub mod choreography;
 pub mod appkit;
-pub mod site;
 ```
 
-`kernel` is a private implementation module for the WASI P1 VM and appkit
-services. There are no root `machine`, `port`, `projects`, `artifacts`, or
-`proof` modules/directories in the crate shape. Demo build packages live under
-`examples/`.
+There is no root `choreography`, `kernel`, `machine`, `port`, `projects`,
+`artifacts`, or `proof` module in the crate shape. Demo build packages live
+under `examples/`. The WASI P1 engine implementation is not an appkit module;
+it is `hibana-wasip1-runtime`.
 
 `appkit` itself is also a curated facade. Its public path stays flat as
 `hibana_pico::appkit::*`; implementation modules under `src/appkit/` remain
@@ -44,12 +44,10 @@ Users define a Capsule from raw `hibana::g` choreography:
 
 ```rust
 pub trait Capsule {
-    type Universe: hibana::integration::runtime::LabelUniverse;
     type Placement;
     type Local;
-    type Report;
 
-    fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe>;
+    fn choreography() -> impl hibana::runtime::program::Projectable;
 }
 ```
 
@@ -71,16 +69,11 @@ A logical image is a requested projection slice:
 
 ```rust
 pub trait LogicalImage<C: appkit::Capsule> {
-    type Artifact;
-    type Exit<R>;
-    type Carrier<'a>: hibana::integration::Transport + 'a
+    type Carrier<'a>: hibana::runtime::transport::Transport + 'a
     where
         Self: 'a;
 
-    const IMAGE_ID: appkit::ImageId;
-    const SITE_ID: appkit::SiteId;
     const REQUESTED_ROLES: appkit::RoleSet;
-    const CARRIER: appkit::CarrierKind;
 
     fn init() -> Self;
     fn safe_state(&mut self);
@@ -88,49 +81,54 @@ pub trait LogicalImage<C: appkit::Capsule> {
 }
 ```
 
-If `type Artifact = appkit::WasiImage<'_>`, the image also implements
+`appkit::run` calls `safe_state` after the requested roles are projected and
+attached; callers do not receive mutable access to the logical image.
+
+If `appkit::run` receives an `appkit::WasiImage<'_>`, the image also implements
 `appkit::WasiGuestImage<C>` to provide its site-local in-place guest storage.
-If `type Artifact = appkit::NoWasi`, the image does not implement a WASI guest
-storage hook and must not lease guest storage at all.
+If `appkit::run` receives `appkit::NoWasi`, the image does not lease guest
+storage at all.
+With `wasm-engine-core`, `Capsule::WASI_GUEST_DRIVE` defaults to
+`appkit::WasiGuestDrive::Canonical`, meaning appkit owns the endpoint/carrier
+WASI P1 import loop. A capsule that must step the guest from localside evidence
+uses `appkit::WasiGuestDrive::Localside`; this is an explicit ownership choice,
+not a hidden rescue path.
 
 `REQUESTED_ROLES` is not authority. `appkit::run` validates it against the
-Capsule placement and Hibana projection metadata. Static WASI import tables are
-not admission authority and are never used as a pre-choreography allowlist.
-`appkit::run` may read an artifact as implementation/load evidence, but it must
-not reject a `WasiImage` because static imports exceed the requested role
-slice. An import becomes meaningful only when the guest actually calls it; that
+Capsule placement, the linked typed role domain, and the concrete Hibana
+`RoleProgram` witnesses materialized for that logical image. Static WASI import
+tables are not admission authority and are never used as a pre-choreography
+allowlist. `appkit::run` may read an artifact as implementation/load evidence,
+but a WASI import becomes meaningful only when the guest actually calls it; that
 runtime request must cross the projected Endpoint/carrier frontier, or the
 session faults closed.
+The endpoint session belongs to the `Capsule` choreography instance, not to the
+individual logical image. Peer logical images that project different roles of
+the same capsule therefore share the same session unless the capsule explicitly
+chooses a different `SESSION_ID: core::num::NonZeroU32` for another choreography
+instance.
+An empty logical image is not a valid attachment target: `RoleSet::from_bits(0)`
+fails at construction time, and `RoleSet::single(role)` is the normal one-role
+case.
 WASI guests are expected to be ordinary Rust `std` programs when that is the
 ergonomic choice. Guest authors do not call Hibana-specific exit helpers. If the
-WASI command returns normally, the VM may surface it as `Event::Done`; appkit
-maps that to `EngineReq::ProcExit(0)` only when the projected choreography has an
-explicit `proc_exit` terminal phase. If the guest actually calls `proc_exit`, the
-VM surfaces `Event::Exit(code)` and appkit uses the same projected terminal
-phase. A static `proc_exit` import is load evidence only, never proof that the
-guest dynamically called it.
-WASI guests do not emit Hibana loop-control messages. If a repeated WASI import
-stream is legal, appkit may bridge it with projected `LoopContinue` /
-`LoopBreak` control only when the endpoint frontier admits those controls. If
-the choreography is straight-line, appkit does not synthesize loop control; the
-next real import either progresses through the frontier or faults closed.
-If projection metadata exceeds the linked bounded appkit metadata capacity,
-`appkit::run` rejects the image. It must never silently truncate labels, loop
-controls, policies, or completion metadata and then guess the missing capacity.
+WASI command returns normally, the VM surfaces the same explicit exit event as
+status 0. If the guest calls `proc_exit`, the VM surfaces that exit code and
+appkit sends the real projected `EngineReq::ProcExit(code)`. A static
+`proc_exit` import is load evidence only, never proof that the guest dynamically
+called it.
+WASI guests do not emit out-of-band loop messages. If a repeated WASI import
+stream is legal, the choreography must express that repetition with Hibana
+`roll`/reentry over the actual WASI import messages. If the choreography is
+straight-line, appkit does not synthesize loop authority; the next real import
+either progresses through the frontier or faults closed.
 When appkit attaches a logical image to Hibana, it passes only storage and clock
-into `hibana::integration::runtime::Config`. Lane domain and endpoint-slot
-capacity are derived by Hibana from its typed domain and projected resident
-descriptors. Operational deadline fuses belong to the logical image's concrete
-carrier/site runtime, not to appkit config or endpoint methods. `hibana-pico`
-must not reintroduce caller-chosen lane windows, endpoint-slot knobs, or
-deadline knobs. Hibana attach must read pre-existing ROM/static resident
-descriptors; appkit must not run a hidden pre-attach lowering phase or provide
-lowering scratch. Runtime lane storage starts empty and grows from attached
-descriptors while preserving existing session state, so logical image attach
-order is not a capacity contract. Resident descriptors are Hibana-owned views
-backed by monomorphized descriptor query code and immutable projection metadata,
-not generated blobs, lazy caches, atomics, locks, heap allocation, or
-maximum-size static arrays.
+into `hibana::runtime::Config`. Lane domain and endpoint-slot capacity are
+derived by Hibana from its typed domain and projected resident descriptors.
+Operational deadline fuses belong to the logical image's concrete carrier/site
+runtime, not to appkit config or endpoint methods. `hibana-pico` must not
+reintroduce caller-chosen lane windows, endpoint-slot knobs, deadline knobs,
+hidden pre-attach lowering, or local projection-capacity summaries.
 
 A physical Cargo artifact may contain one or more logical images. This is needed
 for targets such as RP2040 dual-core firmware, where one ELF/flash image can
@@ -140,17 +138,17 @@ Same artifact, firmware, process, or address space never implies direct calls,
 authority merge, or syscall shortcuts. The boundary remains Endpoint/carrier.
 Each `appkit::run::<LogicalImage, Capsule>()` attaches only that logical image's
 validated `REQUESTED_ROLES`; peer core or peer process roles are not attached as
-a hidden fallback. Bare-metal scheduler storage is owned by the logical image
+a hidden progress path. Bare-metal scheduler storage is owned by the logical image
 storage lease; appkit must not map every nonzero role onto a hidden role1 arena.
 On bare metal, one `appkit::run` owns one long-lived role task. Multiple roles in
 one firmware are represented as multiple logical images selected by the
 site-local entry code, not as a co-located hidden scheduler.
-On RP2040, the Core0/Core1 split is connected by
-`example-defined rp2040_sio::SIO` as a real carrier. That carrier preserves the
-logical lane passed by Hibana `Transport::open(local_role, session_id, lane)`,
-stores it in SIO frame metadata, demultiplexes before yielding payload bytes, and
-treats `recv_frame_hint` as a route-observation hint-drain rather than payload
-receive.
+On RP2040, the Core0/Core1 split is connected by an example-defined SIO
+transport as a real carrier. That carrier preserves the
+logical lane carried by Hibana `Transport::open(PortOpen)`, stores it in SIO
+frame metadata, demultiplexes before yielding payload bytes, and returns payload
+bytes plus the staged `FrameHeader` inside the same `ReceivedFrame` from
+`poll_recv`.
 Its `poll_send` and `poll_recv` do not spin inside FIFO push/pop loops. Partial
 frames are stored in carrier state across polls; FIFO readiness returns
 `Poll::Pending`, not an unbounded in-carrier wait.
@@ -174,12 +172,14 @@ Route observation is lane-scoped. A frame label by itself is not route
 authority, especially when different arms use the same wire label on different
 lanes. Carrier hints may wake or keep an endpoint from parking on the wrong
 lane, but they must not mint a continuation; only projected resolver / route /
-payload evidence can do that. `recv_frame_hint` is drained once for the staged
-frame and resets only when fresh receive state is staged.
+payload evidence can do that. There is no separate receive-observation hook:
+the staged frame header crosses the transport boundary only with the
+`ReceivedFrame` that carries the payload bytes, and it must not commit
+progress by itself.
 
-## Sites
+## Logical Sites
 
-`site` provides one generic logical-site marker, `site::Local<Image>`. Carrier
+`appkit` provides one generic logical-site marker, `appkit::Local<Image>`. Carrier
 metadata and transport implementations live in examples or user crates,
 including in-process carriers. A site may host linked engine capacity and typed boundary handles, but
 it must not complete or authorize WASI P1 imports.
@@ -189,18 +189,18 @@ choreography to which that guest is attached:
 
 ```text
 WASI P1 guest
-  -> Engine side
+  -> Hibana WASIP1 runtime engine side
   -> typed EngineReq
   -> Endpoint / carrier
   -> Driver side
   -> ledger / ChoreoFS / resolver / boundary facts
   -> typed EngineRet
   -> Endpoint / carrier
-  -> Engine side
+  -> Hibana WASIP1 runtime engine side
   -> import completion
 ```
 
-There is no host filesystem fallback, raw socket authority, raw MMIO from a
+There is no host filesystem authority, raw socket authority, raw MMIO from a
 guest, route inference, timeout rescue, shape heuristic, lane mismatch recovery,
 or co-located syscall shortcut.
 
@@ -247,8 +247,15 @@ deadline-fault:
 
 timer-route:
   Timer/clock fact -> resolver-selected route arm over RP2040 SIO
-  No shared atomic readiness flag; TimerFiredFact plus the projected route
-  control tag are the evidence observed by the resolver path.
+  No shared atomic readiness flag; TimerFiredFact plus projected route evidence
+  are observed by the resolver path.
+
+epf-policy-timer:
+  role0 delivers Target::Policy bytecode to role1 as a normal SIO choreography message
+  timer IRQ fact resolver reads the RP2040 timer IRQ-ready fact and selects the timer-expired arm
+  each resolver entry feeds that same timer IRQ-ready fact to EPF as a TapEvent
+  loaded EPF policy VM reads the timer TapEvent input and selects the response-ready arm
+  both core0 and core1 drain real Hibana TapEvents into EPF observe markers
 ```
 
 The Baker hardware proof set also checks that failure evidence and preview
@@ -289,8 +296,7 @@ Useful gates:
 ```sh
 cargo check --all-targets
 cargo test --test host_architecture_boundaries
-cargo test --test host_capsule_api
-cargo test -p hibana-pico --features wasm-engine-core,wasip1-sys-fd-write --lib drive_wasi_guest_completes_import_only_through_endpoint_carrier
+cargo test --test host_capsule_api host_capsule_uses_current_hibana_surface
 bash ./scripts/check_wasip1_guest_builds.sh
 bash ./scripts/check_baker_section_budgets.sh
 bash ./scripts/check_plan_pico_gates.sh
@@ -310,10 +316,12 @@ checks RAM markers:
 
 ```sh
 bash ./scripts/run_baker_link_hardware_pattern.sh timer-route
+bash ./scripts/run_baker_link_hardware_pattern.sh epf-policy-timer
 bash ./scripts/run_baker_link_hardware_pattern.sh deadline-fault
 bash ./scripts/run_baker_link_hardware_pattern.sh preview-probe
 bash ./scripts/run_baker_link_hardware_pattern.sh endpoint-fault
 bash ./scripts/run_baker_link_hardware_pattern.sh endpoint-poison
+bash ./scripts/run_baker_link_hardware_pattern.sh capacity-fault
 ```
 
 Run every Baker proof after changing appkit attach, carrier, WASI VM driving, or
@@ -324,8 +332,25 @@ for pattern in \
   traffic choreofs-traffic choreofs-traffic-loop \
   fail-safe recovery many-reentry panic-marker \
   endpoint-fault endpoint-poison preview-probe \
-  deadline-fault timer-route
+  deadline-fault timer-route epf-policy-timer capacity-fault
 do
   bash ./scripts/run_baker_link_hardware_pattern.sh "$pattern"
 done
 ```
+
+`capacity-fault` is the loaded EPF observe-bytecode proof for
+`TransportFault/Capacity`: the firmware retains the actual Hibana `TapEvent`,
+loads observe bytecode through the reserved EPF RAM image area, runs the VM, and
+copies the compact `Out` into RAM markers.
+
+`epf-policy-timer` is the loaded EPF policy-bytecode proof. The host commits a
+`Target::Policy(57)` image into the BakerLink SWD mailbox. The first Hibana route
+resolver reads that mailbox-ready fact and selects the image-load branch, where
+role0 delivers the staged image to role1 as an ordinary SIO choreography payload.
+The later timer IRQ fact resolver reads the RP2040 timer IRQ-ready fact and
+would choose the timer-expired branch after the interrupt fires. The EPF-wrapped
+resolver feeds that same timer fact to EPF as Hibana evidence at resolver entry
+on each side; the loaded EPF policy VM requires `input[0] == 1` and chooses the
+response-ready branch instead. The demo cannot reach its success marker unless
+mailbox ingress, resolver-selected image-load choreography, timer-fact ingestion,
+and Hibana's typed resolver path all work.

@@ -16,7 +16,6 @@ fi
 
 bash ./scripts/check_wasip1_guest_builds.sh
 bash ./scripts/check_baker_section_budgets.sh
-bash ./scripts/check_pico_nod_app.sh
 # uno-q is an active heterogeneous example. Keep it in the workspace, but
 # postpone architecture audits that would inspect its incomplete bins.
 cargo check --workspace --exclude uno-q-heterogeneous --all-targets
@@ -24,14 +23,10 @@ cargo check --workspace --exclude uno-q-heterogeneous --all-targets --all-featur
 cargo check -p heterogeneous-split-example --all-targets
 cargo check -p heterogeneous-split-example --target thumbv6m-none-eabi --bin rp2040-io
 cargo check -p heterogeneous-split-example --target thumbv8m.main-none-eabihf --bin m33-realtime
-cargo test -p pico-nod-example
-cargo test -p xbot-example
-cargo test -p xbot-example --features embed-wasip1-artifacts
-cargo test -p xbot-example --features embed-wasip1-artifacts,runtime-wasip1
 cargo test --test host_architecture_boundaries
-cargo test --test host_capsule_api --features wasm-engine-core,wasip1-sys-fd-write,wasip1-sys-path-open,wasip1-sys-poll-oneoff,wasip1-sys-proc-exit
-cargo test -p hibana-pico --features wasm-engine-core,wasip1-sys-fd-write --lib drive_wasi_guest_completes_import_only_through_endpoint_carrier
-cargo test -p hibana-pico --features wasm-engine-core,wasip1-sys-fd-write --lib run_drives_wasi_guest_import_completion_through_endpoint_carrier
+cargo test --test host_capsule_api --features wasm-engine-core
+cargo test -p hibana-pico --features wasm-engine-core --lib drive_wasi_guest_completes_import_only_through_endpoint_carrier
+cargo test -p hibana-pico --features wasm-engine-core --lib run_drives_wasi_guest_import_completion_through_endpoint_carrier
 cargo test -p hibana-pico --all-features --lib
 
 if rg -n -S 'pub mod (kernel|machine|port|projects|proof);' src/lib.rs; then
@@ -89,7 +84,7 @@ if rg -n -S 'Box<dyn Future|Vec<ScheduledTask|Box::pin|std::vec!\[' src/appkit; 
   exit 1
 fi
 
-if rg -n -S 'pub mod (carrier|host|linux|mcu|rp2040|swarm|process|bare)|pub struct (Native|Core)|pub const (IN_PROCESS|TCP|UDP|UART|USB)|SioTransport|core_id\(\)' src/site.rs; then
+if rg -n -S 'pub mod (carrier|host|linux|mcu|rp2040|swarm|process|bare)|pub struct (Native|Core)|pub const (IN_PROCESS|TCP|UDP|UART|USB)|SioTransport|core_id\(\)' src/appkit src/lib.rs; then
   echo "plan gate failed: core site must stay generic; board/carrier-specific site families belong in examples or user crates" >&2
   exit 1
 fi

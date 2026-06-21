@@ -29,26 +29,50 @@ fn appkit_sources() -> String {
 }
 
 #[test]
+fn epf_plan_keeps_receive_metadata_inside_received_payload_boundary() {
+    let plan = include_str!("../plan_epf.md");
+
+    assert_present(
+        "plan_epf.md",
+        plan,
+        &[
+            "poll_recv returns ReceivedFrame",
+            "ReceivedFrame binds payload bytes and optional FrameHeader in the same value",
+            "ReceivedFrame::framed header must describe the exact same staged frame as its payload",
+            "missing header remains unknown and must not be synthesized from expected context",
+            "post-poll receive metadata peek API does not exist",
+            "there is no receive-observation side channel",
+        ],
+    );
+    assert_absent(
+        "plan_epf.md",
+        plan,
+        &[
+            "peek_recv_frame",
+            "poll_recv returns Payload",
+            "poll_recv -> Payload",
+            "Payload remains the",
+            "Receive Frame Peek",
+            "can expose staged FrameHeader through",
+        ],
+    );
+}
+
+#[test]
 fn public_root_is_the_capsule_surface_only() {
     let lib = include_str!("../src/lib.rs");
 
-    assert_present(
-        "src/lib.rs",
-        lib,
-        &[
-            "pub mod appkit;",
-            "pub mod choreography;",
-            "pub mod site;",
-            "mod kernel;",
-        ],
-    );
+    assert_present("src/lib.rs", lib, &["pub mod appkit;"]);
     assert_absent(
         "src/lib.rs",
         lib,
         &[
+            "pub mod site;",
+            "pub mod choreography;",
             "pub mod board;",
             "pub mod proof;",
             "pub mod kernel;",
+            "mod kernel;",
             "pub mod machine;",
             "pub mod port;",
             "pub mod projects;",
@@ -60,19 +84,102 @@ fn public_root_is_the_capsule_surface_only() {
 }
 
 #[test]
+fn placements_fail_fast_instead_of_falling_back_to_a_role_kind() {
+    let placements = [
+        (
+            "examples/baker-firmware/src/lib.rs",
+            include_str!("../examples/baker-firmware/src/lib.rs"),
+        ),
+        (
+            "examples/rp2w-firmware/src/lib.rs",
+            include_str!("../examples/rp2w-firmware/src/lib.rs"),
+        ),
+        (
+            "examples/uno-q-heterogeneous/src/lib.rs",
+            include_str!("../examples/uno-q-heterogeneous/src/lib.rs"),
+        ),
+        (
+            "tests/host_capsule_api.rs",
+            include_str!("host_capsule_api.rs"),
+        ),
+    ];
+
+    for (path, source) in placements {
+        assert_absent(
+            path,
+            source,
+            &[
+                "_ => appkit::RoleKind::",
+                "_ => RoleKind::",
+                "other => appkit::RoleKind::",
+                "other => RoleKind::",
+            ],
+        );
+    }
+}
+
+#[test]
+fn sio_transport_role_mapping_is_explicit() {
+    let transports = [
+        (
+            "examples/baker-firmware/src/lib.rs",
+            include_str!("../examples/baker-firmware/src/lib.rs"),
+            "other => panic!(\"baker SIO transport has no core assignment for role {other}\")",
+            "other => panic!(\"baker SIO transport has no tx session xor for role {other}\")",
+        ),
+        (
+            "examples/rp2w-firmware/src/lib.rs",
+            include_str!("../examples/rp2w-firmware/src/lib.rs"),
+            "other => panic!(\"rp2w SIO transport has no core assignment for role {other}\")",
+            "other => panic!(\"rp2w SIO transport has no tx session xor for role {other}\")",
+        ),
+    ];
+
+    for (path, source, core_panic, xor_panic) in transports {
+        assert_present(
+            path,
+            source,
+            &[
+                "0 | 2 => 0",
+                "1 => 1",
+                "2 => 0",
+                "const SIO_TRACE_NO_FRAME_LABEL: u8 = 0;",
+                "SIO_TRACE_NO_FRAME_LABEL",
+                core_panic,
+                xor_panic,
+            ],
+        );
+        assert_absent(
+            path,
+            source,
+            &[
+                "_ => 0",
+                "other => 0",
+                ".unwrap_or(0)",
+                "pub struct SioTx",
+                "pub struct SioRx",
+                "pub fn core_id()",
+                "pub fn ready_to_recv()",
+                "pub fn ready_to_send()",
+                "pub fn status()",
+                "pub fn clear_errors()",
+                "pub fn try_push(",
+                "pub fn try_pop()",
+                "#[derive(Debug, Default)]\n    pub struct SioTx",
+                "#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\n    pub struct SioTransport",
+            ],
+        );
+    }
+}
+
+#[test]
 fn gate_scans_current_guest_layout_and_ignores_nested_targets() {
     let ignore = include_str!("../.gitignore");
     let gate = include_str!("../scripts/check_plan_pico_gates.sh");
-    let pico_nod_app_gate = include_str!("../scripts/check_pico_nod_app.sh");
-    let pico_nod_release_gate = include_str!("../scripts/check_pico_nod_release_readiness.sh");
     let wasip1_gate = include_str!("../scripts/check_wasip1_guest_builds.sh");
     let section_gate = include_str!("../scripts/check_baker_section_budgets.sh");
 
-    assert_present(
-        ".gitignore",
-        ignore,
-        &["target/", "/examples/pico-nod/apple/PicoNodApp/.build/"],
-    );
+    assert_present(".gitignore", ignore, &["target/"]);
     assert_absent(
         ".gitignore",
         ignore,
@@ -85,48 +192,14 @@ fn gate_scans_current_guest_layout_and_ignores_nested_targets() {
             "src examples guest Cargo.toml",
             "src tests examples guest",
             "bash ./scripts/check_baker_section_budgets.sh",
-            "bash ./scripts/check_pico_nod_app.sh",
             "cargo check --workspace --exclude uno-q-heterogeneous --all-targets",
             "--glob '!examples/uno-q-heterogeneous/**'",
-            "cargo test -p pico-nod-example",
-            "cargo test -p xbot-example",
             "git ls-files --others --exclude-standard | rg -n '/target/'",
             "cargo check -p heterogeneous-split-example --target thumbv6m-none-eabi --bin rp2040-io",
             "(^|[(,])\\s*_[A-Za-z0-9_]+\\s*:",
         ],
     );
     assert_absent("scripts/check_plan_pico_gates.sh", gate, &[" apps"]);
-    assert_present(
-        "scripts/check_pico_nod_app.sh",
-        pico_nod_app_gate,
-        &[
-            "examples/pico-nod/apple/PicoNodApp",
-            "swift test",
-            "swift build -c release",
-            "xcodebuild",
-            "-destination 'generic/platform=iOS'",
-            "CODE_SIGNING_ALLOWED=NO",
-            "Metadata extraction skipped",
-            "warning:|error:",
-        ],
-    );
-    assert_present(
-        "scripts/check_pico_nod_release_readiness.sh",
-        pico_nod_release_gate,
-        &[
-            "PICO_NOD_APPLE_TEAM_ID",
-            "PICO_NOD_BUNDLE_ID",
-            "PICO_NOD_APNS_KEY_ID",
-            "PICO_NOD_APNS_PRIVATE_KEY_PATH",
-            "PICO_NOD_STORE_ISSUER_ID",
-            "PICO_NOD_STORE_PRIVATE_KEY_PATH",
-            "PICO_NOD_TLS_TERMINATION",
-            "PICO_NOD_EXTERNAL_ACTION_ENDPOINT",
-            "PICO_NOD_EXTERNAL_ACTION_CREDENTIAL_PATH",
-            "xcodebuild first launch setup",
-            "pico-nod release readiness: not ready",
-        ],
-    );
     assert_present(
         "scripts/check_wasip1_guest_builds.sh",
         wasip1_gate,
@@ -165,27 +238,33 @@ fn gate_scans_current_guest_layout_and_ignores_nested_targets() {
 }
 
 #[test]
-fn appkit_host_runs_deadline_clock_from_wall_time_not_poll_count() {
+fn appkit_attach_uses_hibana_rendezvous_without_deadline_knobs() {
     let appkit = include_str!("../src/appkit/internal.rs");
 
     assert_present(
         "src/appkit/internal.rs",
         appkit,
         &[
-            "struct HostMonotonicClock",
-            "start: std::time::Instant",
-            "self.start.elapsed().as_millis()",
-            "type AppkitAttachClock = HostMonotonicClock",
-            "type AppkitAttachClock = hibana::integration::runtime::CounterClock",
-            "fn new_appkit_attach_clock() -> AppkitAttachClock",
-            "let clock = new_appkit_attach_clock();",
-            "new_appkit_attach_clock(),",
+            "let rendezvous_slab = attach_slab;",
+            ".rendezvous(rendezvous_slab, carrier)",
+            "let session = appkit_session(C::SESSION_ID);",
+            "let mut tap = rendezvous.tap();",
+            "tasks.poll_until_quiescent(|| C::observe(&mut tap));",
+            "embedded_tasks.poll_forever(|| C::observe(&mut tap))",
+        ],
+    );
+    assert_absent(
+        "src/appkit/internal.rs",
+        appkit,
+        &[
+            "HostMonotonicClock",
+            "operational deadline fuse into `hibana::runtime::Config`",
         ],
     );
 }
 
 #[test]
-fn uno_q_uart_carrier_defaults_to_hardware_safe_byte_pacing() {
+fn uno_q_uart_carrier_uses_hardware_safe_byte_pacing() {
     let uno_q = include_str!("../examples/uno-q-heterogeneous/src/lib.rs");
 
     assert_present(
@@ -228,13 +307,14 @@ fn uno_q_llm_demo_uses_input_role_cli_and_choreofs_only() {
             "UNO_Q_HUMAN_INPUT_VOICE_CMD",
             "HumanInputText::from_bytes",
             "local_llm_human_face_prompt",
-            "Return only one shell command",
+            "Return exactly one shell command",
             "LocalLlmServer",
             "POST /completion",
             "GET /health",
             "DEFAULT_UNO_Q_LOCAL_LLM_SERVER",
             "FACE_FRAME_PATH",
-            "branch.decode::<WasiFdWriteReqMsg>()",
+            "pub fn wasi_image() -> appkit::WasiImage<'static>",
+            "branch.recv::<WasiFdWriteReqMsg>()",
             "FaceFrame::decode_payload",
             "m33_board_show_face(frame.face())",
         ],
@@ -248,6 +328,7 @@ fn uno_q_llm_demo_uses_input_role_cli_and_choreofs_only() {
             "WasiFdWriteBoundaryRouteControl",
             "WasiFdWriteDriverRouteControl",
             "WasiFdWriteBoundaryPeerRouteMsg",
+            "fn artifact()",
             "fn wasi_fd_write_route",
         ],
     );
@@ -272,15 +353,20 @@ fn uno_q_llm_demo_uses_input_role_cli_and_choreofs_only() {
             "HumanInput role",
             "prompt shell",
             "voice shell",
-            "The old prompt-file injection path is not\npart of the demo",
-            "The input role does not\nclassify, rewrite, or convert the text",
+            "The prompt-file injection path is not\npart of the demo",
+            "it does not classify,\n  rewrite, or convert the text into face commands.",
             "M33 and the local LLM never exchange typed messages directly",
+            "HardwarePeerLoopProof",
         ],
     );
     assert_present(
         "examples/uno-q-heterogeneous/src/bin/uno_q_hardware_proof.rs",
         hardware_cli,
         &[
+            "enum ProofMode",
+            "ProofMode::FaceLoop",
+            "HardwarePeerLoopProof",
+            "::wasi_image()",
             "--prompt-shell",
             "--voice-shell",
             "--voice-cmd",
@@ -289,29 +375,29 @@ fn uno_q_llm_demo_uses_input_role_cli_and_choreofs_only() {
         ],
     );
 
-    let old_prompt_file_const = ["DEFAULT_UNO_Q_LOCAL_LLM_", "USER_PROMPT_FILE"].concat();
-    let old_prompt_file_env = ["UNO_Q_LOCAL_LLM_", "USER_PROMPT_FILE"].concat();
-    let old_interactive_env = ["UNO_Q_LOCAL_LLM_", "INTERACTIVE"].concat();
-    let old_user_prompt_env = ["UNO_Q_LOCAL_LLM_", "USER_PROMPT"].concat();
-    let old_mood_classifier = ["local_llm_", "mood_key"].concat();
-    let old_mood_words_helper = ["local_llm_", "context_has_any"].concat();
-    let old_prompt_file_script = ["inject_llm_", "prompt.sh"].concat();
+    let removed_prompt_file_const = ["DEFAULT_UNO_Q_LOCAL_LLM_", "USER_PROMPT_FILE"].concat();
+    let removed_prompt_file_env = ["UNO_Q_LOCAL_LLM_", "USER_PROMPT_FILE"].concat();
+    let removed_interactive_env = ["UNO_Q_LOCAL_LLM_", "INTERACTIVE"].concat();
+    let removed_user_prompt_env = ["UNO_Q_LOCAL_LLM_", "USER_PROMPT"].concat();
+    let removed_mood_classifier = ["local_llm_", "mood_key"].concat();
+    let removed_mood_words_helper = ["local_llm_", "context_has_any"].concat();
+    let removed_prompt_file_script = ["inject_llm_", "prompt.sh"].concat();
     assert_absent(
         "examples/uno-q-heterogeneous/src/lib.rs",
         uno_q,
         &[
-            old_prompt_file_const.as_str(),
-            old_prompt_file_env.as_str(),
-            old_interactive_env.as_str(),
-            old_user_prompt_env.as_str(),
-            old_mood_classifier.as_str(),
-            old_mood_words_helper.as_str(),
-            "std::sync::atomic",
-            "AtomicBool",
+            removed_prompt_file_const.as_str(),
+            removed_prompt_file_env.as_str(),
+            removed_interactive_env.as_str(),
+            removed_user_prompt_env.as_str(),
+            removed_mood_classifier.as_str(),
+            removed_mood_words_helper.as_str(),
             "AtomicU8",
             "std::sync::Mutex<Face",
             "ROLE_LOCAL_LLM, g::Role<ROLE_M33_LED_KERNEL>",
             "ROLE_M33_LED_KERNEL, g::Role<ROLE_LOCAL_LLM>",
+            "fn uno_q_hardware_wasi_guest",
+            "_ => {}",
         ],
     );
     assert_absent(
@@ -319,15 +405,16 @@ fn uno_q_llm_demo_uses_input_role_cli_and_choreofs_only() {
         plan,
         &[
             "polls the HumanInput role",
-            old_prompt_file_env.as_str(),
-            old_interactive_env.as_str(),
-            old_user_prompt_env.as_str(),
-            old_prompt_file_script.as_str(),
+            removed_prompt_file_env.as_str(),
+            removed_interactive_env.as_str(),
+            removed_user_prompt_env.as_str(),
+            removed_prompt_file_script.as_str(),
+            "swaps in the infinite shell-loop guest",
         ],
     );
     assert!(
         !std::path::Path::new(&format!(
-            "examples/uno-q-heterogeneous/scripts/{old_prompt_file_script}"
+            "examples/uno-q-heterogeneous/scripts/{removed_prompt_file_script}"
         ))
         .exists(),
         "file prompt injection helper must not remain in the baseline live demo"
@@ -335,22 +422,28 @@ fn uno_q_llm_demo_uses_input_role_cli_and_choreofs_only() {
 }
 
 #[test]
-fn appkit_has_capsule_shape_without_legacy_facades() {
+fn appkit_has_capsule_shape_without_stale_facades() {
     let appkit_public = appkit_public_source();
     let appkit = appkit_sources();
 
+    assert_eq!(
+        appkit_public.matches("pub use ").count(),
+        4,
+        "src/appkit/mod.rs must expose only the curated attach-storage, WASI, ChoreoFS, and capsule API re-export groups"
+    );
     assert_present(
         "src/appkit/mod.rs",
         appkit_public,
         &[
             "mod internal;",
-            "pub use crate::choreography::protocol::BuiltInLabelUniverse as BuiltInUniverse;",
+            "pub use hibana_wasip1_runtime::choreofs::{",
             "pub use internal::{",
             "Capsule",
             "LogicalImage",
+            "EngineCtx, Local, Localside",
             "Placement",
-            "ArtifactBundle",
             "Localside",
+            "WasiGuestDrive",
             "run",
         ],
     );
@@ -364,6 +457,11 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
             "pub trait",
             "pub fn",
             "pub use internal::*",
+            "pub use internal::ArtifactInput",
+            "#[doc(hidden)]\npub use internal::ArtifactInput;",
+            "SessionId",
+            "RoleSet, ArtifactInput, RunReport",
+            "RunReport",
         ],
     );
 
@@ -372,13 +470,28 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
         &appkit,
         &[
             "pub trait Capsule",
-            "fn choreography() -> impl hibana::integration::program::Projectable<Self::Universe>;",
+            "fn choreography() -> impl hibana::runtime::program::Projectable;",
+            "fn observe(_: &mut hibana::runtime::tap::TapPort<'_>) {}",
+            "const WASI_GUEST_DRIVE: WasiGuestDrive = WasiGuestDrive::Canonical;",
+            "pub enum WasiGuestDrive",
+            "Localside",
             "pub trait LogicalImage",
             "const REQUESTED_ROLES: RoleSet;",
+            "pub struct RoleSet {\n    bits: u16,",
+            "pub const fn from_bits(bits: u16) -> Self",
+            "assert!(bits != 0);",
+            "use core::{",
+            "num::NonZeroU32",
+            "const APPKIT_DEFAULT_SESSION_ID: NonZeroU32 = nonzero_session_id(1);",
+            "const fn nonzero_session_id(raw: u32) -> NonZeroU32",
+            "None => panic!(\"appkit session id must be nonzero\")",
+            "const SESSION_ID: NonZeroU32 = APPKIT_DEFAULT_SESSION_ID;",
+            "hibana::runtime::ids::SessionId::new(session_id.get())",
             "pub trait WasiGuestImage",
             "fn wasi_guest_lease<'guest, const ROLE: u8>() -> WasiGuestLease<'guest>;",
             "fn wasi_budget<const ROLE: u8>() -> BudgetRun",
-            "pub trait ArtifactGuestStorage",
+            "trait ArtifactInput",
+            "#[allow(private_bounds)]",
             "NoWasi` never leases storage",
             "drive_canonical_wasi_engine",
             "self.wasi_guest_bytes.is_some()",
@@ -386,63 +499,160 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
             "pub fn lease<'guest>(&'guest mut self)",
             "pub struct WasiGuestLease<'guest>",
             "Guest::init_in_place(ptr, module)?;",
-            "pub struct CarrierKind",
-            "pub struct PeerImageSet",
-            "type Carrier<'a>: hibana::integration::Transport + 'a",
+            "type Carrier<'a>: hibana::runtime::transport::Transport + 'a",
             "fn carrier<'a>() -> Self::Carrier<'a>",
             "fn visit_requested_projected_roles<C, V>",
             "pub trait Placement",
             "pub enum RoleKind",
-            "pub struct RoleKindCounts",
             "fn role_kind(role: u8) -> RoleKind",
-            "pub trait ArtifactBundle",
             "pub trait Localside",
             "Static WASI import",
             "pub struct EngineCtx<'endpoint, 'guest, C: Capsule, const ROLE: u8>",
-            "pub const fn role(&self) -> u8",
-            "pub fn run<I, C>",
-            "I::Exit<C::Report>",
-            "pub trait FromRunReport",
-            "pub struct EndpointCarrierFacts",
-            "pub const fn session_id(self) -> u32",
-            "pub struct RoleEndpointCtx<'a, C: Capsule, const ROLE: u8>",
+            "pub struct Local<Image>",
+            "pub fn run<I, C>(artifact: impl ArtifactInput<C, I>)",
+            "fn run_with_artifact<I, C, A>",
             "pub fn endpoint(&mut self) -> &mut hibana::Endpoint<'a, ROLE>",
-            "pub fn validate_requested_roles<C, I>()",
-            "I::REQUESTED_ROLES.is_subset_of(projection.roles)",
-            "pub struct RunReport",
-            "pub const fn validated_role_count(&self) -> u8",
-            "pub const fn attached_endpoint_count(&self) -> u8",
+            "image.safe_state();",
+            "const fn appkit_session(",
+            "let projected_roles = collect_projected_roles::<C, I>(&program);",
+            "projected_roles.roles() == I::REQUESTED_ROLES",
+            "expect(\"projected RoleProgram count must not overflow\")",
+            "expect(\"attached projected role count must not overflow\")",
+            "let rendezvous_slab = attach_slab;",
+            "SessionKitStorage::<I::Carrier<'_>>::uninit()",
+            ".rendezvous(rendezvous_slab, carrier)",
+            "let mut tap = rendezvous.tap();",
+            "C::observe(&mut tap)",
+            "pub use hibana_wasip1_runtime::choreofs::{",
+            "ChoreoFsObject",
+            "ChoreoFsObjectSet",
+            "LedgerFacts",
+            "DriverFacts",
+        ],
+    );
+    assert_absent(
+        "src/appkit",
+        &appkit,
+        &[
+            "ArtifactEvidence",
+            "ArtifactGuestStorage",
+            "pub trait ArtifactForImage",
+            "RunArtifact",
+            "fn use_canonical_wasi_engine() -> bool",
+            "use_canonical_wasi_engine",
+            "fn requested_roles<I>() -> RoleSet",
+            "Placement::requested_roles",
+            "UnsupportedGuestEvent",
+            "fn artifact_for_image",
+            "type Report",
+            "C::Report",
+            "RunReport<R, I>",
+            "RunReport<C::Report, I>",
+            "RunReport<I>",
+            "RunReport<",
+            "RunReport",
+            "pub fn image_mut",
+            ".image_mut()",
+            "type Exit<R>",
+            "I::Exit",
+            "FromRunReport",
+            "from_run_report",
+            "pub struct RoleEndpointCtx",
+            "pub struct RoleKindCounts",
+            "struct EndpointCarrierFacts",
+            "const fn session_id(self) -> u32",
+            "pub struct EndpointCarrierFacts",
+            "pub const fn endpoint_carrier(&self) -> EndpointCarrierFacts",
             "pub const fn attached_role_kinds(&self) -> RoleKindCounts",
             "pub const fn wasi_imports(&self) -> WasiImports",
             "pub const fn wasi_completion_pair_count(&self) -> u8",
             "pub const fn manifest(&self) -> ImageManifest",
-            "pub const fn endpoint_carrier(&self) -> EndpointCarrierFacts",
             "pub struct ImageManifest",
-            "pub capsule_fingerprint: [u64; 2]",
-            "pub placement_fingerprint: [u64; 2]",
-            "pub label_universe_fingerprint: [u64; 2]",
-            "pub choreography_session_id: u32",
-            "pub peer_image_ids: [ImageId; 8]",
-            "pub peer_image_count: u8",
-            "pub fn can_attach_peer(&self, peer: &Self) -> bool",
-            "pub policies: [u16; 16]",
-            "pub policy_count: u16",
-            "pub control_ops: [u8; 16]",
-            "pub control_tap_ids: [u16; 16]",
-            "pub control_count: u16",
-            "pub capacity_overflow: bool",
-            "hibana projection metadata exceeded appkit linked metadata capacity",
-            "let config = hibana::integration::runtime::Config::from_resources(",
-            "attach_tap,",
-            "rendezvous_slab,",
+            "pub struct ProjectionCaps",
             "pub struct LaneSet",
             "pub struct WasiImports",
-            "pub wasi_completion_pair_count: u8",
-            "pub struct ChoreoFsObject",
-            "pub struct ChoreoFsObjectSet",
-            "pub struct ChoreoFsFacts",
-            "pub struct LedgerFacts",
-            "pub struct DriverFacts",
+            "pub const EMPTY: Self = Self {",
+            "pub const EMPTY: Self = Self { words",
+            "words: [u64; 4]",
+            "pub const fn from_bits(bits: u128) -> Self",
+            "pub const fn from_words",
+            "pub const fn bits(self)",
+            "pub const fn words(self)",
+            "pub const fn count(self) -> u8",
+            "pub const fn union(self",
+            "pub const fn is_subset_of(self",
+            "pub const fn ids(self)",
+            "pub const fn len(self) -> u8",
+            "pub const fn contains(self, image: ImageId)",
+            "pub struct PeerImageSet",
+            "const PEER_IMAGES",
+            "peer_image_count",
+            "pub const fn id(self) -> u16",
+            "pub const fn bytes(self) -> &'a [u8]",
+            "pub const fn image(&self) -> &I",
+            "pub const fn tag(self) -> u8",
+            "pub struct CarrierKind",
+            "const CARRIER: CarrierKind",
+            "pub const fn projected_roles(&self) -> RoleSet",
+            "pub fn can_attach_peer<PeerImage>",
+            "struct ProjectionCaps",
+            "struct WasiImports",
+            "choreography_fingerprint",
+            "choreography_session_id",
+            "capsule_session_id",
+            "type_fingerprint",
+            "core::any::type_name",
+            "host_metadata_type_fingerprint",
+            "derive_projection_caps_from_program",
+            "SupervisorCtx",
+            "RoleKind::Supervisor",
+            "fn supervisor<'a",
+            "LinkCtx",
+            "RoleKind::Link",
+            "fn link<'a",
+            "#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\npub struct ImageId",
+            "#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\npub struct SiteId",
+            "pub struct ImageId",
+            "pub struct SiteId",
+            "appkit::ImageId",
+            "appkit::SiteId",
+            "const IMAGE_ID:",
+            "const SITE_ID:",
+            "#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\npub struct CarrierKind",
+            "#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\npub struct RoleSet",
+            "#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\npub struct NoWasi",
+            "SessionId, SiteId",
+            "appkit::SessionId",
+            "pub struct SessionId(pub u32)",
+            "pub struct SessionId {",
+            "pub const fn new(raw: u32) -> Self",
+            "if raw == 0 { 1 } else { raw }",
+            "struct LaneSet",
+            "capacity_overflow",
+            "hibana projection metadata exceeded appkit linked metadata capacity",
+            "artifact_len",
+            "byte_len",
+            "pub fn derive_projection_caps",
+            "pub fn validate_requested_roles",
+            "self.count = self.count.saturating_add(1);",
+            "self.count = self.count.saturating_add(",
+            "pub const HIBANA_TYPED_ROLE_DOMAIN",
+            "pub const HIBANA_TYPED_ROLE_DOMAIN_SIZE",
+            "pub trait ArtifactBundle",
+            "for_image::<",
+            "RunInput",
+            "pub trait ArtifactInput",
+            "pub(super) trait Sealed",
+            "type Artifact:",
+            "type Artifact;",
+            "pub const fn role(&self) -> u8",
+            "pub fn role(&self) -> u8",
+            "const fn role(&self) -> u8",
+            "pub const fn facts(&self) -> DriverFacts",
+            "pub fn facts(&self) -> DriverFacts",
+            "pub const fn diagnostic_code(&self) -> u32",
+            "pub fn diagnostic_code(&self) -> u32",
+            "pub trait Sealed",
         ],
     );
     assert_absent(
@@ -467,8 +677,8 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
             "context: EmbeddedTaskContextSlot",
             "embedded_task_context(",
             "pub const fn guest_artifact",
-            "pub async fn drive_wasi_guest",
-            "pub fn drive_wasi_guest",
+            "pub async fn drive_wasi_guest(",
+            "pub fn drive_wasi_guest(",
             "pub async fn drive_wasi_guest_imports",
             "drive_wasi_guest_imports",
             "ObjectSpec",
@@ -498,17 +708,20 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
             "route mismatch recovery",
             "timeout heuristic",
             "host FS fallback",
+            "host filesystem fallback",
+            "hidden fallback",
+            "timeout fallback",
             "direct syscall completion",
             "OPERATIONAL_DEADLINE_TICKS",
-            "operational deadline fuse into `hibana::integration::runtime::Config`",
+            "operational deadline fuse into `hibana::runtime::Config`",
             "Rp2040Sio",
             "SioTransport",
             "ActiveWasiGuestLease",
             "InlineWasiGuestLease",
             "StaticWasiGuestLease",
-            "MaybeUninit<crate::kernel::engine::wasm::Guest",
+            "MaybeUninit<hibana_wasip1_runtime::engine::wasm::Guest",
             "poll_embedded_future_to_completion",
-            "Box<crate::kernel::engine::wasm::Guest",
+            "Box<hibana_wasip1_runtime::engine::wasm::Guest",
             "Box<dyn Future",
             "Vec<ScheduledTask",
             "Box::pin",
@@ -532,23 +745,32 @@ fn appkit_has_capsule_shape_without_legacy_facades() {
 }
 
 #[test]
-fn appkit_projection_caps_use_numeric_message_facts_for_wasi_validation() {
+fn appkit_does_not_keep_invented_projection_capacity_summaries() {
     let appkit = appkit_sources();
 
     assert_present(
         "src/appkit",
         &appkit,
         &[
-            "let engine_req_import = wasi_import_for_engine_req_label(spec.label);",
-            "if is_engine_ret_label(spec.label)",
-            "self.has_loop_continue_head_eff(spec.eff_index)",
-            "self.has_loop_break_head_eff(spec.eff_index)",
+            "let projected_roles = collect_projected_roles::<C, I>(&program);",
+            "projected_roles.roles() == I::REQUESTED_ROLES",
+            "let session = appkit_session(C::SESSION_ID);",
         ],
     );
     assert_absent(
         "src/appkit",
         &appkit,
         &[
+            "struct ProjectionCaps",
+            "struct WasiImports",
+            "fn derive_projection_caps_from_program<C>",
+            "caps.roles = HIBANA_TYPED_ROLE_DOMAIN;",
+            "caps.fingerprint",
+            "capsule_session_id",
+            "type_fingerprint",
+            "core::any::type_name",
+            "host_metadata_type_fingerprint",
+            "I::REQUESTED_ROLES.is_subset_of(projection.roles)",
             "ProjectionTypeFingerprint::of::<EngineReq>()",
             "ProjectionTypeFingerprint::of::<EngineRet>()",
             "spec.payload_type == engine_req",
@@ -558,28 +780,22 @@ fn appkit_projection_caps_use_numeric_message_facts_for_wasi_validation() {
 }
 
 #[test]
-fn appkit_manifest_peer_attach_does_not_use_host_type_fingerprints_as_authority() {
+fn appkit_report_does_not_keep_peer_attach_metadata() {
     let appkit = appkit_sources();
-    let can_attach = appkit
-        .split("pub fn can_attach_peer(&self, peer: &Self) -> bool {")
-        .nth(1)
-        .and_then(|tail| tail.split("pub const fn peer_images").next())
-        .expect("ImageManifest::can_attach_peer body");
 
-    assert_present(
-        "src/appkit",
-        can_attach,
-        &[
-            "self.choreography_fingerprint == peer.choreography_fingerprint",
-            "self.choreography_session_id == peer.choreography_session_id",
-            "self.projected_role_set == peer.projected_role_set",
-            "self.peer_images().contains(peer.logical_image_id)",
-        ],
-    );
     assert_absent(
         "src/appkit",
-        can_attach,
+        &appkit,
         &[
+            "pub struct PeerImageSet",
+            "const PEER_IMAGES",
+            "peer_image_count",
+            "pub fn can_attach_peer<PeerImage>",
+            "pub const fn projected_roles(&self) -> RoleSet",
+            "choreography_fingerprint",
+            "choreography_session_id",
+            "self.projected_roles == peer.projected_roles",
+            "self.peer_images().contains(peer.image_id)",
             "self.capsule_fingerprint == peer.capsule_fingerprint",
             "self.placement_fingerprint == peer.placement_fingerprint",
             "self.label_universe_fingerprint == peer.label_universe_fingerprint",
@@ -588,40 +804,41 @@ fn appkit_manifest_peer_attach_does_not_use_host_type_fingerprints_as_authority(
 }
 
 #[test]
-fn choreography_is_protocol_vocabulary_only() {
-    let choreography_mod = include_str!("../src/choreography/mod.rs");
-    let protocol_mod = include_str!("../src/choreography/protocol/mod.rs");
+fn baker_abort_protocol_is_small_and_outside_appkit() {
+    let appkit_public = appkit_public_source();
+    let baker = include_str!("../examples/baker-firmware/src/lib.rs");
 
-    assert_present(
-        "src/choreography/mod.rs",
-        choreography_mod,
-        &["pub mod protocol;"],
+    assert!(
+        !std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/choreography")).exists(),
+        "src/choreography must not exist as a public or private appkit side language"
     );
     assert_absent(
-        "src/choreography/mod.rs",
-        choreography_mod,
+        "src/appkit/mod.rs",
+        appkit_public,
         &[
-            "pub mod fragment;",
-            "pub mod local;",
-            "pub mod proof;",
-            "appkit::Choreo",
-            "appkit::Program",
-            "trait Fragment",
-            "CAPS",
-            "WASI_IMPORTS",
-            "crate::kernel",
-            "crate::machine",
-            "crate::port",
-            "crate::projects",
+            "mod abort;",
+            "EngineAbortBegin",
+            "EngineAbortMsg",
+            "EngineAbortFence",
+            "EngineAbortAck",
         ],
     );
     assert_absent(
-        "src/choreography/protocol/mod.rs",
-        protocol_mod,
+        "examples/baker-firmware/src/lib.rs",
+        baker,
         &[
+            "mod labels;",
+            "mod control;",
+            "mod route;",
+            "mod management;",
             "mod network;",
             "mod remote;",
             "mod swarm;",
+            "MgmtImage",
+            "RouteKey",
+            "Topology",
+            "TxCommit",
+            "StateSnapshot",
             "crate::kernel",
             "crate::machine",
             "crate::port",
@@ -629,17 +846,206 @@ fn choreography_is_protocol_vocabulary_only() {
             "appkit runtime state",
         ],
     );
+    assert_absent(
+        "examples/baker-firmware/src/lib.rs",
+        baker,
+        &[
+            "pub type EngineAbortBegin",
+            "pub type EngineAbortMsg",
+            "pub type EngineAbortFence",
+            "pub type EngineAbortAck",
+        ],
+    );
+    assert_absent(
+        "examples/baker-firmware/src/lib.rs",
+        baker,
+        &[
+            "EngineAbortBeginControl",
+            "EngineAbortFenceControl",
+            "EngineAbortAckControl",
+            "pub enum EngineAbortReason",
+            "pub struct EngineAbort",
+            "FuelExhausted",
+            "GuestTrap",
+            "UnsupportedImport",
+            "BadImportShape",
+            "WireEncode for EngineAbort",
+            "WirePayload for EngineAbort",
+            "LABEL_ENGINE_ABORT_BEGIN_CONTROL",
+            "LABEL_ENGINE_ABORT_FENCE_CONTROL",
+            "LABEL_ENGINE_ABORT_ACK_CONTROL",
+        ],
+    );
 }
 
 #[test]
-fn site_exposes_site_facts_not_protocol_authority() {
-    let site = include_str!("../src/site.rs");
+fn docs_do_not_teach_internal_artifact_boundary() {
+    let readme = include_str!("../README.md");
+    let baker_doc = include_str!("../baker.md");
+    let rp2w_doc = include_str!("../examples/rp2w-firmware/README.md");
+    let memo = include_str!("../memo.md");
 
-    assert_present("src/site.rs", site, &["pub struct Local<Image>"]);
     assert_absent(
-        "src/site.rs",
-        site,
+        "README.md",
+        readme,
         &[
+            "RunArtifact",
+            "RunInput",
+            "ArtifactInput",
+            "loop-control",
+            "control tag",
+            "default resolver",
+            "fallback",
+        ],
+    );
+    assert_absent("baker.md", baker_doc, &["default resolver", "fallback"]);
+    assert_absent(
+        "examples/rp2w-firmware/README.md",
+        rp2w_doc,
+        &["default resolver", "fallback"],
+    );
+    assert_absent(
+        "memo.md",
+        memo,
+        &[
+            "RunArtifact",
+            "RunInput",
+            "ArtifactInput",
+            "hibana::integration::",
+            "type Universe:",
+            "type Report;",
+            "pub struct RouteKey",
+            "## RouteKey",
+            "private `projects/`",
+            "control kind",
+            "fallback",
+        ],
+    );
+}
+
+#[test]
+fn rp2w_firmware_has_no_porting_residue() {
+    let rp2w = include_str!("../examples/rp2w-firmware/src/lib.rs");
+    let sensor_panel = include_str!("../examples/rp2w-firmware/src/bin/sensor_panel.rs");
+    let epf_policy_timer = include_str!("../examples/rp2w-firmware/src/bin/epf_policy_timer.rs");
+
+    assert_present(
+        "examples/rp2w-firmware/src/lib.rs",
+        rp2w,
+        &[
+            "mod rp2350_sio",
+            "pub struct Rp2wPlacement;",
+            "fn run_engine_image();",
+            "pub fn run_engine_no_wasi<C>()",
+            "pub fn run_engine_wasi<'a, C>(image: appkit::WasiImage<'a>)",
+            "pub(super) struct SioTransport",
+            "unhandled_exception_handler",
+            "unhandled_irq_handler",
+            "SIO_TRACE_NO_FRAME_LABEL",
+            "fn record_sio_direction_unmapped(local_role: u8, peer_role: u8, direction: u8)",
+            "_ => record_sio_direction_unmapped(local_role, peer_role, 0)",
+            "_ => record_sio_direction_unmapped(local_role, sender_role, 1)",
+        ],
+    );
+    assert_absent(
+        "examples/rp2w-firmware",
+        &format!("{rp2w}\n{sensor_panel}\n{epf_policy_timer}"),
+        &[
+            "#[cfg(any())]",
+            "if true {",
+            "if false",
+            "rp2040_sio",
+            "rp2040_boot2",
+            "default_handler",
+            "default_irq_handler",
+            "DriverArtifact",
+            "EngineArtifact",
+            "pub struct DriverImage;",
+            "pub struct EngineImage;",
+            "pub struct Rp2wSioTransport",
+            "pub fn record_epf_policy_timer_irq_ready",
+            "rp2w_firmware::EngineImage",
+            "rp2w_firmware::DriverImage",
+            "Rp2wArtifacts",
+            "Rp2wRunInput",
+            "Rp2wArtifactInput",
+            "type Artifact: appkit::RunInput<Self, EngineImage>",
+            "type Artifact: appkit::ArtifactInput<Self, EngineImage>",
+            "type Artifact;",
+            "type Artifact =",
+            "fn artifact()",
+            "ArtifactForImage<C, DriverImage>",
+            "ArtifactForImage<SensorPanel, DriverImage>",
+            "ArtifactForImage<SensorPanel, EngineImage>",
+            "default_timer_irq_resolver",
+            ".unwrap_or(0)",
+            ".unwrap_or(STAGE_HARD_PANIC)",
+            "pub struct SioTx",
+            "pub struct SioRx",
+            "pub fn core_id()",
+            "pub fn ready_to_recv()",
+            "pub fn ready_to_send()",
+            "pub fn status()",
+            "pub fn clear_errors()",
+            "pub fn try_push(",
+            "pub fn try_pop()",
+            "#[derive(Debug, Default)]\n    pub struct SioTx",
+            "#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\n    pub struct SioTransport",
+            "#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\n    pub struct Rp2wSensorSample",
+            "#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\n    pub struct Rp2wCyw43Spi",
+            "#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\n    pub struct Rp2wCyw43GspiBitbang",
+            "pub struct SensorPanel",
+            "pub struct SensorPanelLocal",
+            "pub enum SensorPanelError",
+            "pub struct Rp2wEpfPolicyTimer",
+            "pub struct Rp2wEpfPolicyTimerLocal",
+            "pub enum Rp2wEpfPolicyTimerError",
+        ],
+    );
+    assert_present(
+        "examples/rp2w-firmware/src/bin/sensor_panel.rs",
+        sensor_panel,
+        &[
+            "    pub(super) use ::rp2w_firmware::",
+            "    pub(super) fn rp2w_board_init()",
+            "    pub(super) type Rp2wCyw43GspiDriver",
+            "    pub static mut RP2W_I2C_DETECT_MASK",
+        ],
+    );
+    assert_absent(
+        "examples/rp2w-firmware/src/bin/sensor_panel.rs",
+        sensor_panel,
+        &[
+            "    pub use ::rp2w_firmware",
+            "    pub const RP2W_UNO_Q",
+            "    pub type Rp2wCyw43",
+            "    pub struct Rp2wSensorSample",
+            "    pub struct Rp2wUnoQWifiTarget",
+            "    pub struct Rp2wCyw43Spi",
+            "    pub struct Rp2wCyw43GspiBitbang",
+            "    pub enum Rp2wWifiFrameError",
+            "    pub enum Rp2wCyw43SpiError",
+            "    pub enum Rp2wUnoQWifiSendError",
+            "    pub fn rp2w_",
+            "        pub const fn new",
+        ],
+    );
+}
+
+#[test]
+fn appkit_local_marker_exposes_site_facts_not_protocol_authority() {
+    let appkit = include_str!("../src/appkit/internal.rs");
+
+    assert_present(
+        "src/appkit/internal.rs",
+        appkit,
+        &["pub struct Local<Image>", "impl<Image> Local<Image>"],
+    );
+    assert_absent(
+        "src/appkit/internal.rs",
+        appkit,
+        &[
+            "#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]",
             "pub mod host",
             "pub mod linux",
             "pub mod mcu",
@@ -765,6 +1171,8 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
     let choreofs_bin = include_str!("../examples/baker-firmware/src/bin/choreofs_traffic.rs");
     let choreofs_loop_bin =
         include_str!("../examples/baker-firmware/src/bin/choreofs_traffic_loop.rs");
+    let session_mismatch_bin =
+        include_str!("../examples/baker-firmware/src/bin/session_mismatch.rs");
     let baker_wasi_guest_lib = include_str!("../examples/baker-firmware/wasip1/guest/src/lib.rs");
     let choreofs_wasi_guest = include_str!(
         "../examples/baker-firmware/wasip1/guest/src/bin/wasip1-led-choreofs-traffic-cycle.rs"
@@ -777,8 +1185,13 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
     let many_reentry_bin = include_str!("../examples/baker-firmware/src/bin/many_reentry.rs");
     let endpoint_poison_bin = include_str!("../examples/baker-firmware/src/bin/endpoint_poison.rs");
     let timer_route_bin = include_str!("../examples/baker-firmware/src/bin/timer_route.rs");
+    let epf_policy_timer_bin =
+        include_str!("../examples/baker-firmware/src/bin/epf_policy_timer.rs");
     let baker_hardware_script = include_str!("../scripts/run_baker_link_hardware_pattern.sh");
     let readme = include_str!("../README.md");
+    let baker_bins = format!(
+        "{traffic_bin}\n{choreofs_bin}\n{choreofs_loop_bin}\n{session_mismatch_bin}\n{fail_safe_bin}\n{recovery_bin}\n{many_reentry_bin}\n{endpoint_poison_bin}\n{timer_route_bin}\n{epf_policy_timer_bin}"
+    );
 
     assert_present(
         "examples/baker-firmware/src/lib.rs",
@@ -793,18 +1206,23 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "write_volatile(CLOCKS_CLK_SYS_CTRL",
             "WATCHDOG_TICK_ENABLE | (BAKER_TIMER_TICK_CYCLES & 0x01ff)",
             "rp2040_sio::core_id()",
-            "pub struct DriverImage;",
-            "pub struct EngineImage;",
-            "pub struct SioTransport",
+            "unhandled_exception_handler",
+            "unhandled_irq_handler",
+            "struct DriverImage;",
+            "struct EngineImage;",
+            "pub(super) struct SioTransport",
             "fn open<'a>(",
             "lane: u8",
-            "SioRx::new(local_role, session_id, lane)",
+            "operational_deadline_ticks,",
             "pending: Option<PendingTxFrame>",
             "struct SioRxAccumulator",
             "static mut SIO_RX_ACCUM_CORE0",
             "static mut SIO_RX_ACCUM_CORE1",
-            "fn rx_accumulator(local_role: u8) -> *mut SioRxAccumulator",
-            "sio_rx_accumulator_is_local_role_owned_across_lanes",
+            "fn rx_accumulator(core_id: u8) -> *mut SioRxAccumulator",
+            "sio_rx_accumulator_decodes_peer_role_for_same_core_demux",
+            "frame_session_id",
+            "frame_lane",
+            "try_pop_until_deadline",
             "BAKER_ENGINE_WASI_GUEST_ARENA",
             "baker_engine_wasi_guest_lease",
             "addr_of_mut!(BAKER_ENGINE_WASI_GUEST_ARENA)",
@@ -812,25 +1230,42 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "fifo::try_push(word)",
             "fifo::try_pop()",
             "context.waker().wake_by_ref()",
-            "if frame.session_id != rx.session_id || frame.lane != rx.lane",
-            "store_demux_frame",
-            "take_demux_frame(rx.local_role, rx.session_id, rx.lane)",
-            ".hint_frame_label",
+            "frame_targets_rx_lane",
+            "same_lane_session_mismatch_reaches_endpoint_evidence",
+            "let header = rx.frame_header();",
             ".take()",
             "rx.delivered = true;",
-            "core::task::Poll::Ready(Ok(hibana::integration::wire::Payload::new(",
-            "delivered_sio_payload_emits_route_hint_once",
-            "staged_sio_payload_emits_route_hint_before_delivery",
+            "hibana::runtime::transport::ReceivedFrame::framed(header, rx.payload())",
+            "fn record_sio_direction_unmapped(local_role: u8, peer_role: u8, direction: u8)",
+            "_ => record_sio_direction_unmapped(local_role, peer_role, 0)",
+            "_ => record_sio_direction_unmapped(local_role, sender_role, 1)",
+            "poll_epf_diagnostic",
+            "epf_spool_tap_event",
+            "requeued_sio_payload_returns_same_frame_observation",
+            "staged_sio_payload_returns_payload_and_frame_observation",
             "pub trait BakerCapsuleFacts",
+            "fn run_engine_image();",
+            "pub fn run_engine_no_wasi<C>()",
+            "pub fn run_engine_wasi<'a, C>(image: appkit::WasiImage<'a>)",
             "pub fn baker_timer_route_resolver_ready(timeout_ms: u64) -> bool",
+            "appkit::run::<DriverImage, C>(appkit::NoWasi)",
             "appkit::run::<DriverImage, C>",
-            "appkit::run::<EngineImage, C>",
+            "C::run_engine_image()",
         ],
     );
     assert_absent(
         "examples/baker-firmware/Cargo.toml",
         baker_manifest,
-        &["rp2040-boot2"],
+        &[
+            "rp2040-boot2",
+            "rp2350",
+            "RP2350",
+            "rp2w",
+            "RP2W",
+            "pico2w",
+            "uart",
+            "UART",
+        ],
     );
     assert_absent(
         "examples/baker-firmware/src/lib.rs",
@@ -847,8 +1282,39 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "core::ptr::write_volatile(core::ptr::addr_of_mut!(HIBANA_DEMO_RESULT), stage)",
             "option_env!(\"HIBANA_BAKER_PATTERN\")",
             "run_selected_pattern",
+            "default_handler",
+            "default_irq_handler",
+            ".unwrap_or(STAGE_HARD_PANIC)",
+            "rp2350",
+            "RP2350",
+            "rp2w",
+            "RP2W",
+            "pico2w",
+            "uart",
+            "UART",
             "fn main()",
-            "_lane: u8",
+            "DriverArtifact",
+            "EngineArtifact",
+            "pub struct DriverImage;",
+            "pub struct EngineImage;",
+            "pub struct BakerSioTransport",
+            "pub fn record_stack_high_water",
+            "pub fn record_epf_policy_timer_irq_ready",
+            "baker_firmware::EngineImage",
+            "baker_firmware::DriverImage",
+            "BakerArtifacts",
+            "BakerRunInput",
+            "BakerArtifactInput",
+            "type Artifact: appkit::RunInput<Self, EngineImage>",
+            "type Artifact: appkit::ArtifactInput<Self, EngineImage>",
+            "type Artifact;",
+            "type Artifact =",
+            "fn artifact()",
+            "ArtifactForImage<C, DriverImage>",
+            "ArtifactForImage<ChoreoFsTraffic, DriverImage>",
+            "ArtifactForImage<ChoreoFsTrafficLoop, DriverImage>",
+            "ArtifactForImage<SessionMismatch, DriverImage>",
+            " _lane: u8",
             "impl appkit::Capsule for",
             "const GREEN_LED: appkit::ChoreoFsObject",
             "const YELLOW_LED: appkit::ChoreoFsObject",
@@ -895,8 +1361,9 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "fn choreography()",
             "impl appkit::Localside<ChoreoFsTraffic> for ChoreoFsTrafficLocal",
             "wasip1-led-choreofs-traffic-once.wasm",
-            "driver_proc_exit(&mut ctx).await?",
-            "LABEL_WASI_PROC_EXIT",
+            "driver_path_open(&mut ctx, step.fd, step.object).await?",
+            "driver_fd_write(&mut ctx, step.fd, step.payload).await?",
+            "driver_poll_oneoff(&mut ctx).await?",
             "baker_firmware::run::<ChoreoFsTraffic>()",
         ],
     );
@@ -921,13 +1388,63 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "const YELLOW_LED: appkit::ChoreoFsObject",
             "const RED_LED: appkit::ChoreoFsObject",
             "impl appkit::Capsule for ChoreoFsTrafficLoop",
-            "const VISUAL_READY_CYCLES: u32 = 1",
             "impl appkit::Localside<ChoreoFsTrafficLoop> for ChoreoFsTrafficLoopLocal",
-            "WasiImportLoopContinue",
-            "WasiImportLoopBreak",
-            "g::route(",
+            "let cycle = g::route(",
+            "g::send::<1, 0, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>>()",
+            ".roll();",
+            "loop {",
+            "completed_cycles = completed_cycles.saturating_add(1);",
             "wasip1-led-choreofs-traffic-cycle.wasm",
             "baker_firmware::run::<ChoreoFsTrafficLoop>()",
+        ],
+    );
+    assert_absent(
+        "examples/baker-firmware/src/bin",
+        &baker_bins,
+        &[
+            "BakerArtifacts",
+            "ArtifactForImage<ChoreoFsTraffic, EngineImage>",
+            "ArtifactForImage<ChoreoFsTrafficLoop, EngineImage>",
+            "ArtifactForImage<SessionMismatch, EngineImage>",
+            "pub struct Traffic",
+            "pub struct TrafficLocal",
+            "pub enum TrafficError",
+            "pub struct ChoreoFsTraffic",
+            "pub struct ChoreoFsTrafficLocal",
+            "pub enum ChoreoFsTrafficError",
+            "pub struct ChoreoFsTrafficLoop",
+            "pub struct ChoreoFsTrafficLoopLocal",
+            "pub enum ChoreoFsTrafficLoopError",
+            "pub struct FailSafe",
+            "pub struct FailSafeLocal",
+            "pub enum FailSafeError",
+            "pub struct Recovery",
+            "pub struct RecoveryLocal",
+            "pub enum RecoveryError",
+            "pub struct ManyReentry",
+            "pub struct ManyReentryLocal",
+            "pub enum ManyReentryError",
+            "pub struct EndpointFault",
+            "pub struct EndpointFaultLocal",
+            "pub struct EndpointPoison",
+            "pub struct EndpointPoisonLocal",
+            "pub struct DeadlineFault",
+            "pub struct DeadlineFaultLocal",
+            "pub struct SessionMismatch",
+            "pub struct SessionMismatchLocal",
+            "pub enum SessionMismatchError",
+            "pub struct TimerRoute",
+            "pub struct TimerRouteLocal",
+            "pub enum TimerRouteError",
+            "pub struct EpfPolicyTimer",
+            "pub struct EpfPolicyTimerLocal",
+            "pub enum EpfPolicyTimerError",
+            "default_timer_irq_resolver",
+            "pub struct CapacityFault",
+            "pub struct CapacityFaultLocal",
+            "pub struct PreviewProbe",
+            "pub struct PreviewProbeLocal",
+            "pub enum PreviewProbeError",
         ],
     );
     assert_absent(
@@ -944,6 +1461,8 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         &[
             "async fn drive_wasi_engine",
             "async fn drive_choreofs_driver",
+            "WasiImportLoopContinue",
+            "WasiImportLoopBreak",
         ],
     );
     assert_present(
@@ -1012,7 +1531,7 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         fail_safe_bin,
         &[
             "impl appkit::Capsule for FailSafe",
-            "const SUCCESS_RESULT: u32 = baker_firmware::RESULT_FAIL_SAFE_OK",
+            "const SUCCESS_RESULT: u32 = RESULT_FAIL_SAFE_OK",
             "impl appkit::Localside<FailSafe> for FailSafeLocal",
             "baker_firmware::run::<FailSafe>()",
         ],
@@ -1022,7 +1541,7 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         recovery_bin,
         &[
             "impl appkit::Capsule for Recovery",
-            "const SUCCESS_RESULT: u32 = baker_firmware::RESULT_RECOVERY_OK",
+            "const SUCCESS_RESULT: u32 = RESULT_RECOVERY_OK",
             "impl appkit::Localside<Recovery> for RecoveryLocal",
             "baker_firmware::run::<Recovery>()",
         ],
@@ -1032,9 +1551,9 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         many_reentry_bin,
         &[
             "impl appkit::Capsule for ManyReentry",
-            "EngineAbortBeginControl",
-            "EngineAbortFenceControl",
-            "EngineAbortAckControl",
+            "EngineAbortBegin",
+            "EngineAbortFence",
+            "EngineAbortAck",
             "impl appkit::Localside<ManyReentry> for ManyReentryLocal",
             "baker_firmware::run::<ManyReentry>()",
         ],
@@ -1045,8 +1564,9 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         &[
             "impl appkit::Capsule for EndpointPoison",
             "impl appkit::Localside<EndpointPoison> for EndpointPoisonLocal",
-            "record_endpoint_error(&error)",
-            "poisoned generation must not produce a flow continuation",
+            "record_choreofs_engine_error_code(",
+            "offer at send-only phase must not produce continuation",
+            "poisoned generation must not send",
             "baker_firmware::run::<EndpointPoison>()",
         ],
     );
@@ -1056,17 +1576,16 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         &[
             "impl appkit::Capsule for TimerRoute",
             "fn timer_route_resolver",
-            "ResourceKind",
-            "signals::core::TAG",
+            "DecisionArm",
             "baker_firmware::baker_timer_route_resolver_ready(100)",
-            "Ok(RouteResolution::Defer)",
-            "Ok(RouteResolution::Arm(1))",
-            "registry.policy::<TIMER_ROUTE_POLICY, 0>",
-            "registry.policy::<TIMER_ROUTE_POLICY, 1>",
-            "ctx.endpoint().flow::<TimerExpiredRoute>()?",
-            "route.send(()).await?",
+            "Ok(DecisionArm::Right)",
+            "ResolverRef::decision_state",
+            ".resolve::<TIMER_ROUTE_POLICY>()",
+            "registry.resolver::<TIMER_ROUTE_POLICY, 0>",
+            "registry.resolver::<TIMER_ROUTE_POLICY, 1>",
+            "ctx.endpoint().send::<TimerExpired>(&1).await?;",
             "ctx.endpoint().offer().await?",
-            "branch.decode::<TimerExpired>().await?",
+            "branch.recv::<TimerExpired>().await?",
             "let done = ctx.endpoint().recv::<TimerRouteDone>().await?;",
             "let ack = ctx.endpoint().recv::<TimerRouteAck>().await?;",
             "if done != 1",
@@ -1104,14 +1623,18 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "expected_result=\"48495452\"",
             "deadline-fault)",
             "endpoint-poison)",
+            "capacity-fault)",
+            "bin_name=\"baker-capacity-fault\"",
         ],
     );
     assert_present(
         "README.md",
         readme,
         &[
-            "Transport::open(local_role, session_id, lane)",
-            "stores it in SIO frame metadata",
+            "Transport::open(PortOpen)",
+            "logical lane carried by Hibana `Transport::open(PortOpen)`",
+            "frame metadata, demultiplexes before yielding payload bytes",
+            "bytes plus the staged `FrameHeader` inside the same `ReceivedFrame`",
             "`poll_send` and `poll_recv` do not spin inside FIFO push/pop loops",
             "Carrier state is owned by the physical endpoint/core that consumes the stream",
             "The rule is ownership first",
@@ -1130,12 +1653,14 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "arena is intentionally not `Sync`",
             "separate owner arena for each logical image",
             "`NoWasi` logical image must not lease guest storage",
-            "recv_frame_hint",
-            "route-observation hint-drain",
-            "Static WASI import tables are",
+            "There is no separate receive-observation hook",
+            "staged frame header crosses the transport boundary only with the",
+            "`ReceivedFrame` that carries the payload bytes",
+            "Static WASI import",
             "not admission authority",
-            "not reject a `WasiImage` because static imports exceed",
-            "An import becomes meaningful only when the guest actually calls it",
+            "materialized for that logical image",
+            "appkit sends the real projected `EngineReq::ProcExit(code)`",
+            "a WASI import becomes meaningful only when the guest actually calls it",
             "`appkit` itself is also a curated facade",
             "implementation modules under `src/appkit/` remain",
             "bash ./scripts/check_baker_section_budgets.sh",
@@ -1143,414 +1668,6 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         ],
     );
 }
-
-#[test]
-fn pico_nod_example_keeps_public_ingress_and_external_commit_under_choreography() {
-    let manifest = include_str!("../examples/pico-nod/Cargo.toml");
-    let plan = include_str!("../examples/pico-nod/plan.md");
-    let app_manifest = include_str!("../examples/pico-nod/apple/PicoNodApp/Package.swift");
-    let app_project =
-        include_str!("../examples/pico-nod/apple/PicoNodApp/PicoNodApp.xcodeproj/project.pbxproj");
-    let app_scheme = include_str!(
-        "../examples/pico-nod/apple/PicoNodApp/PicoNodApp.xcodeproj/xcshareddata/xcschemes/PicoNodApp.xcscheme"
-    );
-    let app_core = include_str!(
-        "../examples/pico-nod/apple/PicoNodApp/Sources/PicoNodAppCore/PicoNodAppCore.swift"
-    );
-    let app_ui =
-        include_str!("../examples/pico-nod/apple/PicoNodApp/Sources/PicoNodApp/PicoNodApp.swift");
-    let app_tests = include_str!(
-        "../examples/pico-nod/apple/PicoNodApp/Tests/PicoNodAppCoreTests/PicoNodAppCoreTests.swift"
-    );
-    let release_gate = include_str!("../scripts/check_pico_nod_release_readiness.sh");
-    let archive_script = include_str!("../scripts/archive_pico_nod_app.sh");
-    let acceptor = include_str!("../examples/pico-nod/src/acceptor.rs");
-    let acceptor_bin = include_str!("../examples/pico-nod/src/bin/pico-nod-http-acceptor.rs");
-    let lib = include_str!("../examples/pico-nod/src/lib.rs");
-    let ingress = include_str!("../examples/pico-nod/src/ingress.rs");
-    let approval = include_str!("../examples/pico-nod/src/approval.rs");
-    let apns = include_str!("../examples/pico-nod/src/apns.rs");
-    let billing = include_str!("../examples/pico-nod/src/billing.rs");
-    let commit = include_str!("../examples/pico-nod/src/commit.rs");
-    let release = include_str!("../examples/pico-nod/src/release.rs");
-    let app_store_review = include_str!("../examples/pico-nod/release/app-store-review.md");
-    let privacy_labels = include_str!("../examples/pico-nod/release/privacy-labels.md");
-    let operations_runbook = include_str!("../examples/pico-nod/release/operations-runbook.md");
-    let support = include_str!("../examples/pico-nod/src/support.rs");
-    let security = include_str!("../examples/pico-nod/tests/security.rs");
-
-    assert_present(
-        "examples/pico-nod/Cargo.toml",
-        manifest,
-        &[
-            "name = \"pico-nod-example\"",
-            "hibana-pico",
-            "wasm-engine-core",
-            "wasip1-sys-fd-write",
-            "wasip1-sys-path-open",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/plan.md",
-        plan,
-        &[
-            "public bytes",
-            "-> WASI P1 ingress",
-            "CommitBoundary is the only external side-effect path",
-            "Pico Nod has no database.",
-            "shared mutable authority",
-            "The HTTP/TLS acceptor can:",
-            "Device compromise is a root-trust loss for that device",
-            "external_unknown_outcome_fences_without_idempotency_evidence",
-            "billing_entitlement_is_fact_not_approval_or_commit",
-            "support_actions_are_intents_not_admin_direct_paths",
-            "The repository is not App Store ready until",
-            "The repository is not production-server ready until",
-            "Minimal HTTP byte acceptor",
-            "scripts/check_pico_nod_release_readiness.sh",
-            "scripts/archive_pico_nod_app.sh",
-            "examples/pico-nod/release/app-store-review.md",
-            "examples/pico-nod/release/privacy-labels.md",
-            "examples/pico-nod/release/operations-runbook.md",
-            "PicoNodApp.xcodeproj",
-            "must fail closed when production identifiers",
-            "pico-nod-http-acceptor -- --preflight",
-            "production mode must not",
-        ],
-    );
-    assert_present(
-        "scripts/check_pico_nod_release_readiness.sh",
-        release_gate,
-        &[
-            "PICO_NOD_APPLE_TEAM_ID",
-            "PICO_NOD_BUNDLE_ID",
-            "PICO_NOD_APNS_KEY_ID",
-            "PICO_NOD_APNS_PRIVATE_KEY_PATH",
-            "PICO_NOD_STORE_ISSUER_ID",
-            "PICO_NOD_STORE_PRIVATE_KEY_PATH",
-            "PICO_NOD_TLS_TERMINATION",
-            "PICO_NOD_EXTERNAL_ACTION_ENDPOINT",
-            "PICO_NOD_EXTERNAL_ACTION_CREDENTIAL_PATH",
-            "xcodebuild first launch setup",
-            "PicoNodApp.xcodeproj/project.pbxproj",
-            "LaunchScreen.storyboard",
-            "release/app-store-review.md",
-            "release/privacy-labels.md",
-            "release/operations-runbook.md",
-            "archive_pico_nod_app.sh",
-            "pico-nod release readiness: not ready",
-        ],
-    );
-    assert_present(
-        "scripts/archive_pico_nod_app.sh",
-        archive_script,
-        &[
-            "PICO_NOD_APPLE_TEAM_ID",
-            "PICO_NOD_BUNDLE_ID",
-            "-project \"$PROJECT\"",
-            "-scheme PicoNodApp",
-            "-destination 'generic/platform=iOS'",
-            "-exportArchive",
-            "app-store-connect",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/apple/PicoNodApp/Package.swift",
-        app_manifest,
-        &[
-            "name: \"PicoNodApp\"",
-            ".iOS(.v17)",
-            ".macOS(.v14)",
-            "Assets.xcassets",
-            "PrivacyInfo.xcprivacy",
-            "PicoNod.entitlements",
-            "LaunchScreen.storyboard",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/apple/PicoNodApp/PicoNodApp.xcodeproj/project.pbxproj",
-        app_project,
-        &[
-            "PBXNativeTarget",
-            "PicoNodApp.app",
-            "XCLocalSwiftPackageReference",
-            "PicoNodAppCore",
-            "CODE_SIGN_ENTITLEMENTS = Sources/PicoNodApp/PicoNod.entitlements;",
-            "ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;",
-            "Assets.xcassets in Resources",
-            "GENERATE_INFOPLIST_FILE = YES;",
-            "INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;",
-            "INFOPLIST_KEY_UISupportedInterfaceOrientations",
-            "SUPPORTED_PLATFORMS = \"iphoneos iphonesimulator macosx\";",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/apple/PicoNodApp/PicoNodApp.xcodeproj/xcshareddata/xcschemes/PicoNodApp.xcscheme",
-        app_scheme,
-        &[
-            "BuildableName = \"PicoNodApp.app\"",
-            "BlueprintName = \"PicoNodApp\"",
-            "buildForArchiving = \"YES\"",
-            "ArchiveAction",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/apple/PicoNodApp/Sources/PicoNodAppCore/PicoNodAppCore.swift",
-        app_core,
-        &[
-            "import CryptoKit",
-            "Curve25519.Signing.PrivateKey",
-            "ApprovalAction",
-            "ApprovalEvidence",
-            "displayedHash",
-            "verify(_ evidence:",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/apple/PicoNodApp/Sources/PicoNodApp/PicoNodApp.swift",
-        app_ui,
-        &[
-            "import SwiftUI",
-            "Button(\"Nod\")",
-            "Button(\"Reject\")",
-            "Button(\"Fence\")",
-            "displayed.displayedHash",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/apple/PicoNodApp/Tests/PicoNodAppCoreTests/PicoNodAppCoreTests.swift",
-        app_tests,
-        &[
-            "nodEvidenceVerifiesForDisplayedIntent",
-            "tamperedActionDoesNotVerify",
-            "malformedEvidenceFailsClosed",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/src/acceptor.rs",
-        acceptor,
-        &[
-            "pub struct HttpTlsAcceptor",
-            "POST /intent",
-            "content-length:",
-            "ChunkedUnsupported",
-            "cannot_hold_credentials(&self) -> bool",
-            "cannot_select_routes(&self) -> bool",
-            "cannot_commit_external_actions(&self) -> bool",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/apple/PicoNodApp/Sources/PicoNodApp/Assets.xcassets/AppIcon.appiconset/Contents.json",
-        include_str!(
-            "../examples/pico-nod/apple/PicoNodApp/Sources/PicoNodApp/Assets.xcassets/AppIcon.appiconset/Contents.json"
-        ),
-        &["ios-marketing", "pico-nod-1024.png", "iphone", "ipad"],
-    );
-    assert_present(
-        "examples/pico-nod/src/bin/pico-nod-http-acceptor.rs",
-        acceptor_bin,
-        &[
-            "TcpListener::bind",
-            "HttpTlsAcceptor::new",
-            "WasiIngress::normalize_public_request",
-            "127.0.0.1:8787",
-            "--preflight",
-            "--production",
-            "release_preflight(&args)?",
-            "is_loopback_bind_address",
-            "production bind address must be loopback",
-            "production configuration is incomplete",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/src/lib.rs",
-        lib,
-        &[
-            "pub struct PicoNodCapsule;",
-            "pub struct PicoNodUniverse;",
-            "PICO_NOD_APPROVAL_POLICY",
-            "impl appkit::Capsule for PicoNodCapsule",
-            "g::route(",
-            "site::Local<image::WasiIngressProcess>",
-            "site::Local<image::CommitBoundaryProcess>",
-            "site::Local<image::HostProofProcess>",
-            "type Artifact = appkit::WasiImage<'static>;",
-            "type Artifact = appkit::NoWasi;",
-            "pub mod release;",
-        ],
-    );
-    assert_absent(
-        "examples/pico-nod/src/lib.rs",
-        lib,
-        &[
-            "macro_rules!",
-            "with_policy",
-            "project_role",
-            "InProcessCarrier",
-            "RefCell",
-            "Atomic",
-            "std::",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/src/ingress.rs",
-        ingress,
-        &[
-            "pub struct WasiIngress;",
-            "normalize_public_request",
-            "cannot_hold_credentials() -> bool",
-            "cannot_select_routes() -> bool",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/src/approval.rs",
-        approval,
-        &[
-            "pub struct ApprovalBoundary",
-            "ApprovalDecision::Nod",
-            "ApprovalDecision::Reject",
-            "ApprovalDecision::Fence",
-            "displayed_hash(request)",
-            "sign_approval(",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/src/apns.rs",
-        apns,
-        &[
-            "pub struct ApnsBoundary",
-            "pub trait ApnsProvider",
-            "DeviceDeliveryCap",
-            "cannot_approve(&self) -> bool",
-            "cannot_select_routes(&self) -> bool",
-            "cannot_commit_external_actions(&self) -> bool",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/src/billing.rs",
-        billing,
-        &[
-            "pub struct BillingBoundary",
-            "pub struct EntitlementFact",
-            "EntitlementState::Unknown",
-            "require_paid_feature",
-            "cannot_approve(&self) -> bool",
-            "cannot_commit_external_actions(&self) -> bool",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/src/commit.rs",
-        commit,
-        &[
-            "pub struct CommitBoundary",
-            "pub trait ExternalActionApi",
-            "CommitOutcome::DuplicateCommitted",
-            "UnknownWithoutIdempotencyEvidence",
-            "FailedClosed",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/src/release.rs",
-        release,
-        &[
-            "RELEASE_REQUIREMENTS",
-            "RELEASE_FILE_REQUIREMENTS",
-            "RELEASE_ARTIFACTS",
-            "PICO_NOD_APPLE_TEAM_ID",
-            "PICO_NOD_BUNDLE_ID",
-            "PICO_NOD_APNS_KEY_ID",
-            "PICO_NOD_STORE_ISSUER_ID",
-            "PICO_NOD_TLS_TERMINATION",
-            "PICO_NOD_EXTERNAL_ACTION_ENDPOINT",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/release/app-store-review.md",
-        app_store_review,
-        &[
-            "reviewer",
-            "Nod",
-            "Reject",
-            "Fence",
-            "The app is an approval device",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/release/privacy-labels.md",
-        privacy_labels,
-        &[
-            "No tracking.",
-            "No analytics SDK.",
-            "No external action API credentials in the app.",
-            "Audit output must not contain",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/release/operations-runbook.md",
-        operations_runbook,
-        &[
-            "PICO_NOD_TLS_TERMINATION=external-loopback",
-            "public TLS",
-            "loopback pico-nod-http-acceptor",
-            "UnknownWithoutIdempotencyEvidence",
-            "Choreography remains the authority.",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/deploy/env.example",
-        include_str!("../examples/pico-nod/deploy/env.example"),
-        &[
-            "PICO_NOD_TLS_TERMINATION=external-loopback",
-            "PICO_NOD_APNS_PRIVATE_KEY_PATH=",
-            "PICO_NOD_STORE_PRIVATE_KEY_PATH=",
-            "PICO_NOD_EXTERNAL_ACTION_CREDENTIAL_PATH=",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/deploy/launchd/com.hibana.pico-nod.plist",
-        include_str!("../examples/pico-nod/deploy/launchd/com.hibana.pico-nod.plist"),
-        &[
-            "com.hibana.pico-nod",
-            "--production",
-            "127.0.0.1:8787",
-            "KeepAlive",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/src/support.rs",
-        support,
-        &[
-            "pub enum SupportAction",
-            "pub struct SupportIntent",
-            "ActionKind::LocalCommand",
-            "WasiIngress::normalize_public_request",
-            "cannot_commit_without_approval(&self) -> bool",
-            "cannot_select_routes(&self) -> bool",
-        ],
-    );
-    assert_present(
-        "examples/pico-nod/tests/security.rs",
-        security,
-        &[
-            "pico_nod_capsule_projects_role_split_and_approval_route",
-            "wasi_ingress_output_is_candidate_evidence_not_authority",
-            "approval_display_hash_mismatch_rejected",
-            "external_failed_closed_records_terminal_fault_without_commit",
-            "http_tls_acceptor_forwards_bounded_body_to_wasi_ingress_only",
-            "http_tls_acceptor_rejects_unbounded_or_implicit_http_shapes",
-            "lost_commit_ack_does_not_commit_twice",
-            "no_database_contract_keeps_global_revoke_outside_protocol",
-            "apns_delivery_success_does_not_approve_or_commit",
-            "billing_entitlement_is_fact_not_approval_or_commit",
-            "support_actions_are_intents_not_admin_direct_paths",
-            "release_requirements_cover_app_store_and_server_operation",
-            "production_server_preflight_fails_closed_without_release_configuration",
-            "production_server_preflight_rejects_unreadable_credential_paths",
-            "production_server_rejects_public_clear_http_bind_even_when_configured",
-        ],
-    );
-}
-
 #[test]
 fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
     let hetero = include_str!("../examples/heterogeneous-split-example/src/lib.rs");
@@ -1569,20 +1686,25 @@ fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
             "pub struct Rp2040Io;",
             "struct ExampleEdgeSlots",
             "static mut EXAMPLE_FRAME_0_TO_1",
+            "static mut ROLE2_TO_ROLE0_RECV",
             "fn edge_slots_for_send(local_role: u8, peer: u8)",
             "fn edge_slots_for_recv(local_role: u8)",
+            "bump_counter(sent_counter);",
+            "bump_counter(recv_counter);",
             "lane: u8",
             "outgoing.lane() != tx.lane",
             "edge.slot_mut(rx.lane)",
             "edge_slots_are_lane_scoped",
             "impl appkit::Capsule for Control",
-            "impl appkit::LogicalImage<Control> for site::Local<image::LinuxControl>",
-            "impl appkit::LogicalImage<Control> for site::Local<image::M33Realtime>",
-            "impl appkit::LogicalImage<Control> for site::Local<image::Rp2040Io>",
+            "impl appkit::LogicalImage<Control> for appkit::Local<image::LinuxControl>",
+            "impl appkit::LogicalImage<Control> for appkit::Local<image::M33Realtime>",
+            "impl appkit::LogicalImage<Control> for appkit::Local<image::Rp2040Io>",
             "const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(0);",
             "const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(1);",
             "const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(2);",
-            "can_attach_peer",
+            "appkit::run::<appkit::Local<image::LinuxControl>, Control>(appkit::NoWasi);",
+            "appkit::run::<appkit::Local<image::M33Realtime>, Control>(appkit::NoWasi);",
+            "appkit::run::<appkit::Local<image::Rp2040Io>, Control>(appkit::NoWasi);",
         ],
     );
     assert_absent(
@@ -1592,6 +1714,11 @@ fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
             "WASI_GUEST_ARENA",
             "wasi_guest_lease",
             "storage_from_owner(",
+            "can_attach_peer",
+            "PeerImageSet",
+            "PEER_IMAGES",
+            "peer_image_count",
+            "_ => {}",
         ],
     );
     assert_present(
@@ -1599,7 +1726,7 @@ fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
         linux,
         &[
             "appkit::run::<",
-            "site::Local<heterogeneous_split_example::image::LinuxControl>",
+            "appkit::Local<heterogeneous_split_example::image::LinuxControl>",
             "heterogeneous_split_example::Control",
         ],
     );
@@ -1612,7 +1739,7 @@ fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
             "#[panic_handler]",
             "pub extern \"C\" fn main() -> !",
             "appkit::run::<",
-            "site::Local<heterogeneous_split_example::image::M33Realtime>",
+            "appkit::Local<heterogeneous_split_example::image::M33Realtime>",
             "heterogeneous_split_example::Control",
         ],
     );
@@ -1625,7 +1752,7 @@ fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
             "#[panic_handler]",
             "pub extern \"C\" fn main() -> !",
             "appkit::run::<",
-            "site::Local<heterogeneous_split_example::image::Rp2040Io>",
+            "appkit::Local<heterogeneous_split_example::image::Rp2040Io>",
             "heterogeneous_split_example::Control",
         ],
     );
@@ -1634,7 +1761,7 @@ fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
         hetero,
         &[
             "macro_rules!",
-            "_lane: u8",
+            " _lane: u8",
             "AtomicBool",
             "AtomicU8",
             "UnsafeCell",
@@ -1673,14 +1800,17 @@ fn cargo_keeps_plan_private_and_no_demo_meaning_features() {
     assert_present(
         "Cargo.toml",
         cargo,
-        &["hibana = { version = \"0.6.2\", default-features = false }"],
+        &[
+            "hibana = { version = \"0.9.0\", default-features = false }",
+            "hibana-wasip1-runtime = { path = \"../hibana-wasip1-runtime\", default-features = false }",
+            "[patch.crates-io]",
+            "hibana = { path = \"../hibana\" }",
+        ],
     );
     assert_absent(
         "Cargo.toml",
         cargo,
         &[
-            "[patch.crates-io]",
-            "hibana = { path = \"../hibana\" }",
             "hibana = { git",
             "baker-choreofs-demo",
             "baker-choreofs-bad-path-demo",
@@ -1805,7 +1935,7 @@ fn embedded_runner_keeps_scheduler_and_role_future_poll_boundary_separate() {
             "embedded_tasks:",
             "self.embedded_tasks.push(local_role_task(",
             "self.embedded_storage",
-            "run_canonical_wasi_engine_forever::<C, ImageTy, ROLE>(\n                                self.embedded_storage,",
+            "run_canonical_wasi_engine_forever::<C, ImageTy, ArtifactTy, ROLE>(\n                                self.embedded_storage,",
             "let ctx_ptr = storage",
             ".future\n            .cast::<EngineCtx",
             "ctx_ptr.write(ctx)",

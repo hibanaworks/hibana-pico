@@ -1,14 +1,23 @@
-use hibana::integration::wire::{CodecError, Payload, WireEncode, WirePayload};
+use hibana::runtime::wire::{CodecError, Payload, WireEncode, WirePayload};
 
 pub const ROLE_M33_LED_KERNEL: u8 = 0;
 pub const ROLE_WASI_LLM_CELL: u8 = 1;
 pub const ROLE_LOCAL_LLM: u8 = 2;
 pub const ROLE_HUMAN_INPUT: u8 = 3;
+pub const ROLE_PICO2W_SENSOR: u8 = 4;
 
 pub const LABEL_HUMAN_INPUT_TEXT: u8 = 151;
 pub const LABEL_HUMAN_INPUT_ACK: u8 = 152;
 pub const LABEL_HUMAN_INPUT_REQ: u8 = 153;
+pub const LABEL_PICO2W_SENSOR_REQ: u8 = 154;
+pub const LABEL_PICO2W_SENSOR_SAMPLE: u8 = 155;
+pub const LABEL_PICO2W_SENSOR_ACK: u8 = 156;
 pub const HUMAN_INPUT_TEXT_BYTES: usize = 96;
+pub const PICO2W_SENSOR_SAMPLE_BYTES: usize = 9;
+pub const PICO2W_SENSOR_UDP_ACK_BYTES: usize = 2;
+pub const PICO2W_SENSOR_STATUS_FRESH: u8 = 0;
+pub const PICO2W_SENSOR_STATUS_PENDING: u8 = 1;
+pub const PICO2W_SENSOR_STATUS_STALE: u8 = 2;
 
 pub const FACE_NEUTRAL: u8 = 0;
 pub const FACE_HAPPY: u8 = 1;
@@ -27,6 +36,7 @@ pub enum ProtocolError {
     InvalidEmotion,
     HumanInputTooLong,
     HumanInputInvalidUtf8,
+    InvalidPico2wSensorStatus,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,10 +61,6 @@ impl FaceFrame {
 }
 
 impl WireEncode for FaceFrame {
-    fn encoded_len(&self) -> Option<usize> {
-        Some(2)
-    }
-
     fn encode_into(&self, out: &mut [u8]) -> Result<usize, CodecError> {
         if out.len() < 2 {
             return Err(CodecError::Truncated);
@@ -71,11 +77,11 @@ impl WirePayload for FaceFrame {
     fn validate_payload(input: Payload<'_>) -> Result<(), CodecError> {
         let bytes = input.as_bytes();
         if bytes.len() != 2 {
-            return Err(CodecError::Invalid("face frame carries two bytes"));
+            return Err(CodecError::Malformed);
         }
         Self::new(bytes[0], bytes[1])
             .map(|_| ())
-            .map_err(|_| CodecError::Invalid("invalid face frame"))
+            .map_err(|_| CodecError::Malformed)
     }
 
     fn decode_validated_payload<'a>(input: Payload<'a>) -> Self::Decoded<'a> {
@@ -84,15 +90,6 @@ impl WirePayload for FaceFrame {
             Ok(value) => value,
             Err(_) => panic!("validated face frame must decode"),
         }
-    }
-
-    fn synthetic_payload<'a>(scratch: &'a mut [u8]) -> Result<Payload<'a>, CodecError> {
-        if scratch.len() < 2 {
-            return Err(CodecError::Truncated);
-        }
-        scratch[0] = FACE_NEUTRAL;
-        scratch[1] = 0;
-        Ok(Payload::new(&scratch[..2]))
     }
 }
 
@@ -147,10 +144,6 @@ impl HumanInputText {
 }
 
 impl WireEncode for HumanInputText {
-    fn encoded_len(&self) -> Option<usize> {
-        Some(1 + self.len())
-    }
-
     fn encode_into(&self, out: &mut [u8]) -> Result<usize, CodecError> {
         let len = self.len();
         if out.len() < 1 + len {
@@ -168,18 +161,18 @@ impl WirePayload for HumanInputText {
     fn validate_payload(input: Payload<'_>) -> Result<(), CodecError> {
         let bytes = input.as_bytes();
         let Some((&len, rest)) = bytes.split_first() else {
-            return Err(CodecError::Invalid("human input text missing length"));
+            return Err(CodecError::Malformed);
         };
         let len = usize::from(len);
         if len > HUMAN_INPUT_TEXT_BYTES {
-            return Err(CodecError::Invalid("human input text exceeds capacity"));
+            return Err(CodecError::Malformed);
         }
         if rest.len() != len {
-            return Err(CodecError::Invalid("human input text length mismatch"));
+            return Err(CodecError::Malformed);
         }
         Self::from_bytes(rest)
             .map(|_| ())
-            .map_err(|_| CodecError::Invalid("invalid human input text"))
+            .map_err(|_| CodecError::Malformed)
     }
 
     fn decode_validated_payload<'a>(input: Payload<'a>) -> Self::Decoded<'a> {
@@ -190,13 +183,124 @@ impl WirePayload for HumanInputText {
             Err(_) => panic!("validated human input text must decode"),
         }
     }
+}
 
-    fn synthetic_payload<'a>(scratch: &'a mut [u8]) -> Result<Payload<'a>, CodecError> {
-        if scratch.is_empty() {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pico2wSensorSample {
+    status: u8,
+    temperature_c_x10: i16,
+    humidity_pct_x10: u16,
+    light_raw: u16,
+    seq: u16,
+}
+
+impl Pico2wSensorSample {
+    pub fn new(
+        status: u8,
+        temperature_c_x10: i16,
+        humidity_pct_x10: u16,
+        light_raw: u16,
+        seq: u16,
+    ) -> Result<Self, ProtocolError> {
+        validate_pico2w_sensor_status(status)?;
+        Ok(Self {
+            status,
+            temperature_c_x10,
+            humidity_pct_x10,
+            light_raw,
+            seq,
+        })
+    }
+
+    pub const fn pending(seq: u16) -> Self {
+        Self {
+            status: PICO2W_SENSOR_STATUS_PENDING,
+            temperature_c_x10: 0,
+            humidity_pct_x10: 0,
+            light_raw: 0,
+            seq,
+        }
+    }
+
+    pub fn with_status_and_seq(self, status: u8, seq: u16) -> Result<Self, ProtocolError> {
+        Self::new(
+            status,
+            self.temperature_c_x10,
+            self.humidity_pct_x10,
+            self.light_raw,
+            seq,
+        )
+    }
+
+    pub const fn status(&self) -> u8 {
+        self.status
+    }
+
+    pub const fn temperature_c_x10(&self) -> i16 {
+        self.temperature_c_x10
+    }
+
+    pub const fn humidity_pct_x10(&self) -> u16 {
+        self.humidity_pct_x10
+    }
+
+    pub const fn light_raw(&self) -> u16 {
+        self.light_raw
+    }
+
+    pub const fn seq(&self) -> u16 {
+        self.seq
+    }
+}
+
+pub const fn pico2w_sensor_udp_ack(seq: u16) -> [u8; PICO2W_SENSOR_UDP_ACK_BYTES] {
+    seq.to_le_bytes()
+}
+
+pub fn decode_pico2w_sensor_udp_ack(input: &[u8]) -> Option<u16> {
+    if input.len() != PICO2W_SENSOR_UDP_ACK_BYTES {
+        return None;
+    }
+    Some(u16::from_le_bytes([input[0], input[1]]))
+}
+
+impl WireEncode for Pico2wSensorSample {
+    fn encode_into(&self, out: &mut [u8]) -> Result<usize, CodecError> {
+        if out.len() < PICO2W_SENSOR_SAMPLE_BYTES {
             return Err(CodecError::Truncated);
         }
-        scratch[0] = 0;
-        Ok(Payload::new(&scratch[..1]))
+        out[0] = self.status;
+        out[1..3].copy_from_slice(&self.temperature_c_x10.to_le_bytes());
+        out[3..5].copy_from_slice(&self.humidity_pct_x10.to_le_bytes());
+        out[5..7].copy_from_slice(&self.light_raw.to_le_bytes());
+        out[7..9].copy_from_slice(&self.seq.to_le_bytes());
+        Ok(PICO2W_SENSOR_SAMPLE_BYTES)
+    }
+}
+
+impl WirePayload for Pico2wSensorSample {
+    type Decoded<'a> = Self;
+
+    fn validate_payload(input: Payload<'_>) -> Result<(), CodecError> {
+        let bytes = input.as_bytes();
+        if bytes.len() != PICO2W_SENSOR_SAMPLE_BYTES {
+            return Err(CodecError::Malformed);
+        }
+        validate_pico2w_sensor_status(bytes[0]).map_err(|_| CodecError::Malformed)
+    }
+
+    fn decode_validated_payload<'a>(input: Payload<'a>) -> Self::Decoded<'a> {
+        let bytes = input.as_bytes();
+        match Self::new(
+            bytes[0],
+            i16::from_le_bytes([bytes[1], bytes[2]]),
+            u16::from_le_bytes([bytes[3], bytes[4]]),
+            u16::from_le_bytes([bytes[5], bytes[6]]),
+            u16::from_le_bytes([bytes[7], bytes[8]]),
+        ) {
+            Ok(value) => value,
+            Err(_) => panic!("validated pico2w sensor sample must decode"),
+        }
     }
 }
 
@@ -206,5 +310,14 @@ fn validate_display_face(face: u8) -> Result<(), ProtocolError> {
         | FACE_SPEAKING | FACE_MOUTH_CLOSED | FACE_MOUTH_SMALL | FACE_MOUTH_WIDE
         | FACE_MOUTH_ROUND => Ok(()),
         _ => Err(ProtocolError::InvalidEmotion),
+    }
+}
+
+fn validate_pico2w_sensor_status(status: u8) -> Result<(), ProtocolError> {
+    match status {
+        PICO2W_SENSOR_STATUS_FRESH | PICO2W_SENSOR_STATUS_PENDING | PICO2W_SENSOR_STATUS_STALE => {
+            Ok(())
+        }
+        _ => Err(ProtocolError::InvalidPico2wSensorStatus),
     }
 }

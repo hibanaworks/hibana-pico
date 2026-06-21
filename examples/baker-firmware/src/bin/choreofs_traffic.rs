@@ -1,15 +1,13 @@
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_std)]
 #![cfg_attr(all(target_arch = "arm", target_os = "none"), no_main)]
 
-use baker_firmware::{BakerArtifacts, BakerCapsuleFacts, BakerPlacement, DriverImage, EngineImage};
+use baker_firmware::{BakerCapsuleFacts, BakerPlacement};
 use hibana::g;
-use hibana_pico::{
-    appkit,
-    choreography::protocol::{
-        EngineReq, EngineRet, FdWrite, FdWriteDone, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET,
-        LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF,
-        LABEL_WASI_POLL_ONEOFF_RET, LABEL_WASI_PROC_EXIT, PathOpen, PathOpened, PollReady,
-    },
+use hibana_pico::appkit;
+use hibana_wasip1_runtime::protocol::{
+    EngineReq, EngineRet, FdWrite, FdWriteDone, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET,
+    LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF,
+    LABEL_WASI_POLL_ONEOFF_RET, LABEL_WASI_PROC_EXIT, PathOpen, PathOpened, PollReady,
 };
 
 const GREEN_LED_PIN: u8 = 22;
@@ -21,6 +19,8 @@ const RED_LED_MASK: u32 = 1 << 2;
 const LED_PREOPEN_FD: u8 = 9;
 const FD_WRITE_RIGHT: u64 = 1 << 6;
 const EXPECTED_POLL_TIMEOUT_MS: u64 = 80;
+const CHOREOFS_DRIVER_STARTED: u32 = 0x5741_0010;
+const CHOREOFS_GPIO_READY: u32 = 0x5741_0020;
 
 #[derive(Clone, Copy)]
 struct LedObject {
@@ -110,43 +110,41 @@ static FD_WRITE_CYCLE: [FdWriteStep; 13] = [
     FdWriteStep::new(5, b"1"),
 ];
 
-pub struct ChoreoFsTraffic;
-pub struct ChoreoFsTrafficLocal;
+struct ChoreoFsTraffic;
+struct ChoreoFsTrafficLocal;
 
 #[derive(Debug)]
-pub enum ChoreoFsTrafficError {
-    Endpoint(hibana::EndpointError),
+enum ChoreoFsTrafficError {
+    Endpoint,
     RuntimeViolation,
 }
 
 impl From<hibana::EndpointError> for ChoreoFsTrafficError {
-    fn from(error: hibana::EndpointError) -> Self {
-        Self::Endpoint(error)
+    fn from(_: hibana::EndpointError) -> Self {
+        Self::Endpoint
     }
 }
 
 impl appkit::Capsule for ChoreoFsTraffic {
-    type Universe = appkit::BuiltInUniverse;
     type Placement = BakerPlacement;
     type Local = ChoreoFsTrafficLocal;
-    type Report = core::convert::Infallible;
 
-    fn choreography() -> impl hibana::integration::program::Projectable {
+    fn choreography() -> impl hibana::runtime::program::Projectable {
         let path_open = || {
             g::seq(
-                g::send::<1, 0, g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>, 1>(),
-                g::send::<0, 1, g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>, 1>(),
+                g::send::<1, 0, g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>>(),
+                g::send::<0, 1, g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>>(),
             )
         };
         let open_leds = || g::seq(path_open(), g::seq(path_open(), path_open()));
         let write_wait = || {
             g::seq(
-                g::send::<1, 0, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>, 1>(),
+                g::send::<1, 0, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>(),
                 g::seq(
-                    g::send::<0, 1, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>, 1>(),
+                    g::send::<0, 1, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>>(),
                     g::seq(
-                        g::send::<1, 0, g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>, 1>(),
-                        g::send::<0, 1, g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>, 1>(),
+                        g::send::<1, 0, g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>>(),
+                        g::send::<0, 1, g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>>(),
                     ),
                 ),
             )
@@ -191,18 +189,18 @@ impl appkit::Capsule for ChoreoFsTraffic {
             open_leds(),
             g::seq(
                 write_waits(),
-                g::send::<1, 0, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>, 1>(),
+                g::send::<1, 0, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>>(),
             ),
         )
     }
 }
 
 impl BakerCapsuleFacts for ChoreoFsTraffic {
-    type DriverArtifact = appkit::NoWasi;
-    type EngineArtifact = appkit::WasiImage<'static>;
-
-    const DRIVER_IMAGE_ID: appkit::ImageId = appkit::ImageId(10);
-    const ENGINE_IMAGE_ID: appkit::ImageId = appkit::ImageId(11);
+    fn run_engine_image() {
+        baker_firmware::run_engine_wasi::<Self>(appkit::WasiImage::from_static(
+            WASM_CHOREOFS_TRAFFIC,
+        ));
+    }
 
     fn driver_facts() -> appkit::DriverFacts<'static> {
         OBJECT_FACTS.driver_facts()
@@ -224,11 +222,9 @@ impl appkit::Localside<ChoreoFsTraffic> for ChoreoFsTrafficLocal {
         async move {
             if ROLE == 0 && !ctx.choreofs().entries().is_empty() {
                 baker_firmware::reset_choreofs_markers();
-                baker_firmware::record_choreofs_engine_status(
-                    baker_firmware::CHOREOFS_DRIVER_STARTED,
-                );
+                baker_firmware::record_choreofs_engine_status(CHOREOFS_DRIVER_STARTED);
                 init_led_outputs();
-                baker_firmware::record_choreofs_engine_status(baker_firmware::CHOREOFS_GPIO_READY);
+                baker_firmware::record_choreofs_engine_status(CHOREOFS_GPIO_READY);
 
                 let mut path_index = 0usize;
                 while path_index < PATH_OPEN_STEPS.len() {
@@ -244,14 +240,13 @@ impl appkit::Localside<ChoreoFsTraffic> for ChoreoFsTrafficLocal {
                     driver_poll_oneoff(&mut ctx).await?;
                     index += 1usize;
                 }
-                driver_proc_exit(&mut ctx).await?;
                 baker_firmware::assert_choreofs_markers(
                     PATH_OPEN_STEPS.len() as u32,
                     FD_WRITE_CYCLE.len() as u32,
                     RED_LED_MASK,
                     GREEN_LED_MASK | YELLOW_LED_MASK | RED_LED_MASK,
                 );
-                baker_firmware::record_stack_high_water();
+                driver_proc_exit(&mut ctx).await?;
                 baker_firmware::mark_runtime_ready();
                 baker_firmware::mark_success(
                     <ChoreoFsTraffic as BakerCapsuleFacts>::SUCCESS_RESULT,
@@ -267,18 +262,6 @@ impl appkit::Localside<ChoreoFsTraffic> for ChoreoFsTrafficLocal {
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         ctx.pending()
     }
-
-    fn link<'a, const ROLE: u8>(
-        ctx: appkit::LinkCtx<'a, ChoreoFsTraffic, ROLE>,
-    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
-    }
-
-    fn supervisor<'a, const ROLE: u8>(
-        ctx: appkit::SupervisorCtx<'a, ChoreoFsTraffic, ROLE>,
-    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
-    }
 }
 
 async fn recv_engine_req<const ROLE: u8, const LABEL: u8>(
@@ -291,8 +274,9 @@ async fn send_engine_ret<const ROLE: u8, const LABEL: u8>(
     ctx: &mut appkit::DriverCtx<'_, ChoreoFsTraffic, ROLE>,
     reply: EngineRet,
 ) -> Result<(), ChoreoFsTrafficError> {
-    let flow = ctx.endpoint().flow::<g::Msg<LABEL, EngineRet>>()?;
-    flow.send(&reply).await?;
+    ctx.endpoint()
+        .send::<g::Msg<LABEL, EngineRet>>(&reply)
+        .await?;
     Ok(())
 }
 
@@ -491,18 +475,6 @@ fn write_led_object(object: appkit::ObjectId, high: bool) -> Result<(), ChoreoFs
     baker_firmware::baker_gpio_write(led.pin, high);
     baker_firmware::record_choreofs_led_mask(led.mask, high);
     Ok(())
-}
-
-impl appkit::ArtifactForImage<ChoreoFsTraffic, DriverImage> for BakerArtifacts {
-    fn artifact_for_image(&self) -> appkit::NoWasi {
-        appkit::NoWasi
-    }
-}
-
-impl appkit::ArtifactForImage<ChoreoFsTraffic, EngineImage> for BakerArtifacts {
-    fn artifact_for_image(&self) -> appkit::WasiImage<'static> {
-        appkit::WasiImage::from_static(WASM_CHOREOFS_TRAFFIC)
-    }
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]

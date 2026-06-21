@@ -5,64 +5,56 @@ use core::{
     arch::{asm, global_asm},
     ptr::{read_volatile, write_volatile},
 };
-use core::{assert, assert_eq};
+use core::{assert, mem::MaybeUninit};
 use hibana_pico::appkit;
 
 pub struct BakerPlacement;
-pub struct BakerArtifacts;
 
-pub struct DriverImage;
-pub struct EngineImage;
-
-impl DriverImage {
-    pub const fn new() -> Self {
-        Self
-    }
-}
-
-impl EngineImage {
-    pub const fn new() -> Self {
-        Self
-    }
-}
+struct DriverImage;
+struct EngineImage;
 
 mod rp2040_sio {
-    use core::cell::Cell;
-
-    use hibana_pico::appkit::CarrierKind;
-
-    pub const SIO: CarrierKind = CarrierKind::new(2040);
     const SIO_FRAME_MAGIC: u32 = 0x4849_5301;
     const SIO_FRAME_BYTES: usize = 128;
     const SIO_FRAME_HEADER_WORDS: usize = 4;
     const SIO_FRAME_PAYLOAD_WORDS: usize = (SIO_FRAME_BYTES + 3) / 4;
     const SIO_FRAME_WORDS: usize = SIO_FRAME_HEADER_WORDS + SIO_FRAME_PAYLOAD_WORDS;
+    const SIO_TRACE_NO_FRAME_LABEL: u8 = 0;
 
-    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-    pub struct SioTransport;
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) struct SioTransport;
 
     impl SioTransport {
-        pub const fn new() -> Self {
+        pub(super) const fn new() -> Self {
             Self
         }
 
-        pub fn open_with_session_xor<'a>(
+        pub(super) fn open_with_tx_session_xor<'a>(
             &'a self,
-            port: hibana::integration::transport::PortOpen,
-            session_xor: u32,
+            port: hibana::runtime::transport::PortOpen,
+            tx_session_xor: u32,
+            operational_deadline_ticks: u32,
         ) -> (SioTx, SioRx) {
             let local_role = port.local_role();
-            let session_id = port.session_id().raw() ^ session_xor;
-            let lane = port.lane().as_wire();
+            let session_id = port.session_id().raw();
+            let tx_session_id = session_id ^ tx_session_xor;
+            let lane = port.lane();
             fifo::clear_errors();
             (
                 SioTx {
                     local_role,
-                    session_id,
+                    core_id: core_id() as u8,
+                    session_id: tx_session_id,
                     sent_frames: 0,
                     pending: None,
                 },
-                SioRx::new(local_role, session_id, lane),
+                SioRx::new(
+                    local_role,
+                    session_id,
+                    lane,
+                    operational_deadline_ticks,
+                    core_id() as u8,
+                ),
             )
         }
     }
@@ -82,7 +74,7 @@ mod rp2040_sio {
     #[derive(Debug)]
     struct PendingTxFrame {
         peer_role: u8,
-        frame_label: hibana::integration::transport::FrameLabel,
+        frame_label: u8,
         lane: u8,
         len: usize,
         word_index: usize,
@@ -92,12 +84,12 @@ mod rp2040_sio {
     impl PendingTxFrame {
         fn new(
             peer_role: u8,
-            frame_label: hibana::integration::transport::FrameLabel,
+            frame_label: u8,
             lane: u8,
             bytes: &[u8],
-        ) -> Result<Self, hibana::integration::transport::TransportError> {
+        ) -> Result<Self, hibana::runtime::transport::TransportError> {
             if bytes.len() > SIO_FRAME_BYTES {
-                return Err(hibana::integration::transport::TransportError::Failed);
+                return Err(hibana::runtime::transport::TransportError::Capacity);
             }
 
             let mut frame = Self {
@@ -130,64 +122,78 @@ mod rp2040_sio {
         }
     }
 
-    #[derive(Debug, Default)]
-    pub struct SioTx {
+    #[derive(Debug)]
+    pub(super) struct SioTx {
         local_role: u8,
+        core_id: u8,
         session_id: u32,
         sent_frames: u16,
         pending: Option<PendingTxFrame>,
     }
 
     #[derive(Debug)]
-    pub struct SioRx {
+    pub(super) struct SioRx {
         local_role: u8,
+        core_id: u8,
         lane: u8,
         session_id: u32,
+        frame_session_id: u32,
+        frame_lane: u8,
         requeued: bool,
         delivered: bool,
         pending_logged: bool,
         pending_polls: u32,
         sender_role: u8,
-        frame_label: Option<hibana::integration::transport::FrameLabel>,
-        hint_frame_label: Cell<Option<hibana::integration::transport::FrameLabel>>,
+        frame_label: Option<u8>,
+        operational_deadline_ticks: u32,
         len: usize,
         bytes: [u8; SIO_FRAME_BYTES],
     }
 
     impl SioRx {
-        const fn new(local_role: u8, session_id: u32, lane: u8) -> Self {
+        const fn new(
+            local_role: u8,
+            session_id: u32,
+            lane: u8,
+            operational_deadline_ticks: u32,
+            core_id: u8,
+        ) -> Self {
             Self {
                 local_role,
+                core_id,
                 lane,
                 session_id,
+                frame_session_id: session_id,
+                frame_lane: lane,
                 requeued: false,
                 delivered: false,
                 pending_logged: false,
                 pending_polls: 0,
                 sender_role: 0,
                 frame_label: None,
-                hint_frame_label: Cell::new(None),
+                operational_deadline_ticks,
                 len: 0,
                 bytes: [0; SIO_FRAME_BYTES],
             }
         }
 
-        fn frame_header(&self) -> hibana::integration::transport::FrameHeader {
-            hibana::integration::transport::FrameHeader::new(
-                hibana::integration::ids::SessionId::new(self.session_id),
-                hibana::integration::ids::Lane::new(self.lane as u32),
+        fn frame_header(&self) -> hibana::runtime::transport::FrameHeader {
+            let session = self.frame_session_id.to_be_bytes();
+            hibana::runtime::transport::FrameHeader::from_bytes([
+                session[0],
+                session[1],
+                session[2],
+                session[3],
+                self.frame_lane,
                 self.sender_role,
                 self.local_role,
                 self.frame_label
-                    .unwrap_or_else(|| hibana::integration::transport::FrameLabel::new(0)),
-            )
+                    .expect("baker SIO received frame must carry a frame label"),
+            ])
         }
 
-        fn incoming<'a>(&'a self) -> hibana::integration::transport::Incoming<'a> {
-            hibana::integration::transport::Incoming::new(
-                self.frame_header(),
-                hibana::integration::wire::Payload::new(&self.bytes[..self.len]),
-            )
+        fn payload<'a>(&'a self) -> hibana::runtime::wire::Payload<'a> {
+            hibana::runtime::wire::Payload::new(&self.bytes[..self.len])
         }
     }
 
@@ -195,10 +201,36 @@ mod rp2040_sio {
     struct DecodedSioFrame {
         session_id: u32,
         sender_role: u8,
-        frame_label: hibana::integration::transport::FrameLabel,
+        peer_role: u8,
+        frame_label: u8,
         lane: u8,
         len: usize,
         bytes: [u8; SIO_FRAME_BYTES],
+    }
+
+    impl DecodedSioFrame {
+        const EMPTY: Self = Self {
+            session_id: 0,
+            sender_role: 0,
+            peer_role: 0,
+            frame_label: 0,
+            lane: 0,
+            len: 0,
+            bytes: [0; SIO_FRAME_BYTES],
+        };
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct StashedSioFrame {
+        occupied: bool,
+        frame: DecodedSioFrame,
+    }
+
+    impl StashedSioFrame {
+        const EMPTY: Self = Self {
+            occupied: false,
+            frame: DecodedSioFrame::EMPTY,
+        };
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -226,13 +258,11 @@ mod rp2040_sio {
 
         fn push_word(
             &mut self,
-            local_role: u8,
             word: u32,
-        ) -> Result<Option<DecodedSioFrame>, hibana::integration::transport::TransportError>
-        {
+        ) -> Result<Option<DecodedSioFrame>, hibana::runtime::transport::TransportError> {
             if self.word_count >= SIO_FRAME_WORDS {
                 self.reset();
-                return Err(hibana::integration::transport::TransportError::Failed);
+                return Err(hibana::runtime::transport::TransportError::Capacity);
             }
 
             self.words[self.word_count] = word;
@@ -240,14 +270,17 @@ mod rp2040_sio {
 
             if self.word_count == 1 && word != SIO_FRAME_MAGIC {
                 self.reset();
-                return Err(hibana::integration::transport::TransportError::Failed);
+                return Err(hibana::runtime::transport::TransportError::Failed);
             }
 
             if self.word_count == SIO_FRAME_HEADER_WORDS {
                 let (sender_role, peer_role, _, len) = decode_meta(self.words[2]);
-                if peer_role != local_role || sender_role == local_role || len > SIO_FRAME_BYTES {
+                if peer_role == sender_role || len > SIO_FRAME_BYTES {
                     self.reset();
-                    return Err(hibana::integration::transport::TransportError::Failed);
+                    if len > SIO_FRAME_BYTES {
+                        return Err(hibana::runtime::transport::TransportError::Capacity);
+                    }
+                    return Err(hibana::runtime::transport::TransportError::Failed);
                 }
                 self.expected_words = SIO_FRAME_HEADER_WORDS + payload_word_count(len);
             }
@@ -259,7 +292,7 @@ mod rp2040_sio {
             let session_id = self.words[1];
             let meta_word = self.words[2];
             let lane_word = self.words[3];
-            let (sender_role, _, frame_label, len) = decode_meta(meta_word);
+            let (sender_role, peer_role, frame_label, len) = decode_meta(meta_word);
             let lane = lane_word as u8;
             let mut bytes = [0; SIO_FRAME_BYTES];
             let mut offset = 0usize;
@@ -273,6 +306,7 @@ mod rp2040_sio {
             Ok(Some(DecodedSioFrame {
                 session_id,
                 sender_role,
+                peer_role,
                 frame_label,
                 lane,
                 len,
@@ -281,52 +315,93 @@ mod rp2040_sio {
         }
     }
 
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    #[derive(Clone, Copy)]
-    struct BufferedFrame {
-        present: bool,
-        session_id: u32,
-        sender_role: u8,
-        frame_label: hibana::integration::transport::FrameLabel,
-        len: usize,
-        bytes: [u8; SIO_FRAME_BYTES],
-    }
-
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    impl BufferedFrame {
-        const EMPTY: Self = Self {
-            present: false,
-            session_id: 0,
-            sender_role: 0,
-            frame_label: hibana::integration::transport::FrameLabel::new(0),
-            len: 0,
-            bytes: [0; SIO_FRAME_BYTES],
-        };
-    }
-
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    const SIO_DEMUX_LANES: usize = 2;
-
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    static mut SIO_DEMUX_CORE0: [BufferedFrame; SIO_DEMUX_LANES] =
-        [BufferedFrame::EMPTY; SIO_DEMUX_LANES];
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    static mut SIO_DEMUX_CORE1: [BufferedFrame; SIO_DEMUX_LANES] =
-        [BufferedFrame::EMPTY; SIO_DEMUX_LANES];
-
+    const SIO_RX_STASH_ROLES: usize = 16;
     static mut SIO_RX_ACCUM_CORE0: SioRxAccumulator = SioRxAccumulator::EMPTY;
     static mut SIO_RX_ACCUM_CORE1: SioRxAccumulator = SioRxAccumulator::EMPTY;
+    static mut SIO_RX_STASH_CORE0: [StashedSioFrame; SIO_RX_STASH_ROLES] =
+        [StashedSioFrame::EMPTY; SIO_RX_STASH_ROLES];
+    static mut SIO_RX_STASH_CORE1: [StashedSioFrame; SIO_RX_STASH_ROLES] =
+        [StashedSioFrame::EMPTY; SIO_RX_STASH_ROLES];
 
-    fn rx_accumulator(local_role: u8) -> *mut SioRxAccumulator {
-        if local_role == 0 {
+    fn rx_accumulator(core_id: u8) -> *mut SioRxAccumulator {
+        if core_id == 0 {
             core::ptr::addr_of_mut!(SIO_RX_ACCUM_CORE0)
         } else {
             core::ptr::addr_of_mut!(SIO_RX_ACCUM_CORE1)
         }
     }
 
+    fn rx_stash(core_id: u8) -> *mut StashedSioFrame {
+        if core_id == 0 {
+            core::ptr::addr_of_mut!(SIO_RX_STASH_CORE0) as *mut StashedSioFrame
+        } else {
+            core::ptr::addr_of_mut!(SIO_RX_STASH_CORE1) as *mut StashedSioFrame
+        }
+    }
+
+    fn stash_slot(core_id: u8, role: u8) -> Option<*mut StashedSioFrame> {
+        if (role as usize) < SIO_RX_STASH_ROLES {
+            Some(unsafe { rx_stash(core_id).add(role as usize) })
+        } else {
+            None
+        }
+    }
+
+    fn take_stashed_frame(core_id: u8, role: u8) -> Option<DecodedSioFrame> {
+        let slot = stash_slot(core_id, role)?;
+        unsafe {
+            if !(*slot).occupied {
+                return None;
+            }
+            let frame = (*slot).frame;
+            (*slot) = StashedSioFrame::EMPTY;
+            Some(frame)
+        }
+    }
+
+    fn stash_frame(
+        core_id: u8,
+        frame: DecodedSioFrame,
+    ) -> Result<(), hibana::runtime::transport::TransportError> {
+        let Some(slot) = stash_slot(core_id, frame.peer_role) else {
+            return Err(hibana::runtime::transport::TransportError::Capacity);
+        };
+        unsafe {
+            if (*slot).occupied {
+                return Err(hibana::runtime::transport::TransportError::Capacity);
+            }
+            (*slot) = StashedSioFrame {
+                occupied: true,
+                frame,
+            };
+        }
+        Ok(())
+    }
+
+    fn stage_frame(rx: &mut SioRx, frame: DecodedSioFrame) {
+        rx.frame_session_id = frame.session_id;
+        rx.frame_lane = frame.lane;
+        rx.frame_label = Some(frame.frame_label);
+        rx.sender_role = frame.sender_role;
+        rx.len = frame.len;
+        rx.delivered = true;
+        rx.bytes[..frame.len].copy_from_slice(&frame.bytes[..frame.len]);
+    }
+
+    fn frame_targets_rx_lane(frame: &DecodedSioFrame, rx: &SioRx) -> bool {
+        frame.lane == rx.lane
+    }
+
+    fn baker_role_core(role: u8) -> u8 {
+        match role {
+            0 | 2 => 0,
+            1 => 1,
+            other => panic!("baker SIO transport has no core assignment for role {other}"),
+        }
+    }
+
     #[inline(always)]
-    pub fn core_id() -> u32 {
+    pub(super) fn core_id() -> u32 {
         #[cfg(all(target_arch = "arm", target_os = "none"))]
         {
             const SIO_CPUID: *const u32 = 0xd000_0000 as *const u32;
@@ -353,29 +428,29 @@ mod rp2040_sio {
         const FIFO_ROE: u32 = 1 << 3;
 
         #[inline(always)]
-        pub fn ready_to_recv() -> bool {
+        fn ready_to_recv() -> bool {
             status() & FIFO_VLD != 0
         }
 
         #[inline(always)]
-        pub fn ready_to_send() -> bool {
+        fn ready_to_send() -> bool {
             status() & FIFO_RDY != 0
         }
 
         #[inline(always)]
-        pub fn status() -> u32 {
+        pub(super) fn status() -> u32 {
             unsafe { read_volatile(SIO_FIFO_ST) }
         }
 
         #[inline(always)]
-        pub fn clear_errors() {
+        pub(super) fn clear_errors() {
             unsafe {
                 write_volatile(SIO_FIFO_ST_WRITE, FIFO_WOF | FIFO_ROE);
             }
         }
 
         #[inline(always)]
-        pub fn try_push(word: u32) -> bool {
+        pub(super) fn try_push(word: u32) -> bool {
             if !ready_to_send() {
                 return false;
             }
@@ -386,7 +461,7 @@ mod rp2040_sio {
         }
 
         #[inline(always)]
-        pub fn try_pop() -> Option<u32> {
+        pub(super) fn try_pop() -> Option<u32> {
             if ready_to_recv() {
                 Some(unsafe { read_volatile(SIO_FIFO_RD) })
             } else {
@@ -398,39 +473,58 @@ mod rp2040_sio {
     #[cfg(not(all(target_arch = "arm", target_os = "none")))]
     mod fifo {
         #[inline(always)]
-        pub fn status() -> u32 {
+        pub(super) fn status() -> u32 {
             0
         }
 
         #[inline(always)]
-        pub fn clear_errors() {}
+        pub(super) fn clear_errors() {}
 
         #[inline(always)]
-        pub fn try_push(word: u32) -> bool {
+        pub(super) fn try_push(word: u32) -> bool {
             core::hint::black_box(word);
             false
         }
 
         #[inline(always)]
-        pub fn try_pop() -> Option<u32> {
+        pub(super) fn try_pop() -> Option<u32> {
             None
         }
     }
 
-    fn encode_meta(
-        sender_role: u8,
-        peer_role: u8,
-        frame_label: hibana::integration::transport::FrameLabel,
-        len: usize,
-    ) -> u32 {
-        ((frame_label.raw() as u32) << 24)
+    #[cfg(all(target_arch = "arm", target_os = "none"))]
+    fn try_pop_until_deadline(timeout_ms: u32) -> Option<u32> {
+        super::baker_timer_route_arm(timeout_ms as u64);
+        loop {
+            if let Some(word) = fifo::try_pop() {
+                super::baker_timer_route_finish();
+                return Some(word);
+            }
+            if super::baker_timer_route_ready() {
+                super::baker_timer_route_finish();
+                return None;
+            }
+            unsafe {
+                core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
+            }
+        }
+    }
+
+    #[cfg(not(all(target_arch = "arm", target_os = "none")))]
+    fn try_pop_until_deadline(timeout_ms: u32) -> Option<u32> {
+        core::hint::black_box(timeout_ms);
+        fifo::try_pop()
+    }
+
+    fn encode_meta(sender_role: u8, peer_role: u8, frame_label: u8, len: usize) -> u32 {
+        ((frame_label as u32) << 24)
             | ((peer_role as u32) << 16)
             | ((sender_role as u32) << 8)
             | (len as u32)
     }
 
-    fn decode_meta(word: u32) -> (u8, u8, hibana::integration::transport::FrameLabel, usize) {
-        let frame_label = hibana::integration::transport::FrameLabel::new((word >> 24) as u8);
+    fn decode_meta(word: u32) -> (u8, u8, u8, usize) {
+        let frame_label = (word >> 24) as u8;
         let peer_role = ((word >> 16) & 0xff) as u8;
         let sender_role = ((word >> 8) & 0xff) as u8;
         let len = (word & 0xff) as usize;
@@ -439,53 +533,6 @@ mod rp2040_sio {
 
     fn payload_word_count(len: usize) -> usize {
         (len + 3) / 4
-    }
-
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    fn store_demux_frame(local_role: u8, frame: &DecodedSioFrame) -> bool {
-        let lane = frame.lane;
-        if lane as usize >= SIO_DEMUX_LANES {
-            return false;
-        }
-        unsafe {
-            let table = if local_role == 0 {
-                core::ptr::addr_of_mut!(SIO_DEMUX_CORE0)
-            } else {
-                core::ptr::addr_of_mut!(SIO_DEMUX_CORE1)
-            };
-            let slot = &mut (*table)[lane as usize];
-            if slot.present {
-                return false;
-            }
-            slot.present = true;
-            slot.session_id = frame.session_id;
-            slot.sender_role = frame.sender_role;
-            slot.frame_label = frame.frame_label;
-            slot.len = frame.len;
-            slot.bytes[..frame.len].copy_from_slice(&frame.bytes[..frame.len]);
-            true
-        }
-    }
-
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    fn take_demux_frame(local_role: u8, session_id: u32, lane: u8) -> Option<BufferedFrame> {
-        if lane as usize >= SIO_DEMUX_LANES {
-            return None;
-        }
-        unsafe {
-            let table = if local_role == 0 {
-                core::ptr::addr_of_mut!(SIO_DEMUX_CORE0)
-            } else {
-                core::ptr::addr_of_mut!(SIO_DEMUX_CORE1)
-            };
-            let slot = &mut (*table)[lane as usize];
-            if !slot.present || slot.session_id != session_id {
-                return None;
-            }
-            let frame = *slot;
-            *slot = BufferedFrame::EMPTY;
-            Some(frame)
-        }
     }
 
     fn pack_payload_word(bytes: &[u8], offset: usize) -> u32 {
@@ -527,7 +574,7 @@ mod rp2040_sio {
 
         #[test]
         fn pending_sio_frame_materializes_header_and_payload_words() {
-            let label = hibana::integration::transport::FrameLabel::new(7);
+            let label = 7;
             let frame = match PendingTxFrame::new(1, label, 3, b"abcd") {
                 Ok(frame) => frame,
                 Err(error) => panic!("{error:?}"),
@@ -542,8 +589,8 @@ mod rp2040_sio {
         }
 
         #[test]
-        fn sio_rx_accumulator_is_local_role_owned_across_lanes() {
-            let label = hibana::integration::transport::FrameLabel::new(9);
+        fn sio_rx_accumulator_decodes_peer_role_for_same_core_demux() {
+            let label = 9;
             let frame = match PendingTxFrame::new(1, label, 3, b"abcd") {
                 Ok(frame) => frame,
                 Err(error) => panic!("{error:?}"),
@@ -552,13 +599,13 @@ mod rp2040_sio {
 
             assert!(
                 accumulator
-                    .push_word(1, frame.word(42, 0, 0))
+                    .push_word(frame.word(42, 0, 0))
                     .expect("magic accepted")
                     .is_none()
             );
             assert!(
                 accumulator
-                    .push_word(1, frame.word(42, 0, 1))
+                    .push_word(frame.word(42, 0, 1))
                     .expect("session accepted")
                     .is_none()
             );
@@ -566,18 +613,18 @@ mod rp2040_sio {
 
             assert!(
                 accumulator
-                    .push_word(1, frame.word(42, 0, 2))
+                    .push_word(frame.word(42, 0, 2))
                     .expect("metadata accepted")
                     .is_none()
             );
             assert!(
                 accumulator
-                    .push_word(1, frame.word(42, 0, 3))
+                    .push_word(frame.word(42, 0, 3))
                     .expect("lane accepted")
                     .is_none()
             );
             let decoded = match accumulator
-                .push_word(1, frame.word(42, 0, 4))
+                .push_word(frame.word(42, 0, 4))
                 .expect("payload accepted")
             {
                 Some(decoded) => decoded,
@@ -586,6 +633,7 @@ mod rp2040_sio {
 
             assert_eq!(decoded.session_id, 42);
             assert_eq!(decoded.sender_role, 0);
+            assert_eq!(decoded.peer_role, 1);
             assert_eq!(decoded.frame_label, label);
             assert_eq!(decoded.lane, 3);
             assert_eq!(&decoded.bytes[..decoded.len], b"abcd");
@@ -593,58 +641,153 @@ mod rp2040_sio {
         }
 
         #[test]
-        fn delivered_sio_payload_emits_route_hint_once() {
+        fn staged_sio_payload_returns_payload_and_frame_observation() {
             let transport = SioTransport::new();
-            let label = hibana::integration::transport::FrameLabel::new(7);
-            let mut rx = SioRx::new(0, 42, 1);
+            let label = 7;
+            let mut rx = SioRx::new(0, 42, 1, 0, 0);
+            let rx_ptr = core::ptr::addr_of!(rx);
+            rx.sender_role = 1;
             rx.frame_label = Some(label);
-            rx.hint_frame_label.set(Some(label));
-            rx.delivered = true;
+            rx.len = 4;
+            rx.bytes[..4].copy_from_slice(b"test");
+            rx.delivered = false;
 
-            assert_eq!(
-                <SioTransport as hibana::integration::transport::Transport>::peek_recv_frame(
-                    &transport, &mut rx,
-                )
-                .map(|header| header.label),
-                Some(label)
-            );
-            assert_eq!(
-                <SioTransport as hibana::integration::transport::Transport>::peek_recv_frame(
-                    &transport, &mut rx,
-                )
-                .map(|header| header.label),
-                Some(label)
-            );
+            let waker = core::task::Waker::noop();
+            let mut context = core::task::Context::from_waker(waker);
+            let payload_bytes = {
+                let received =
+                    match <SioTransport as hibana::runtime::transport::Transport>::poll_recv(
+                        &transport,
+                        &mut rx,
+                        &mut context,
+                    ) {
+                        core::task::Poll::Ready(Ok(received)) => received,
+                        other => panic!("expected staged SIO payload, got {other:?}"),
+                    };
+                received.payload().as_bytes().to_vec()
+            };
+            core::hint::black_box(rx_ptr);
+            assert_eq!(rx.frame_header().bytes(), [0, 0, 0, 42, 1, 1, 0, label]);
+            assert_eq!(payload_bytes, b"test");
         }
 
         #[test]
-        fn staged_sio_payload_emits_route_hint_before_delivery() {
+        fn requeued_sio_payload_returns_same_frame_observation() {
             let transport = SioTransport::new();
-            let label = hibana::integration::transport::FrameLabel::new(7);
-            let mut rx = SioRx::new(0, 42, 1);
+            let label = 7;
+            let mut rx = SioRx::new(0, 42, 1, 0, 0);
+            let rx_ptr = core::ptr::addr_of!(rx);
+            rx.sender_role = 1;
             rx.frame_label = Some(label);
-            rx.hint_frame_label.set(Some(label));
-            rx.delivered = false;
+            rx.len = 4;
+            rx.bytes[..4].copy_from_slice(b"test");
+            rx.delivered = true;
+            rx.requeued = true;
 
+            let waker = core::task::Waker::noop();
+            let mut context = core::task::Context::from_waker(waker);
+            let payload_bytes = {
+                let received =
+                    match <SioTransport as hibana::runtime::transport::Transport>::poll_recv(
+                        &transport,
+                        &mut rx,
+                        &mut context,
+                    ) {
+                        core::task::Poll::Ready(Ok(received)) => received,
+                        other => panic!("expected requeued staged payload, got {other:?}"),
+                    };
+                received.payload().as_bytes().to_vec()
+            };
+            core::hint::black_box(rx_ptr);
+            assert_eq!(rx.frame_header().bytes(), [0, 0, 0, 42, 1, 1, 0, label]);
+            assert_eq!(payload_bytes, b"test");
+            assert!(rx.delivered);
+            assert!(!rx.requeued);
+        }
+
+        #[test]
+        fn stashed_sio_frame_waits_for_matching_lane() {
+            let transport = SioTransport::new();
+            let label = 9;
+            let _ = take_stashed_frame(0, 0);
+            let mut frame = DecodedSioFrame::EMPTY;
+            frame.session_id = 42;
+            frame.sender_role = 1;
+            frame.peer_role = 0;
+            frame.frame_label = label;
+            frame.lane = 2;
+            frame.len = 4;
+            frame.bytes[..4].copy_from_slice(b"lane");
+            stash_frame(0, frame).unwrap();
+
+            let waker = core::task::Waker::noop();
+            let mut context = core::task::Context::from_waker(waker);
+            let mut lane0 = SioRx::new(0, 42, 1, 0, 0);
+            assert!(matches!(
+                <SioTransport as hibana::runtime::transport::Transport>::poll_recv(
+                    &transport,
+                    &mut lane0,
+                    &mut context,
+                ),
+                core::task::Poll::Pending
+            ));
+
+            let mut lane2 = SioRx::new(0, 42, 2, 0, 0);
+            let payload_bytes = {
+                let received =
+                    match <SioTransport as hibana::runtime::transport::Transport>::poll_recv(
+                        &transport,
+                        &mut lane2,
+                        &mut context,
+                    ) {
+                        core::task::Poll::Ready(Ok(received)) => received,
+                        other => panic!("expected stashed matching lane frame, got {other:?}"),
+                    };
+                received.payload().as_bytes().to_vec()
+            };
+            assert_eq!(lane2.frame_header().bytes(), [0, 0, 0, 42, 2, 1, 0, label]);
+            assert_eq!(payload_bytes, b"lane");
+        }
+
+        #[test]
+        fn same_lane_session_mismatch_reaches_endpoint_evidence() {
+            let transport = SioTransport::new();
+            let label = 9;
+            let _ = take_stashed_frame(0, 0);
+            let mut frame = DecodedSioFrame::EMPTY;
+            frame.session_id = 0x1111_2222;
+            frame.sender_role = 1;
+            frame.peer_role = 0;
+            frame.frame_label = label;
+            frame.lane = 1;
+            frame.len = 4;
+            frame.bytes[..4].copy_from_slice(b"sess");
+            stash_frame(0, frame).unwrap();
+
+            let waker = core::task::Waker::noop();
+            let mut context = core::task::Context::from_waker(waker);
+            let mut rx = SioRx::new(0, 0x3333_4444, 1, 0, 0);
+            let payload_bytes = {
+                let received =
+                    match <SioTransport as hibana::runtime::transport::Transport>::poll_recv(
+                        &transport,
+                        &mut rx,
+                        &mut context,
+                    ) {
+                        core::task::Poll::Ready(Ok(received)) => received,
+                        other => panic!("expected same-lane session mismatch frame, got {other:?}"),
+                    };
+                received.payload().as_bytes().to_vec()
+            };
             assert_eq!(
-                <SioTransport as hibana::integration::transport::Transport>::peek_recv_frame(
-                    &transport, &mut rx,
-                )
-                .map(|header| header.label),
-                Some(label)
+                rx.frame_header().bytes(),
+                [0x11, 0x11, 0x22, 0x22, 1, 1, 0, label]
             );
-            assert_eq!(
-                <SioTransport as hibana::integration::transport::Transport>::peek_recv_frame(
-                    &transport, &mut rx,
-                )
-                .map(|header| header.label),
-                Some(label)
-            );
+            assert_eq!(payload_bytes, b"sess");
         }
     }
 
-    impl hibana::integration::transport::Transport for SioTransport {
-        type Error = hibana::integration::transport::TransportError;
+    impl hibana::runtime::transport::Transport for SioTransport {
         type Tx<'a>
             = SioTx
         where
@@ -655,39 +798,41 @@ mod rp2040_sio {
             Self: 'a;
         fn open<'a>(
             &'a self,
-            port: hibana::integration::transport::PortOpen,
+            port: hibana::runtime::transport::PortOpen,
         ) -> (Self::Tx<'a>, Self::Rx<'a>) {
             let local_role = port.local_role();
             let session_id = port.session_id().raw();
-            let lane = port.lane().as_wire();
+            let lane = port.lane();
             fifo::clear_errors();
             (
                 SioTx {
                     local_role,
+                    core_id: core_id() as u8,
                     session_id,
                     sent_frames: 0,
                     pending: None,
                 },
-                SioRx::new(local_role, session_id, lane),
+                SioRx::new(local_role, session_id, lane, 0, core_id() as u8),
             )
         }
 
         fn poll_send<'a, 'f>(
             &self,
             tx: &'a mut Self::Tx<'a>,
-            outgoing: hibana::integration::transport::Outgoing<'f>,
+            outgoing: hibana::runtime::transport::Outgoing<'f>,
             context: &mut core::task::Context<'_>,
-        ) -> core::task::Poll<Result<(), Self::Error>>
+        ) -> core::task::Poll<Result<(), hibana::runtime::transport::TransportError>>
         where
             'a: 'f,
         {
             core::hint::black_box(core::ptr::addr_of!(*context));
             let bytes = outgoing.payload().as_bytes();
-            if outgoing.peer() == tx.local_role {
+            let target_role = outgoing.target_role();
+            if target_role == tx.local_role {
                 super::record_choreofs_sio_trace(trace_frame(
                     6,
                     tx.local_role,
-                    outgoing.peer(),
+                    target_role,
                     bytes.len(),
                     outgoing.frame_label().raw(),
                 ));
@@ -696,28 +841,51 @@ mod rp2040_sio {
             }
             if bytes.len() > SIO_FRAME_BYTES {
                 return core::task::Poll::Ready(Err(
-                    hibana::integration::transport::TransportError::Failed,
+                    hibana::runtime::transport::TransportError::Capacity,
                 ));
+            }
+            if baker_role_core(target_role) == tx.core_id {
+                let mut frame = DecodedSioFrame::EMPTY;
+                frame.session_id = tx.session_id;
+                frame.sender_role = tx.local_role;
+                frame.peer_role = target_role;
+                frame.frame_label = outgoing.frame_label().raw();
+                frame.lane = outgoing.lane();
+                frame.len = bytes.len();
+                frame.bytes[..bytes.len()].copy_from_slice(bytes);
+                if let Err(error) = stash_frame(tx.core_id, frame) {
+                    return core::task::Poll::Ready(Err(error));
+                }
+                super::record_choreofs_sio_trace(trace_frame(
+                    14,
+                    tx.local_role,
+                    target_role,
+                    bytes.len(),
+                    outgoing.frame_label().raw(),
+                ));
+                context.waker().wake_by_ref();
+                tx.sent_frames = tx.sent_frames.saturating_add(1);
+                return core::task::Poll::Ready(Ok(()));
             }
 
             if tx.pending.is_none() {
                 super::record_choreofs_sio_trace(trace_frame(
                     1,
                     tx.local_role,
-                    outgoing.peer(),
+                    target_role,
                     bytes.len(),
                     outgoing.frame_label().raw(),
                 ));
                 super::record_choreofs_sio_trace(trace_frame(
                     11,
                     tx.local_role,
-                    outgoing.peer(),
+                    target_role,
                     outgoing.lane() as usize,
                     outgoing.frame_label().raw(),
                 ));
                 let pending = match PendingTxFrame::new(
-                    outgoing.peer(),
-                    outgoing.frame_label(),
+                    target_role,
+                    outgoing.frame_label().raw(),
                     outgoing.lane(),
                     bytes,
                 ) {
@@ -744,7 +912,7 @@ mod rp2040_sio {
 
             if !completed {
                 return core::task::Poll::Ready(Err(
-                    hibana::integration::transport::TransportError::Failed,
+                    hibana::runtime::transport::TransportError::Failed,
                 ));
             }
 
@@ -752,7 +920,7 @@ mod rp2040_sio {
                 Some(finished) => finished,
                 None => {
                     return core::task::Poll::Ready(Err(
-                        hibana::integration::transport::TransportError::Failed,
+                        hibana::runtime::transport::TransportError::Failed,
                     ));
                 }
             };
@@ -761,7 +929,7 @@ mod rp2040_sio {
                 tx.local_role,
                 finished.peer_role,
                 (fifo::status() & 0xff) as usize,
-                finished.frame_label.raw(),
+                finished.frame_label,
             ));
             super::record_sio_direction_tx(tx.local_role, finished.peer_role);
             signal_peer();
@@ -778,8 +946,12 @@ mod rp2040_sio {
             &'a self,
             rx: &'a mut Self::Rx<'a>,
             context: &mut core::task::Context<'_>,
-        ) -> core::task::Poll<Result<hibana::integration::transport::Incoming<'a>, Self::Error>>
-        {
+        ) -> core::task::Poll<
+            Result<
+                hibana::runtime::transport::ReceivedFrame<'a>,
+                hibana::runtime::transport::TransportError,
+            >,
+        > {
             core::hint::black_box(core::ptr::addr_of!(*context));
             if rx.local_role == 1 {
                 let seen_tx = super::read_core0_to_core1_tx_count();
@@ -797,45 +969,54 @@ mod rp2040_sio {
                 rx.delivered = true;
                 rx.pending_logged = false;
                 rx.pending_polls = 0;
-                rx.hint_frame_label.set(None);
                 super::record_choreofs_sio_trace(trace_frame(
                     3,
                     rx.local_role,
                     rx.local_role,
                     rx.len,
-                    rx.frame_label.map(|label| label.raw()).unwrap_or(0),
+                    rx.frame_label
+                        .expect("baker SIO requeued frame must carry a frame label"),
                 ));
-                return core::task::Poll::Ready(Ok(rx.incoming()));
+                let header = rx.frame_header();
+                return core::task::Poll::Ready(Ok(
+                    hibana::runtime::transport::ReceivedFrame::framed(header, rx.payload()),
+                ));
             }
             if rx.frame_label.is_some() {
                 rx.frame_label = None;
-                rx.hint_frame_label.set(None);
                 rx.delivered = false;
                 rx.pending_logged = false;
                 rx.pending_polls = 0;
                 rx.len = 0;
+                rx.frame_session_id = rx.session_id;
+                rx.frame_lane = rx.lane;
             }
-            #[cfg(all(target_arch = "arm", target_os = "none"))]
-            {
-                if let Some(frame) = take_demux_frame(rx.local_role, rx.session_id, rx.lane) {
-                    rx.frame_label = Some(frame.frame_label);
-                    rx.hint_frame_label.set(Some(frame.frame_label));
-                    rx.sender_role = frame.sender_role;
-                    rx.len = frame.len;
-                    rx.bytes[..frame.len].copy_from_slice(&frame.bytes[..frame.len]);
-                    rx.delivered = true;
-                    rx.pending_logged = false;
-                    rx.pending_polls = 0;
-                    super::record_sio_direction_rx(rx.local_role, frame.sender_role);
+            if let Some(frame) = take_stashed_frame(rx.core_id, rx.local_role) {
+                if !frame_targets_rx_lane(&frame, rx) {
+                    stash_frame(rx.core_id, frame)?;
                     super::record_choreofs_sio_trace(trace_frame(
-                        9,
+                        15,
                         rx.local_role,
                         frame.sender_role,
-                        frame.len,
-                        frame.frame_label.raw(),
+                        frame.lane as usize,
+                        frame.frame_label,
                     ));
-                    return core::task::Poll::Ready(Ok(rx.incoming()));
+                    context.waker().wake_by_ref();
+                    return core::task::Poll::Pending;
                 }
+                stage_frame(rx, frame);
+                super::record_sio_direction_rx(rx.local_role, frame.sender_role);
+                super::record_choreofs_sio_trace(trace_frame(
+                    13,
+                    rx.local_role,
+                    frame.sender_role,
+                    frame.len,
+                    frame.frame_label,
+                ));
+                let header = rx.frame_header();
+                return core::task::Poll::Ready(Ok(
+                    hibana::runtime::transport::ReceivedFrame::framed(header, rx.payload()),
+                ));
             }
             loop {
                 let word = match fifo::try_pop() {
@@ -864,16 +1045,31 @@ mod rp2040_sio {
                                 rx.local_role,
                                 rx.local_role,
                                 rx.lane as usize,
-                                rx.frame_label.map(|label| label.raw()).unwrap_or(0),
+                                SIO_TRACE_NO_FRAME_LABEL,
                             ));
                             rx.pending_logged = true;
                         }
                         let has_partial_frame =
-                            unsafe { (*rx_accumulator(rx.local_role)).is_partial() };
+                            unsafe { (*rx_accumulator(rx.core_id)).is_partial() };
                         if has_partial_frame {
                             context.waker().wake_by_ref();
                         }
-                        return core::task::Poll::Pending;
+                        if rx.operational_deadline_ticks != 0 {
+                            match try_pop_until_deadline(rx.operational_deadline_ticks) {
+                                Some(word) => {
+                                    rx.pending_logged = false;
+                                    rx.pending_polls = 0;
+                                    word
+                                }
+                                None => {
+                                    return core::task::Poll::Ready(Err(
+                                        hibana::runtime::transport::TransportError::Deadline,
+                                    ));
+                                }
+                            }
+                        } else {
+                            return core::task::Poll::Pending;
+                        }
                     }
                 };
 
@@ -891,102 +1087,71 @@ mod rp2040_sio {
                 rx.pending_logged = false;
                 rx.pending_polls = 0;
 
-                let frame = match unsafe {
-                    (&mut *rx_accumulator(rx.local_role)).push_word(rx.local_role, word)
-                } {
+                let frame = match unsafe { (&mut *rx_accumulator(rx.core_id)).push_word(word) } {
                     Ok(Some(frame)) => frame,
                     Ok(None) => continue,
                     Err(error) => return core::task::Poll::Ready(Err(error)),
                 };
 
-                if frame.session_id != rx.session_id || frame.lane != rx.lane {
-                    let reason = if frame.session_id != rx.session_id {
-                        super::EPF_REASON_SESSION_MISMATCH
-                    } else {
-                        super::EPF_REASON_LANE_MISMATCH
-                    };
-                    super::record_epf_transport_reject(
-                        reason,
-                        rx.session_id,
-                        frame.session_id,
-                        frame.lane,
-                        frame.sender_role,
+                if frame.peer_role != rx.local_role {
+                    stash_frame(rx.core_id, frame)?;
+                    super::record_choreofs_sio_trace(trace_frame(
+                        12,
                         rx.local_role,
-                        frame.frame_label.raw(),
-                    );
-                    #[cfg(all(target_arch = "arm", target_os = "none"))]
-                    {
-                        if !store_demux_frame(rx.local_role, &frame) {
-                            return core::task::Poll::Ready(Err(
-                                hibana::integration::transport::TransportError::Failed,
-                            ));
-                        }
-                        super::record_choreofs_sio_trace(trace_frame(
-                            10,
-                            rx.local_role,
-                            frame.sender_role,
-                            frame.len,
-                            frame.frame_label.raw(),
-                        ));
-                        continue;
-                    }
-                    #[cfg(not(all(target_arch = "arm", target_os = "none")))]
-                    {
-                        core::hint::black_box(frame.lane);
-                        return core::task::Poll::Ready(Err(
-                            hibana::integration::transport::TransportError::Failed,
-                        ));
-                    }
+                        frame.peer_role,
+                        frame.len,
+                        frame.frame_label,
+                    ));
+                    context.waker().wake_by_ref();
+                    continue;
                 }
 
-                rx.frame_label = Some(frame.frame_label);
-                rx.hint_frame_label.set(Some(frame.frame_label));
-                rx.sender_role = frame.sender_role;
-                rx.len = frame.len;
-                rx.delivered = true;
-                rx.bytes[..frame.len].copy_from_slice(&frame.bytes[..frame.len]);
+                if !frame_targets_rx_lane(&frame, rx) {
+                    stash_frame(rx.core_id, frame)?;
+                    super::record_choreofs_sio_trace(trace_frame(
+                        10,
+                        rx.local_role,
+                        frame.sender_role,
+                        frame.lane as usize,
+                        frame.frame_label,
+                    ));
+                    context.waker().wake_by_ref();
+                    continue;
+                }
+
+                stage_frame(rx, frame);
                 super::record_sio_direction_rx(rx.local_role, frame.sender_role);
                 super::record_choreofs_sio_trace(trace_frame(
                     2,
                     rx.local_role,
                     frame.sender_role,
                     frame.len,
-                    frame.frame_label.raw(),
+                    frame.frame_label,
                 ));
-                return core::task::Poll::Ready(Ok(rx.incoming()));
+                let header = rx.frame_header();
+                return core::task::Poll::Ready(Ok(
+                    hibana::runtime::transport::ReceivedFrame::framed(header, rx.payload()),
+                ));
             }
         }
 
-        fn requeue<'a>(&self, rx: &mut Self::Rx<'a>) -> Result<(), Self::Error> {
+        fn requeue<'a>(
+            &self,
+            rx: &mut Self::Rx<'a>,
+        ) -> Result<(), hibana::runtime::transport::TransportError> {
             rx.requeued = rx.frame_label.is_some();
             if rx.requeued {
                 rx.delivered = false;
-            }
-            super::record_choreofs_sio_trace(trace_frame(
-                4,
-                rx.local_role,
-                rx.local_role,
-                rx.len,
-                rx.frame_label.map(|label| label.raw()).unwrap_or(0),
-            ));
-            Ok(())
-        }
-
-        fn peek_recv_frame<'a>(
-            &self,
-            rx: &mut Self::Rx<'a>,
-        ) -> Option<hibana::integration::transport::FrameHeader> {
-            let hint = rx.hint_frame_label.get();
-            if let Some(frame_label) = hint {
                 super::record_choreofs_sio_trace(trace_frame(
-                    5,
+                    4,
                     rx.local_role,
                     rx.local_role,
                     rx.len,
-                    frame_label.raw(),
+                    rx.frame_label
+                        .expect("baker SIO requeued frame must carry a frame label"),
                 ));
             }
-            hint.map(|_| rx.frame_header())
+            Ok(())
         }
     }
 }
@@ -995,9 +1160,9 @@ mod rp2040_sio {
 static mut BAKER_ENGINE_WASI_GUEST_ARENA: appkit::WasiGuestArena = appkit::WasiGuestArena::empty();
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-const BAKER_DRIVER_ATTACH_SLAB_BYTES: usize = 64 * 1024;
+const BAKER_DRIVER_ATTACH_SLAB_BYTES: usize = 48 * 1024;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-const BAKER_ENGINE_ATTACH_SLAB_BYTES: usize = 64 * 1024;
+const BAKER_ENGINE_ATTACH_SLAB_BYTES: usize = 48 * 1024;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 static BAKER_DRIVER_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<BAKER_DRIVER_ATTACH_SLAB_BYTES> =
@@ -1053,20 +1218,23 @@ type Handler = unsafe extern "C" fn() -> !;
 type IrqHandler = unsafe extern "C" fn();
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
+const BAKER_EXTERNAL_IRQS: usize = 32;
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
 #[repr(C)]
 struct VectorTable {
     initial_stack_pointer: *const u32,
     reset: Handler,
     exceptions: [Handler; 14],
-    external_irqs: [IrqHandler; 32],
+    external_irqs: [IrqHandler; BAKER_EXTERNAL_IRQS],
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 unsafe impl Sync for VectorTable {}
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-const fn external_irqs() -> [IrqHandler; 32] {
-    let mut handlers = [default_irq_handler as IrqHandler; 32];
+const fn external_irqs() -> [IrqHandler; BAKER_EXTERNAL_IRQS] {
+    let mut handlers = [unhandled_irq_handler as IrqHandler; BAKER_EXTERNAL_IRQS];
     handlers[0] = timer_alarm0_irq_handler;
     handlers
 }
@@ -1200,17 +1368,41 @@ const TIMER_INTE: *mut u32 = (TIMER_BASE + 0x38) as *mut u32;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const TIMER_ALARM0_BIT: u32 = 1 << 0;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-const NVIC_ISER: *mut u32 = 0xe000_e100 as *mut u32;
+const NVIC_ISER_BASE: usize = 0xe000_e100;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-const NVIC_ICPR: *mut u32 = 0xe000_e280 as *mut u32;
+const NVIC_ICPR_BASE: usize = 0xe000_e280;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-const NVIC_TIMER_IRQ0_BIT: u32 = 1 << 0;
+const NVIC_TIMER_IRQ0: u8 = 0;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const BAKER_XOSC_HZ: u32 = 12_000_000;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const BAKER_TIMER_TICK_CYCLES: u32 = BAKER_XOSC_HZ / 1_000_000;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const BAKER_TIMER_TICKS_PER_MS: u64 = 1_000;
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn nvic_register(base: usize, irq: u8) -> *mut u32 {
+    (base + (usize::from(irq) / 32) * 4) as *mut u32
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn nvic_bit(irq: u8) -> u32 {
+    1u32 << (u32::from(irq) & 31)
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn nvic_clear_pending(irq: u8) {
+    unsafe {
+        write_volatile(nvic_register(NVIC_ICPR_BASE, irq), nvic_bit(irq));
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn nvic_enable_irq(irq: u8) {
+    unsafe {
+        write_volatile(nvic_register(NVIC_ISER_BASE, irq), nvic_bit(irq));
+    }
+}
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 static mut BAKER_TIMER_ALARM0_READY: u32 = 0;
@@ -1242,37 +1434,47 @@ static VECTOR_TABLE: VectorTable = VectorTable {
     initial_stack_pointer: core::ptr::addr_of!(__stack_top),
     reset: Reset,
     exceptions: [
-        default_handler,
+        unhandled_exception_handler,
         hard_fault_trampoline,
-        default_handler,
-        default_handler,
-        default_handler,
-        default_handler,
-        default_handler,
-        default_handler,
-        default_handler,
-        default_handler,
-        default_handler,
-        default_handler,
-        default_handler,
-        default_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
+        unhandled_exception_handler,
     ],
     external_irqs: external_irqs(),
 };
 
-pub const RESULT_SUCCESS: u32 = 0x4849_4f4b;
+const RESULT_SUCCESS: u32 = 0x4849_4f4b;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const RESULT_FAILURE: u32 = 0x4849_4641;
-pub const RESULT_FAIL_SAFE_OK: u32 = 0x4849_4653;
-pub const RESULT_RECOVERY_OK: u32 = 0x4849_5243;
-pub const RESULT_MANY_REENTRY_OK: u32 = 0x4849_524d;
-pub const RESULT_PREVIEW_PROBE_OK: u32 = 0x4849_5050;
-pub const RESULT_TIMER_ROUTE_OK: u32 = 0x4849_5452;
-pub const RESULT_SESSION_MISMATCH_OK: u32 = 0x4849_534d;
 
-pub const EPF_KIND_TRANSPORT_REJECT: u32 = 1;
-pub const EPF_REASON_SESSION_MISMATCH: u32 = 1;
-pub const EPF_REASON_LANE_MISMATCH: u32 = 2;
+const EPF_POLICY_SLOTS: usize = 1;
+const EPF_BYTECODE_BYTES: usize = 64;
+const EPF_TAP_SPOOL_EVENTS: usize = 16;
+const EPF_BYTECODE_STATE_EMPTY: u32 = 0;
+const EPF_BYTECODE_STATE_COMMIT: u32 = 0x434f_4d54;
+const EPF_BYTECODE_STATE_LOADED: u32 = 0x4c4f_4144;
+const EPF_BYTECODE_STATE_REJECTED: u32 = 0x5245_4a54;
+const EPF_LOAD_REASON_NONE: u32 = 0;
+const EPF_LOAD_REASON_BAD_LEN: u32 = 1;
+const EPF_LOAD_REASON_BAD_HASH: u32 = 2;
+const EPF_LOAD_REASON_VM_TRAP: u32 = 3;
+const EPF_LOAD_REASON_LOAD_ERROR: u32 = 4;
+const EPF_TARGET_OBSERVE: u32 = 0;
+const EPF_TARGET_POLICY: u32 = 1;
+const EPF_INGRESS_NONE: u32 = 0;
+const EPF_INGRESS_MAILBOX: u32 = 0x4d41_494c;
+const EPF_INGRESS_CHOREOGRAPHY: u32 = 0x4348_4f52;
+const EPF_TIMER_IRQ_FACT_ID: u16 = 0x0057;
+const EPF_TIMER_IRQ_FACT_TAG: u32 = 0x5449_4d52;
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const STAGE_CORE0_START: u32 = 0x4849_0001;
@@ -1290,13 +1492,7 @@ const STAGE_HARD_PANIC: u32 = 0x4849_0f00;
 const STAGE_CORE1_LAUNCH_ERR: u32 = 0x4849_0f01;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const STAGE_CORE1_START_TIMEOUT: u32 = 0x4849_0f02;
-#[cfg(feature = "wasm-engine-core")]
-pub const STAGE_WASI_ENGINE_ERROR: u32 = 0x4849_0f10;
-pub const STAGE_CHOREOFS_DRIVER_ERROR: u32 = 0x4849_0f11;
-pub const STAGE_CONTROL_FLOW_ERROR: u32 = 0x4849_0f12;
 
-pub const CHOREOFS_DRIVER_STARTED: u32 = 0x5741_0010;
-pub const CHOREOFS_GPIO_READY: u32 = 0x5741_0020;
 const PANIC_MESSAGE_BYTES: usize = 384;
 
 #[unsafe(no_mangle)]
@@ -1420,6 +1616,100 @@ static mut HIBANA_EPF_CORE1_ARG2: u32 = 0;
 static mut HIBANA_EPF_CORE1_FUEL_USED: u32 = 0;
 #[used]
 #[unsafe(no_mangle)]
+static mut HIBANA_EPF_LOAD_EPOCH: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_IMAGE_DIGEST: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_LOAD_REASON: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_ACTIVE_TARGET_KIND: u32 = EPF_TARGET_OBSERVE;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_ACTIVE_POLICY_ID: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_POLICY_TIMER_IRQ_READY: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_POLICY_TIMER_FACT_KIND: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_POLICY_TIMER_FACT_ARG0: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_POLICY_TIMER_FACT_FUEL: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_IMAGE_INGRESS: u32 = EPF_INGRESS_NONE;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_BYTECODE_STATE: u32 = EPF_BYTECODE_STATE_EMPTY;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_BYTECODE_LEN: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_BYTECODE_HASH: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_BYTECODE_IMAGE: [u8; EPF_BYTECODE_BYTES] = [0; EPF_BYTECODE_BYTES];
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_ACTIVE_IMAGE: [u8; EPF_BYTECODE_BYTES] = [0; EPF_BYTECODE_BYTES];
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_ACTIVE_LEN: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE0_TAP_SPOOL: [MaybeUninit<hibana::runtime::tap::TapEvent>;
+    EPF_TAP_SPOOL_EVENTS] = [const { MaybeUninit::uninit() }; EPF_TAP_SPOOL_EVENTS];
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE0_TAP_SPOOL_LEN: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE0_TAP_SPOOL_READ: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE0_IMAGE_DIGEST: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_TAP_SPOOL: [MaybeUninit<hibana::runtime::tap::TapEvent>;
+    EPF_TAP_SPOOL_EVENTS] = [const { MaybeUninit::uninit() }; EPF_TAP_SPOOL_EVENTS];
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_TAP_SPOOL_LEN: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_TAP_SPOOL_READ: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_EPF_CORE1_IMAGE_DIGEST: u32 = 0;
+static mut HIBANA_EPF_CORE0_STORAGE: hibana_epf::EpfStorage<
+    EPF_POLICY_SLOTS,
+    EPF_BYTECODE_BYTES,
+    0,
+    4,
+> = hibana_epf::EpfStorage::new();
+static mut HIBANA_EPF_CORE1_STORAGE: hibana_epf::EpfStorage<
+    EPF_POLICY_SLOTS,
+    EPF_BYTECODE_BYTES,
+    0,
+    4,
+> = hibana_epf::EpfStorage::new();
+static mut HIBANA_EPF_CORE0_VIEW_INIT: u32 = 0;
+static mut HIBANA_EPF_CORE1_VIEW_INIT: u32 = 0;
+static mut HIBANA_EPF_CORE0_VIEW: core::mem::MaybeUninit<
+    hibana_epf::Epf<'static, EPF_POLICY_SLOTS, EPF_BYTECODE_BYTES, 0, 4>,
+> = core::mem::MaybeUninit::uninit();
+static mut HIBANA_EPF_CORE1_VIEW: core::mem::MaybeUninit<
+    hibana_epf::Epf<'static, EPF_POLICY_SLOTS, EPF_BYTECODE_BYTES, 0, 4>,
+> = core::mem::MaybeUninit::uninit();
+#[used]
+#[unsafe(no_mangle)]
 static mut HIBANA_CHOREOFS_ENGINE_STATUS: u32 = 0;
 #[used]
 #[unsafe(no_mangle)]
@@ -1484,7 +1774,6 @@ static mut HIBANA_CHOREOFS_LED_MASK: u32 = 0;
 #[used]
 #[unsafe(no_mangle)]
 static mut HIBANA_CHOREOFS_SEEN_LED_MASK: u32 = 0;
-
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 static mut CORE1_STARTED: u32 = 0;
 
@@ -1507,7 +1796,9 @@ const FIFO_WOF: u32 = 1 << 2;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const FIFO_ROE: u32 = 1 << 3;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-const PSM_FRCE_OFF: *mut u32 = (0x4001_0000 + 0x04) as *mut u32;
+const PSM_BASE: usize = 0x4001_0000;
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+const PSM_FRCE_OFF: *mut u32 = (PSM_BASE + 0x04) as *mut u32;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const PSM_PROC1: u32 = 1 << 16;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -1540,25 +1831,27 @@ const GPIO_OE_SET: *mut u32 = (SIO_BASE + 0x24) as *mut u32;
 const GPIO_FUNC_SIO: u32 = 5;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const GPIO_PAD_DEFAULT: u32 = 0x56;
-
 const BAKER_SAFE_STATE_LED_PINS: [u8; 3] = [22, 21, 20];
-pub trait BakerCapsuleFacts: appkit::Capsule<Placement = BakerPlacement> {
-    type DriverArtifact: appkit::ArtifactEvidence;
-    type EngineArtifact: appkit::ArtifactEvidence;
 
-    const DRIVER_IMAGE_ID: appkit::ImageId;
-    const ENGINE_IMAGE_ID: appkit::ImageId;
+pub trait BakerCapsuleFacts: appkit::Capsule<Placement = BakerPlacement> + 'static {
     const SUCCESS_RESULT: u32 = RESULT_SUCCESS;
     const SIO_OPERATIONAL_DEADLINE_TICKS: u32 = 0;
-    const SIO_ROLE0_SESSION_XOR: u32 = 0;
-    const SIO_ROLE1_SESSION_XOR: u32 = 0;
+    const SIO_ROLE0_TX_SESSION_XOR: u32 = 0;
+    const SIO_ROLE1_TX_SESSION_XOR: u32 = 0;
+    const DRIVER_REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(0);
+    const ENGINE_REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(1);
+
+    fn run_engine_image();
 
     fn driver_facts() -> appkit::DriverFacts<'static> {
-        appkit::DriverFacts::EMPTY
+        appkit::DriverFacts::new(
+            appkit::ChoreoFsFacts::new(&[]),
+            appkit::LedgerFacts::new(&[]),
+        )
     }
 }
 
-pub struct BakerSioTransport<C>
+struct BakerSioTransport<C>
 where
     C: BakerCapsuleFacts + 'static,
 {
@@ -1570,7 +1863,7 @@ impl<C> BakerSioTransport<C>
 where
     C: BakerCapsuleFacts + 'static,
 {
-    pub const fn new() -> Self {
+    const fn new() -> Self {
         Self {
             inner: rp2040_sio::SioTransport::new(),
             capsule: core::marker::PhantomData,
@@ -1589,64 +1882,66 @@ where
 
 impl<C> Copy for BakerSioTransport<C> where C: BakerCapsuleFacts {}
 
-impl<C> hibana::integration::transport::Transport for BakerSioTransport<C>
+impl<C> hibana::runtime::transport::Transport for BakerSioTransport<C>
 where
     C: BakerCapsuleFacts,
 {
-    type Error = <rp2040_sio::SioTransport as hibana::integration::transport::Transport>::Error;
     type Tx<'a>
-        = <rp2040_sio::SioTransport as hibana::integration::transport::Transport>::Tx<'a>
+        = <rp2040_sio::SioTransport as hibana::runtime::transport::Transport>::Tx<'a>
     where
         Self: 'a;
     type Rx<'a>
-        = <rp2040_sio::SioTransport as hibana::integration::transport::Transport>::Rx<'a>
+        = <rp2040_sio::SioTransport as hibana::runtime::transport::Transport>::Rx<'a>
     where
         Self: 'a;
     fn open<'a>(
         &'a self,
-        port: hibana::integration::transport::PortOpen,
+        port: hibana::runtime::transport::PortOpen,
     ) -> (Self::Tx<'a>, Self::Rx<'a>) {
-        let session_xor = match port.local_role() {
-            0 => C::SIO_ROLE0_SESSION_XOR,
-            1 => C::SIO_ROLE1_SESSION_XOR,
-            _ => 0,
+        let tx_session_xor = match port.local_role() {
+            0 => C::SIO_ROLE0_TX_SESSION_XOR,
+            1 => C::SIO_ROLE1_TX_SESSION_XOR,
+            2 => 0,
+            other => panic!("baker SIO transport has no tx session xor for role {other}"),
         };
-        self.inner.open_with_session_xor(port, session_xor)
+        self.inner
+            .open_with_tx_session_xor(port, tx_session_xor, C::SIO_OPERATIONAL_DEADLINE_TICKS)
     }
 
     fn poll_send<'a, 'f>(
         &self,
         tx: &'a mut Self::Tx<'a>,
-        outgoing: hibana::integration::transport::Outgoing<'f>,
+        outgoing: hibana::runtime::transport::Outgoing<'f>,
         context: &mut core::task::Context<'_>,
-    ) -> core::task::Poll<Result<(), Self::Error>>
+    ) -> core::task::Poll<Result<(), hibana::runtime::transport::TransportError>>
     where
         'a: 'f,
     {
-        hibana::integration::transport::Transport::poll_send(&self.inner, tx, outgoing, context)
+        hibana::runtime::transport::Transport::poll_send(&self.inner, tx, outgoing, context)
     }
 
     fn cancel_send<'a>(&self, tx: &'a mut Self::Tx<'a>) {
-        hibana::integration::transport::Transport::cancel_send(&self.inner, tx);
+        hibana::runtime::transport::Transport::cancel_send(&self.inner, tx);
     }
 
     fn poll_recv<'a>(
         &'a self,
         rx: &'a mut Self::Rx<'a>,
         context: &mut core::task::Context<'_>,
-    ) -> core::task::Poll<Result<hibana::integration::transport::Incoming<'a>, Self::Error>> {
-        hibana::integration::transport::Transport::poll_recv(&self.inner, rx, context)
+    ) -> core::task::Poll<
+        Result<
+            hibana::runtime::transport::ReceivedFrame<'a>,
+            hibana::runtime::transport::TransportError,
+        >,
+    > {
+        hibana::runtime::transport::Transport::poll_recv(&self.inner, rx, context)
     }
 
-    fn requeue<'a>(&self, rx: &mut Self::Rx<'a>) -> Result<(), Self::Error> {
-        hibana::integration::transport::Transport::requeue(&self.inner, rx)
-    }
-
-    fn peek_recv_frame<'a>(
+    fn requeue<'a>(
         &self,
         rx: &mut Self::Rx<'a>,
-    ) -> Option<hibana::integration::transport::FrameHeader> {
-        hibana::integration::transport::Transport::peek_recv_frame(&self.inner, rx)
+    ) -> Result<(), hibana::runtime::transport::TransportError> {
+        hibana::runtime::transport::Transport::requeue(&self.inner, rx)
     }
 }
 
@@ -1659,7 +1954,7 @@ where
             1 => appkit::RoleKind::Engine,
             0 => appkit::RoleKind::Driver,
             2 => appkit::RoleKind::Boundary,
-            _ => appkit::RoleKind::Supervisor,
+            other => panic!("baker placement has no role {other}"),
         }
     }
 }
@@ -1708,6 +2003,90 @@ pub fn baker_timer_route_resolver_ready(timeout_ms: u64) -> bool {
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn baker_timer_route_irq_observed() -> bool {
+    unsafe { read_volatile(core::ptr::addr_of!(BAKER_TIMER_ALARM0_READY)) != 0 }
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub fn baker_timer_route_irq_observed() -> bool {
+    true
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn baker_wait_timer_route_irq_observed(timeout_ms: u64) -> bool {
+    let start = unsafe { read_volatile(TIMER_TIMERAWL) };
+    let timeout_ticks = core::cmp::min(
+        timeout_ms.saturating_mul(BAKER_TIMER_TICKS_PER_MS),
+        u32::MAX as u64,
+    ) as u32;
+    loop {
+        if baker_timer_route_irq_observed() {
+            return true;
+        }
+        let now = unsafe { read_volatile(TIMER_TIMERAWL) };
+        if now.wrapping_sub(start) >= timeout_ticks {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub fn baker_wait_timer_route_irq_observed(timeout_ms: u64) -> bool {
+    core::hint::black_box(timeout_ms);
+    true
+}
+
+fn record_epf_policy_timer_irq_ready() {
+    let ready = if baker_timer_route_irq_observed() {
+        1
+    } else {
+        0
+    };
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_POLICY_TIMER_IRQ_READY),
+        ready,
+    );
+}
+
+pub fn baker_epf_policy_image_ready() -> bool {
+    let committed_state = read_marker(core::ptr::addr_of!(HIBANA_EPF_BYTECODE_STATE));
+    let committed_len = read_marker(core::ptr::addr_of!(HIBANA_EPF_BYTECODE_LEN)) as usize;
+    if committed_state == EPF_BYTECODE_STATE_COMMIT && committed_len == EPF_BYTECODE_BYTES {
+        return true;
+    }
+    let active_len = read_marker(core::ptr::addr_of!(HIBANA_EPF_ACTIVE_LEN)) as usize;
+    active_len == EPF_BYTECODE_BYTES
+}
+
+pub fn read_epf_policy_image<const N: usize>(out: &mut [u8; N]) -> bool {
+    if N > EPF_BYTECODE_BYTES {
+        return false;
+    }
+    let committed_state = read_marker(core::ptr::addr_of!(HIBANA_EPF_BYTECODE_STATE));
+    let committed_len = read_marker(core::ptr::addr_of!(HIBANA_EPF_BYTECODE_LEN)) as usize;
+    if committed_state == EPF_BYTECODE_STATE_COMMIT && committed_len == N {
+        let base = core::ptr::addr_of!(HIBANA_EPF_BYTECODE_IMAGE).cast::<u8>();
+        let mut index = 0usize;
+        while index < N {
+            out[index] = unsafe { core::ptr::read_volatile(base.add(index)) };
+            index += 1;
+        }
+        return true;
+    }
+    let active_len = read_marker(core::ptr::addr_of!(HIBANA_EPF_ACTIVE_LEN)) as usize;
+    if active_len == N {
+        let base = core::ptr::addr_of!(HIBANA_EPF_ACTIVE_IMAGE).cast::<u8>();
+        let mut index = 0usize;
+        while index < N {
+            out[index] = unsafe { core::ptr::read_volatile(base.add(index)) };
+            index += 1;
+        }
+        return true;
+    }
+    false
+}
+#[cfg(all(target_arch = "arm", target_os = "none"))]
 fn baker_timer_route_arm(timeout_ms: u64) {
     let delay_ticks = core::cmp::min(
         timeout_ms.saturating_mul(BAKER_TIMER_TICKS_PER_MS),
@@ -1719,9 +2098,9 @@ fn baker_timer_route_arm(timeout_ms: u64) {
         write_volatile(TIMER_DBGPAUSE, 0);
         write_volatile(core::ptr::addr_of_mut!(BAKER_TIMER_ALARM0_READY), 0);
         write_volatile(TIMER_INTR, TIMER_ALARM0_BIT);
-        write_volatile(NVIC_ICPR, NVIC_TIMER_IRQ0_BIT);
+        nvic_clear_pending(NVIC_TIMER_IRQ0);
         write_volatile(TIMER_INTE, read_volatile(TIMER_INTE) | TIMER_ALARM0_BIT);
-        write_volatile(NVIC_ISER, NVIC_TIMER_IRQ0_BIT);
+        nvic_enable_irq(NVIC_TIMER_IRQ0);
         write_volatile(TIMER_ALARM0, alarm);
         asm!("cpsie i", options(nomem, nostack, preserves_flags));
     }
@@ -1747,16 +2126,24 @@ fn park() -> ! {
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-unsafe extern "C" fn default_handler() -> ! {
+fn epf_panic_park() -> ! {
+    loop {
+        poll_epf_panic_diagnostic();
+        core::hint::spin_loop();
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+unsafe extern "C" fn unhandled_exception_handler() -> ! {
     record_failure_stage(STAGE_HARD_PANIC);
     mark_result(RESULT_FAILURE);
     park()
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-unsafe extern "C" fn default_irq_handler() {
+unsafe extern "C" fn unhandled_irq_handler() {
     unsafe {
-        default_handler();
+        unhandled_exception_handler();
     }
 }
 
@@ -1850,7 +2237,7 @@ fn marker_stack_slot() -> *mut u32 {
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
-pub fn record_stack_high_water() {
+fn record_stack_high_water() {
     let sp: u32;
     unsafe {
         asm!("mov {0}, sp", out(reg) sp, options(nomem, nostack, preserves_flags));
@@ -1880,7 +2267,7 @@ pub fn record_stack_high_water() {
 }
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
-pub fn record_stack_high_water() {}
+fn record_stack_high_water() {}
 
 fn mark_stage(stage: u32) {
     record_stack_high_water();
@@ -1911,6 +2298,374 @@ fn write_marker(slot: *mut u32, value: u32) {
     unsafe {
         core::ptr::write_volatile(slot, value);
     }
+}
+
+fn epf_hash_image(ptr: *const u8, len: usize) -> u32 {
+    if len > EPF_BYTECODE_BYTES {
+        return 0;
+    }
+    let mut image = [0u8; EPF_BYTECODE_BYTES];
+    let mut index = 0usize;
+    while index < len {
+        image[index] = unsafe { core::ptr::read_volatile(ptr.add(index)) };
+        index += 1;
+    }
+    hibana_epf::compute_hash(&image[..len])
+}
+
+fn epf_load_epoch_slot() -> *mut u32 {
+    core::ptr::addr_of_mut!(HIBANA_EPF_LOAD_EPOCH)
+}
+
+fn epf_bytecode_image_ptr() -> *const u8 {
+    core::ptr::addr_of!(HIBANA_EPF_BYTECODE_IMAGE) as *const u8
+}
+
+fn epf_active_image_ptr() -> *mut u8 {
+    core::ptr::addr_of_mut!(HIBANA_EPF_ACTIVE_IMAGE) as *mut u8
+}
+
+type BakerEpf = hibana_epf::Epf<'static, EPF_POLICY_SLOTS, EPF_BYTECODE_BYTES, 0, 4>;
+type BakerEpfStorage = hibana_epf::EpfStorage<'static, EPF_POLICY_SLOTS, EPF_BYTECODE_BYTES, 0, 4>;
+
+fn epf_view(
+    init: *mut u32,
+    view: *mut core::mem::MaybeUninit<BakerEpf>,
+    storage: *mut BakerEpfStorage,
+) -> &'static BakerEpf {
+    unsafe {
+        if core::ptr::read_volatile(init) == 0 {
+            (*view).write(BakerEpf::from_raw_storage(storage));
+            core::ptr::write_volatile(init, 1);
+        }
+        &*(*view).as_ptr()
+    }
+}
+
+fn epf() -> &'static BakerEpf {
+    if marker_core_id() == 0 {
+        epf_view(
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_VIEW_INIT),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_VIEW),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_STORAGE),
+        )
+    } else {
+        epf_view(
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE1_VIEW_INIT),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE1_VIEW),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE1_STORAGE),
+        )
+    }
+}
+
+pub fn epf_policy_resolver<const POLICY_ID: u16>(
+    base: hibana::runtime::resolver::ResolverRef<'static, POLICY_ID>,
+) -> hibana::runtime::resolver::ResolverRef<'static, POLICY_ID> {
+    epf().resolver(base)
+}
+
+fn epf_local_image_digest_slot() -> *mut u32 {
+    if marker_core_id() == 0 {
+        core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_IMAGE_DIGEST)
+    } else {
+        core::ptr::addr_of_mut!(HIBANA_EPF_CORE1_IMAGE_DIGEST)
+    }
+}
+
+fn epf_loaded_for_core() -> bool {
+    let active_len =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_ACTIVE_LEN)) };
+    let active_digest =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_IMAGE_DIGEST)) };
+    let local_digest = unsafe { core::ptr::read_volatile(epf_local_image_digest_slot()) };
+    active_len != 0 && active_digest != 0 && local_digest == active_digest
+}
+
+pub fn epf_policy_loaded(policy_id: u16) -> bool {
+    let target =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_ACTIVE_TARGET_KIND)) };
+    let active_policy =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_ACTIVE_POLICY_ID)) };
+    epf_loaded_for_core() && target == EPF_TARGET_POLICY && active_policy == u32::from(policy_id)
+}
+
+pub fn poll_epf_image_load() {
+    epf_try_load_committed_image();
+}
+
+fn epf_spool_slots() -> (
+    *mut MaybeUninit<hibana::runtime::tap::TapEvent>,
+    *mut u32,
+    *mut u32,
+) {
+    if marker_core_id() == 0 {
+        (
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_TAP_SPOOL)
+                .cast::<MaybeUninit<hibana::runtime::tap::TapEvent>>(),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_TAP_SPOOL_LEN),
+            core::ptr::addr_of_mut!(HIBANA_EPF_CORE0_TAP_SPOOL_READ),
+        )
+    } else {
+        (
+            core::ptr::addr_of_mut!(HIBANA_EPF_TAP_SPOOL)
+                .cast::<MaybeUninit<hibana::runtime::tap::TapEvent>>(),
+            core::ptr::addr_of_mut!(HIBANA_EPF_TAP_SPOOL_LEN),
+            core::ptr::addr_of_mut!(HIBANA_EPF_TAP_SPOOL_READ),
+        )
+    }
+}
+
+fn epf_spool_tap_event(event: hibana::runtime::tap::TapEvent) {
+    let (spool, len_slot, _) = epf_spool_slots();
+    let len = unsafe { core::ptr::read_volatile(len_slot) } as usize;
+    if len >= EPF_TAP_SPOOL_EVENTS {
+        return;
+    }
+    unsafe {
+        let slot = spool.add(len);
+        core::ptr::write_volatile(slot, MaybeUninit::new(event));
+        core::ptr::write_volatile(len_slot, (len + 1) as u32);
+    }
+}
+
+fn epf_spooled_tap_event(index: usize) -> hibana::runtime::tap::TapEvent {
+    let (spool, _, _) = epf_spool_slots();
+    unsafe {
+        let slot = spool.add(index);
+        core::ptr::read_volatile(slot).assume_init()
+    }
+}
+
+fn epf_reject_load(reason: u32) {
+    write_marker(core::ptr::addr_of_mut!(HIBANA_EPF_LOAD_REASON), reason);
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_BYTECODE_STATE),
+        EPF_BYTECODE_STATE_REJECTED,
+    );
+}
+
+fn epf_load_image(image: &[u8], digest: u32, ingress: u32) -> bool {
+    if image.is_empty() || image.len() > EPF_BYTECODE_BYTES {
+        epf_reject_load(EPF_LOAD_REASON_BAD_LEN);
+        return false;
+    }
+
+    let loaded = match epf().load(image) {
+        Ok(loaded) => loaded,
+        Err(_) => {
+            epf_reject_load(EPF_LOAD_REASON_LOAD_ERROR);
+            return false;
+        }
+    };
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(image.as_ptr(), epf_active_image_ptr(), image.len());
+    }
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_ACTIVE_LEN),
+        image.len() as u32,
+    );
+    write_marker(core::ptr::addr_of_mut!(HIBANA_EPF_IMAGE_DIGEST), digest);
+    let (target_kind, policy_id) = loaded.target().encode();
+    write_marker(epf_local_image_digest_slot(), digest);
+    write_marker(epf_load_epoch_slot(), loaded.epoch());
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_ACTIVE_TARGET_KIND),
+        u32::from(target_kind),
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_ACTIVE_POLICY_ID),
+        u32::from(policy_id),
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_LOAD_REASON),
+        EPF_LOAD_REASON_NONE,
+    );
+    write_marker(core::ptr::addr_of_mut!(HIBANA_EPF_IMAGE_INGRESS), ingress);
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_BYTECODE_STATE),
+        EPF_BYTECODE_STATE_LOADED,
+    );
+    true
+}
+
+pub fn load_epf_choreography_image(image: &[u8]) -> bool {
+    let digest = epf_hash_image(image.as_ptr(), image.len());
+    epf_load_image(image, digest, EPF_INGRESS_CHOREOGRAPHY)
+}
+
+fn epf_prepare_committed_image() {
+    let state = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_BYTECODE_STATE)) };
+    if state != EPF_BYTECODE_STATE_COMMIT {
+        return;
+    }
+
+    let len =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_BYTECODE_LEN)) } as usize;
+    if len == 0 || len > EPF_BYTECODE_BYTES {
+        epf_reject_load(EPF_LOAD_REASON_BAD_LEN);
+        return;
+    }
+
+    let image_ptr = epf_bytecode_image_ptr();
+    let expected =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_BYTECODE_HASH)) };
+    let digest = epf_hash_image(image_ptr, len);
+    if digest != expected {
+        epf_reject_load(EPF_LOAD_REASON_BAD_HASH);
+        return;
+    }
+
+    let mut image = [0u8; EPF_BYTECODE_BYTES];
+    let mut index = 0usize;
+    while index < len {
+        image[index] = unsafe { core::ptr::read_volatile(image_ptr.add(index)) };
+        index += 1;
+    }
+
+    let _ = epf_load_image(&image[..len], digest, EPF_INGRESS_MAILBOX);
+}
+
+fn epf_load_active_image_for_core() {
+    let len =
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_ACTIVE_LEN)) } as usize;
+    if len == 0 || len > EPF_BYTECODE_BYTES {
+        return;
+    }
+    let digest = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_EPF_IMAGE_DIGEST)) };
+    if digest == 0 {
+        return;
+    }
+    let local_digest = unsafe { core::ptr::read_volatile(epf_local_image_digest_slot()) };
+    if local_digest == digest {
+        return;
+    }
+
+    let image_ptr = core::ptr::addr_of!(HIBANA_EPF_ACTIVE_IMAGE) as *const u8;
+    let mut image = [0u8; EPF_BYTECODE_BYTES];
+    let mut index = 0usize;
+    while index < len {
+        image[index] = unsafe { core::ptr::read_volatile(image_ptr.add(index)) };
+        index += 1;
+    }
+
+    let loaded = match epf().load(&image[..len]) {
+        Ok(loaded) => loaded,
+        Err(_) => {
+            epf_reject_load(EPF_LOAD_REASON_LOAD_ERROR);
+            return;
+        }
+    };
+    write_marker(epf_local_image_digest_slot(), digest);
+    write_marker(epf_load_epoch_slot(), loaded.epoch());
+}
+
+fn epf_try_load_committed_image() {
+    epf_prepare_committed_image();
+    epf_load_active_image_for_core();
+}
+
+fn run_epf_tap_event(event: hibana::runtime::tap::TapEvent) -> bool {
+    if !epf_loaded_for_core() {
+        return false;
+    }
+    let out = epf().run(event);
+    if out.emitted() {
+        record_epf_compact_out(out);
+        if out.trap_reason().is_some() {
+            write_marker(
+                core::ptr::addr_of_mut!(HIBANA_EPF_LOAD_REASON),
+                EPF_LOAD_REASON_VM_TRAP,
+            );
+        }
+        return true;
+    }
+    false
+}
+
+pub fn run_epf_timer_irq_fact() -> bool {
+    if !epf_loaded_for_core() {
+        return false;
+    }
+    record_epf_policy_timer_irq_ready();
+    let ready = if baker_timer_route_irq_observed() {
+        1
+    } else {
+        0
+    };
+    let out = epf().run_evidence(hibana_epf::EvidenceInput::new(
+        EPF_TIMER_IRQ_FACT_ID,
+        ready as u8,
+        [
+            ready,
+            EPF_TIMER_IRQ_FACT_TAG,
+            0,
+            (u32::from(EPF_TIMER_IRQ_FACT_ID) << 16) | ((marker_core_id() as u32) << 8) | ready,
+        ],
+    ));
+    if !out.emitted() || out.trap_reason().is_some() {
+        return false;
+    }
+    record_epf_compact_out(out);
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_POLICY_TIMER_FACT_KIND),
+        out.kind(),
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_POLICY_TIMER_FACT_ARG0),
+        out.arg0(),
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_EPF_POLICY_TIMER_FACT_FUEL),
+        u32::from(out.fuel_used()),
+    );
+    true
+}
+
+pub fn poll_epf_diagnostic(tap: &mut hibana::runtime::tap::TapPort<'_>) {
+    epf_try_load_committed_image();
+    if poll_epf_spool_diagnostic() {
+        return;
+    }
+    let mut drained = 0usize;
+    while drained < EPF_TAP_SPOOL_EVENTS {
+        drained += 1;
+        let Some(event) = tap.next() else {
+            break;
+        };
+        epf_spool_tap_event(event);
+        if run_epf_tap_event(event) {
+            break;
+        }
+    }
+}
+
+fn poll_epf_spool_diagnostic() -> bool {
+    if !epf_loaded_for_core() {
+        return false;
+    }
+    let (_, len_slot, read_slot) = epf_spool_slots();
+    let len = unsafe { core::ptr::read_volatile(len_slot) } as usize;
+    let mut read = unsafe { core::ptr::read_volatile(read_slot) } as usize;
+    let mut drained = 0usize;
+    while read < len && read < EPF_TAP_SPOOL_EVENTS && drained < EPF_TAP_SPOOL_EVENTS {
+        let event = epf_spooled_tap_event(read);
+        read += 1;
+        drained += 1;
+        unsafe {
+            core::ptr::write_volatile(read_slot, read as u32);
+        }
+        if run_epf_tap_event(event) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn poll_epf_panic_diagnostic() {
+    epf_try_load_committed_image();
+    let _ = poll_epf_spool_diagnostic();
 }
 
 fn epf_marker_slots() -> (
@@ -1945,45 +2700,19 @@ fn epf_marker_slots() -> (
     }
 }
 
-fn record_epf_compact_out(kind: u32, reason: u32, arg0: u32, arg1: u32, arg2: u32, fuel: u32) {
+fn record_epf_compact_out(out: hibana_epf::Out) {
     let (epoch_slot, kind_slot, reason_slot, arg0_slot, arg1_slot, arg2_slot, fuel_slot) =
         epf_marker_slots();
     let epoch = unsafe { core::ptr::read_volatile(epoch_slot) }.wrapping_add(1);
     write_marker(epoch_slot, epoch);
-    write_marker(kind_slot, kind);
-    write_marker(reason_slot, reason);
-    write_marker(arg0_slot, arg0);
-    write_marker(arg1_slot, arg1);
-    write_marker(arg2_slot, arg2);
-    write_marker(fuel_slot, fuel);
+    write_marker(kind_slot, out.kind());
+    write_marker(reason_slot, out.reason());
+    write_marker(arg0_slot, out.arg0());
+    write_marker(arg1_slot, out.arg1());
+    write_marker(arg2_slot, out.arg2());
+    write_marker(fuel_slot, u32::from(out.fuel_used()));
     #[cfg(all(target_arch = "arm", target_os = "none"))]
     event();
-}
-
-fn pack_epf_transport_meta(observed_lane: u8, source_role: u8, peer_role: u8, label: u8) -> u32 {
-    ((observed_lane as u32) << 24)
-        | ((source_role as u32) << 16)
-        | ((peer_role as u32) << 8)
-        | (label as u32)
-}
-
-fn record_epf_transport_reject(
-    reason: u32,
-    expected_session: u32,
-    observed_session: u32,
-    observed_lane: u8,
-    source_role: u8,
-    peer_role: u8,
-    label: u8,
-) {
-    record_epf_compact_out(
-        EPF_KIND_TRANSPORT_REJECT,
-        reason,
-        expected_session,
-        observed_session,
-        pack_epf_transport_meta(observed_lane, source_role, peer_role, label),
-        0,
-    );
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -2113,6 +2842,16 @@ fn increment_sio_counter(slot: *mut u32) {
     }
 }
 
+fn record_sio_direction_unmapped(local_role: u8, peer_role: u8, direction: u8) {
+    record_choreofs_sio_trace(
+        0x5000_0000
+            | (14u32 << 24)
+            | ((local_role as u32) << 20)
+            | ((peer_role as u32) << 16)
+            | ((direction as u32) << 8),
+    );
+}
+
 fn record_sio_direction_tx(local_role: u8, peer_role: u8) {
     match (local_role, peer_role) {
         (0, 1) => increment_sio_counter(core::ptr::addr_of_mut!(
@@ -2121,7 +2860,7 @@ fn record_sio_direction_tx(local_role: u8, peer_role: u8) {
         (1, 0) => increment_sio_counter(core::ptr::addr_of_mut!(
             HIBANA_CHOREOFS_SIO_CORE1_TO_CORE0_TX_COUNT
         )),
-        _ => {}
+        _ => record_sio_direction_unmapped(local_role, peer_role, 0),
     }
 }
 
@@ -2133,7 +2872,7 @@ fn record_sio_direction_rx(local_role: u8, sender_role: u8) {
         (1, 0) => increment_sio_counter(core::ptr::addr_of_mut!(
             HIBANA_CHOREOFS_SIO_CORE1_TO_CORE0_RX_COUNT
         )),
-        _ => {}
+        _ => record_sio_direction_unmapped(local_role, sender_role, 1),
     }
 }
 
@@ -2242,22 +2981,6 @@ pub fn record_choreofs_engine_error_code(code: u32) {
 
 pub fn record_choreofs_driver_trace(trace: u32) {
     write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_DRIVER_TRACE), trace);
-}
-
-pub fn choreofs_endpoint_error_code(error: &hibana::EndpointError) -> u32 {
-    let op = match error.operation() {
-        "flow" => 0x1000,
-        "send" => 0x2000,
-        "recv" => 0x3000,
-        "offer" => 0x4000,
-        "decode" => 0x5000,
-        _ => 0x0f00,
-    };
-    0x5745_0000 | op | (error.line() & 0x0fff)
-}
-
-pub fn record_endpoint_error(error: &hibana::EndpointError) {
-    record_choreofs_engine_error_code(choreofs_endpoint_error_code(error));
 }
 
 pub fn record_choreofs_path_open(object: appkit::ObjectId) {
@@ -2411,33 +3134,42 @@ pub fn mark_safe_state() {
     record_stack_high_water();
 }
 
-fn check_report<R, I>(report: &appkit::RunReport<R, I>, required_role: u8) {
-    assert!(report.projected_roles().contains(required_role));
-    assert_eq!(
-        report.attached_endpoint_count(),
-        report.validated_role_count()
-    );
+pub fn run_engine_no_wasi<C>()
+where
+    C: BakerCapsuleFacts + 'static,
+{
+    check_image::<EngineImage, C>(1);
+    appkit::run::<EngineImage, C>(appkit::NoWasi);
+}
+
+pub fn run_engine_wasi<'a, C>(image: appkit::WasiImage<'a>)
+where
+    C: BakerCapsuleFacts + 'static,
+{
+    check_image::<EngineImage, C>(1);
+    appkit::run::<EngineImage, C>(image);
+}
+
+fn check_image<I, C>(required_role: u8)
+where
+    C: BakerCapsuleFacts + 'static,
+    I: appkit::LogicalImage<C>,
+{
+    assert!(I::REQUESTED_ROLES.contains(required_role));
 }
 
 impl<C> appkit::LogicalImage<C> for DriverImage
 where
     C: BakerCapsuleFacts + 'static,
 {
-    type Artifact = C::DriverArtifact;
-    type Exit<R> = appkit::RunReport<R, Self>;
     type Carrier<'a>
         = BakerSioTransport<C>
     where
         C: 'a;
-
-    const IMAGE_ID: appkit::ImageId = C::DRIVER_IMAGE_ID;
-    const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
-    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(0);
-    const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
-    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(C::ENGINE_IMAGE_ID);
+    const REQUESTED_ROLES: appkit::RoleSet = C::DRIVER_REQUESTED_ROLES;
 
     fn init() -> Self {
-        Self::new()
+        Self
     }
 
     fn safe_state(&mut self) {
@@ -2465,21 +3197,14 @@ impl<C> appkit::LogicalImage<C> for EngineImage
 where
     C: BakerCapsuleFacts + 'static,
 {
-    type Artifact = C::EngineArtifact;
-    type Exit<R> = appkit::RunReport<R, Self>;
     type Carrier<'a>
         = BakerSioTransport<C>
     where
         C: 'a;
-
-    const IMAGE_ID: appkit::ImageId = C::ENGINE_IMAGE_ID;
-    const SITE_ID: appkit::SiteId = appkit::SiteId(2040);
-    const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(1);
-    const CARRIER: appkit::CarrierKind = rp2040_sio::SIO;
-    const PEER_IMAGES: appkit::PeerImageSet = appkit::PeerImageSet::single(C::DRIVER_IMAGE_ID);
+    const REQUESTED_ROLES: appkit::RoleSet = C::ENGINE_REQUESTED_ROLES;
 
     fn init() -> Self {
-        Self::new()
+        Self
     }
 
     fn safe_state(&mut self) {
@@ -2509,29 +3234,16 @@ where
     }
 }
 
-static ARTIFACTS: BakerArtifacts = BakerArtifacts;
-
 pub fn run<C>() -> !
 where
     C: BakerCapsuleFacts + 'static,
-    C::DriverArtifact: appkit::ArtifactGuestStorage<C, DriverImage>,
-    C::EngineArtifact: appkit::ArtifactGuestStorage<C, EngineImage>,
-    BakerArtifacts:
-        appkit::ArtifactForImage<C, DriverImage> + appkit::ArtifactForImage<C, EngineImage>,
 {
     mark_stage(STAGE_RUNTIME_BEGIN);
     if rp2040_sio::core_id() == 0 {
-        let mut report = appkit::run::<DriverImage, C>(
-            <BakerArtifacts as appkit::ArtifactBundle<C>>::for_image::<DriverImage>(&ARTIFACTS),
-        );
-        check_report(&report, 0);
-        <DriverImage as appkit::LogicalImage<C>>::safe_state(report.image_mut());
+        check_image::<DriverImage, C>(0);
+        appkit::run::<DriverImage, C>(appkit::NoWasi);
     } else {
-        let mut report = appkit::run::<EngineImage, C>(
-            <BakerArtifacts as appkit::ArtifactBundle<C>>::for_image::<EngineImage>(&ARTIFACTS),
-        );
-        check_report(&report, 1);
-        <EngineImage as appkit::LogicalImage<C>>::safe_state(report.image_mut());
+        C::run_engine_image();
     }
     mark_stage(STAGE_RUNTIME_READY);
     mark_result(C::SUCCESS_RESULT);
@@ -2540,14 +3252,14 @@ where
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 pub fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    let stage = info
-        .location()
-        .map(|location| 0x4c00_0000 | (location.line() & 0x0000_ffff))
-        .unwrap_or(STAGE_HARD_PANIC);
+    let stage = match info.location() {
+        Some(location) => 0x4c00_0000 | (location.line() & 0x0000_ffff),
+        None => STAGE_HARD_PANIC,
+    };
     record_failure_stage(stage);
     mark_result(RESULT_FAILURE);
     record_panic_info(info);
-    park()
+    epf_panic_park()
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
