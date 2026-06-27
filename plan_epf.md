@@ -488,8 +488,8 @@ with `NoWasi`.
 session-mismatch proof:
   EngineArtifact = WasiImage
   core1 native localside drives the WASI P1 guest until it stops making bounded progress
-  guest is a normal Rust std WASI P1 binary using hibana-wasip1-guest::choreofs
-  guest attempts choreofs::open_write(...).write_once_exact(...)
+  guest is a normal Rust std WASI P1 binary
+  guest opens a ChoreoFS path through std::fs/OpenOptions
   guest first emits path_open on choreography lane 1
   core0 receives path_open with the unmodified projected session
   core0 sends path_open_ret over SIO with deliberate Tx-header-only session skew
@@ -513,7 +513,7 @@ The guest must be minimal enough for RP2040 RAM:
 guest:
   Rust std is allowed and required for the proof
   no allocator-heavy behavior
-  uses hibana-wasip1-guest::choreofs as the normal app-facing API
+  uses Rust std; ChoreoFS facts stay on the driver side as hibana-wasip1-runtime tokens
   imported WASI calls are supported by explicit baker-firmware feature gates
   first useful ChoreoFS operation is path_open
   fd_write is the guest's intended next operation, but the ignored mismatched reply prevents reaching it
@@ -1915,7 +1915,7 @@ RP2040/SIO:
 core1 may host a WASI P1 engine, but EPF runs in native host/runtime side
 WASI P1 guest is a diagnosis subject, not the EPF owner
 session-mismatch acceptance must use EngineArtifact = WasiImage, not NoWasi
-session-mismatch guest must be a Rust std WASI P1 guest using hibana-wasip1-guest::choreofs
+session-mismatch guest must be a Rust std WASI P1 guest; driver-side facts use hibana-wasip1-runtime ChoreoFS tokens
 session-mismatch must first become stuck at the path_open_ret reply when only the SIO Tx frame header is skewed
 session-mismatch TapEvent filter must use lane 1 TransportMismatch/session_mismatch
 session-mismatch must not require a RAM panic marker or a new endpoint recv failure

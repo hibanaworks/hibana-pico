@@ -16,7 +16,7 @@ struct EndpointFaultLocal;
 
 impl appkit::Capsule for EndpointFault {
     type Placement = BakerPlacement;
-    type Local = EndpointFaultLocal;
+    type Localside = EndpointFaultLocal;
 
     fn choreography() -> impl hibana::runtime::program::Projectable {
         g::send::<1, 0, EngineAbortBegin>()
@@ -32,27 +32,27 @@ impl BakerCapsuleFacts for EndpointFault {
 impl appkit::Localside<EndpointFault> for EndpointFaultLocal {
     type Error = hibana::EndpointError;
 
-    fn engine<'endpoint, 'guest, const ROLE: u8>(
-        mut ctx: appkit::EngineCtx<'endpoint, 'guest, EndpointFault, ROLE>,
+    fn engine<'endpoint, const ROLE: u8>(
+        mut ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 1 {
-                ctx.endpoint().recv::<EngineAbortFence>().await?;
+                ctx.recv::<EngineAbortFence>().await?;
             }
-            ctx.pending().await
+            appkit::pending(ctx).await
         }
     }
 
-    fn driver<'a, const ROLE: u8>(
-        ctx: appkit::DriverCtx<'a, EndpointFault, ROLE>,
+    fn driver<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
+        appkit::pending(ctx)
     }
 
-    fn boundary<'a, const ROLE: u8>(
-        ctx: appkit::BoundaryCtx<'a, EndpointFault, ROLE>,
+    fn boundary<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
+        appkit::pending(ctx)
     }
 }
 
@@ -70,7 +70,7 @@ pub extern "C" fn baker_selected_run() -> ! {
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
 fn main() {
-    baker_firmware::run::<EndpointFault>()
+    panic!("baker-firmware examples are RP2040 hardware artifacts; build for thumbv6m-none-eabi")
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]

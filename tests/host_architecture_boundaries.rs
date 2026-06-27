@@ -84,6 +84,33 @@ fn public_root_is_the_capsule_surface_only() {
 }
 
 #[test]
+fn projected_role_const_generics_do_not_emit_runtime_consumption_noise() {
+    let sources = [
+        ("src/appkit", appkit_sources()),
+        (
+            "examples/baker-firmware/src/lib.rs",
+            include_str!("../examples/baker-firmware/src/lib.rs").to_owned(),
+        ),
+        (
+            "examples/rp2w-firmware/src/lib.rs",
+            include_str!("../examples/rp2w-firmware/src/lib.rs").to_owned(),
+        ),
+        (
+            "examples/uno-q-heterogeneous/src/lib.rs",
+            include_str!("../examples/uno-q-heterogeneous/src/lib.rs").to_owned(),
+        ),
+    ];
+
+    for (path, source) in sources {
+        assert_absent(
+            path,
+            &source,
+            &["core::hint::black_box(ROLE)", "black_box(ROLE)"],
+        );
+    }
+}
+
+#[test]
 fn placements_fail_fast_instead_of_falling_back_to_a_role_kind() {
     let placements = [
         (
@@ -93,6 +120,10 @@ fn placements_fail_fast_instead_of_falling_back_to_a_role_kind() {
         (
             "examples/rp2w-firmware/src/lib.rs",
             include_str!("../examples/rp2w-firmware/src/lib.rs"),
+        ),
+        (
+            "examples/heterogeneous-split-example/src/lib.rs",
+            include_str!("../examples/heterogeneous-split-example/src/lib.rs"),
         ),
         (
             "examples/uno-q-heterogeneous/src/lib.rs",
@@ -109,46 +140,69 @@ fn placements_fail_fast_instead_of_falling_back_to_a_role_kind() {
             path,
             source,
             &[
+                "fn role_kind(role: u8)",
                 "_ => appkit::RoleKind::",
                 "_ => RoleKind::",
                 "other => appkit::RoleKind::",
                 "other => RoleKind::",
             ],
         );
+        assert_present(
+            path,
+            source,
+            &["fn role_kind<const ROLE: u8>() -> appkit::RoleKind"],
+        );
     }
 }
 
 #[test]
 fn sio_transport_role_mapping_is_explicit() {
-    let transports = [
-        (
-            "examples/baker-firmware/src/lib.rs",
-            include_str!("../examples/baker-firmware/src/lib.rs"),
-            "other => panic!(\"baker SIO transport has no core assignment for role {other}\")",
+    let baker = include_str!("../examples/baker-firmware/src/lib.rs");
+    let rp2w = include_str!("../examples/rp2w-firmware/src/lib.rs");
+    assert_present(
+        "examples/baker-firmware/src/lib.rs",
+        baker,
+        &[
+            "static mut SIO_LOCAL_ROLE_CORE_MASKS: [u8; BAKER_SIO_ROLE_SLOTS]",
+            "static mut SIO_LOCAL_ROLE_LANES: [u8; BAKER_SIO_ROLE_SLOTS * 2]",
+            "fn mark_local_role_attached(core_id: u8, role: u8, lane: u8)",
+            "fn role_attached_on_core(role: u8, core_id: u8) -> bool",
+            "fn role_lane_on_core(role: u8, core_id: u8) -> Option<u8>",
+            "if let Some(target_lane) = role_lane_on_core(target_role, tx.core_id)",
+            "frame.lane = target_lane;",
+            "other => panic!(\"baker SIO transport has no core mask for core {other}\")",
             "other => panic!(\"baker SIO transport has no tx session xor for role {other}\")",
-        ),
-        (
-            "examples/rp2w-firmware/src/lib.rs",
-            include_str!("../examples/rp2w-firmware/src/lib.rs"),
+            "const SIO_TRACE_NO_FRAME_LABEL: u8 = 0;",
+            "SIO_TRACE_NO_FRAME_LABEL",
+        ],
+    );
+    assert_absent(
+        "examples/baker-firmware/src/lib.rs",
+        baker,
+        &[
+            "fn baker_role_core(role: u8) -> u8",
+            "baker SIO transport has no core assignment for role",
+            "frame.lane = outgoing.lane();",
+        ],
+    );
+    assert_present(
+        "examples/rp2w-firmware/src/lib.rs",
+        rp2w,
+        &[
+            "0 | 2 => 0",
+            "1 => 1",
+            "2 => 0",
+            "const SIO_TRACE_NO_FRAME_LABEL: u8 = 0;",
+            "SIO_TRACE_NO_FRAME_LABEL",
             "other => panic!(\"rp2w SIO transport has no core assignment for role {other}\")",
             "other => panic!(\"rp2w SIO transport has no tx session xor for role {other}\")",
-        ),
-    ];
+        ],
+    );
 
-    for (path, source, core_panic, xor_panic) in transports {
-        assert_present(
-            path,
-            source,
-            &[
-                "0 | 2 => 0",
-                "1 => 1",
-                "2 => 0",
-                "const SIO_TRACE_NO_FRAME_LABEL: u8 = 0;",
-                "SIO_TRACE_NO_FRAME_LABEL",
-                core_panic,
-                xor_panic,
-            ],
-        );
+    for (path, source) in [
+        ("examples/baker-firmware/src/lib.rs", baker),
+        ("examples/rp2w-firmware/src/lib.rs", rp2w),
+    ] {
         assert_absent(
             path,
             source,
@@ -226,6 +280,7 @@ fn gate_scans_current_guest_layout_and_ignores_nested_targets() {
         &[
             "budget_for_bin()",
             "baker-choreofs-traffic-loop",
+            "baker-session-mismatch",
             "section_size()",
             "check_budget \"$bin\" \".text\"",
             "check_budget \"$bin\" \".rodata\"",
@@ -247,10 +302,10 @@ fn appkit_attach_uses_hibana_rendezvous_without_deadline_knobs() {
         &[
             "let rendezvous_slab = attach_slab;",
             ".rendezvous(rendezvous_slab, carrier)",
-            "let session = appkit_session(C::SESSION_ID);",
+            "let session = appkit_session(<I::Capsule as Capsule>::SESSION_ID);",
             "let mut tap = rendezvous.tap();",
-            "tasks.poll_until_quiescent(|| C::observe(&mut tap));",
-            "embedded_tasks.poll_forever(|| C::observe(&mut tap))",
+            "tasks.poll_until_quiescent(|| <I::Capsule as Capsule>::observe(&mut tap));",
+            "embedded_tasks.poll_forever(|| <I::Capsule as Capsule>::observe(&mut tap))",
         ],
     );
     assert_absent(
@@ -259,6 +314,108 @@ fn appkit_attach_uses_hibana_rendezvous_without_deadline_knobs() {
         &[
             "HostMonotonicClock",
             "operational deadline fuse into `hibana::runtime::Config`",
+        ],
+    );
+}
+
+#[test]
+fn embedded_wasi_timing_markers_stay_private_and_probe_visible() {
+    let appkit_public = appkit_public_source();
+    let appkit = include_str!("../src/appkit/internal.rs");
+    let baker = include_str!("../examples/baker-firmware/src/lib.rs");
+    let baker_hardware_script = include_str!("../scripts/run_baker_link_hardware_pattern.sh");
+    let runtime_lib = include_str!("../../hibana-wasip1-runtime/src/lib.rs");
+    let runtime_exchange = include_str!("../../hibana-wasip1-runtime/src/exchange.rs");
+    let runtime_machine = include_str!("../../hibana-wasip1-runtime/src/engine/wasm/machine.rs");
+    let runtime_sources = [runtime_lib, runtime_exchange, runtime_machine].join("\n");
+
+    assert_present(
+        "src/appkit/internal.rs",
+        appkit,
+        &[
+            "static mut HIBANA_APPKIT_WASI_METRIC_CLOCK: usize",
+            "static mut HIBANA_APPKIT_WASI_METRIC_ENABLED: u32",
+            "static mut HIBANA_APPKIT_WASI_RESUME_TOTAL_US: u32",
+            "static mut HIBANA_APPKIT_WASI_REQUEST_SEND_TOTAL_US: u32",
+            "static mut HIBANA_APPKIT_WASI_COMPLETION_RECV_TOTAL_US: u32",
+            "static mut HIBANA_APPKIT_WASI_COMPLETE_TOTAL_US: u32",
+            "let resume_start = appkit_wasi_metric_start();",
+            "record_appkit_wasi_resume(resume_start);",
+            "record_appkit_wasi_request_send(request_send_start);",
+            "record_appkit_wasi_completion_recv(completion_recv_start);",
+            "record_appkit_wasi_complete(complete_start);",
+        ],
+    );
+    assert_absent("src/appkit/mod.rs", appkit_public, &["HIBANA_APPKIT_WASI"]);
+    assert_absent(
+        "../hibana-wasip1-runtime/src",
+        &runtime_sources,
+        &[
+            "mod metrics;",
+            "pub mod metrics;",
+            "pub use metrics",
+            "crate::metrics::",
+            "HIBANA_WASIP1_RUNTIME",
+            "last_instruction_count",
+            "last_profile",
+            "record_post_",
+        ],
+    );
+    assert_present(
+        "examples/baker-firmware/src/lib.rs",
+        baker,
+        &[
+            "static mut HIBANA_APPKIT_WASI_METRIC_CLOCK: usize;",
+            "baker_appkit_wasi_metric_clock as *const () as usize",
+            "install_appkit_wasi_metric_clock();",
+            "reset_appkit_wasi_metrics();",
+            "set_appkit_wasi_metrics_enabled(false);",
+        ],
+    );
+    assert_absent(
+        "examples/baker-firmware/src/lib.rs",
+        baker,
+        &[
+            "HIBANA_WASIP1_RUNTIME",
+            "install_runtime_wasi_metric_clock",
+            "reset_runtime_wasi_metrics",
+            "set_runtime_wasi_metrics_enabled",
+        ],
+    );
+    assert_present(
+        "scripts/run_baker_link_hardware_pattern.sh",
+        baker_hardware_script,
+        &[
+            "symbol_addr_or_empty HIBANA_APPKIT_WASI_RESUME_COUNT",
+            "read_word_or_zero",
+            "appkit_wasi_completion_recv_total_us_addr",
+            "choreofs_reply_send_fd_write_object_total_us_addr",
+            "choreofs_reply_send_poll_oneoff_total_us_addr",
+            "choreofs_reply_send_future_poll_total_us_addr",
+            "choreofs_reply_encode_total_us_addr",
+            "choreofs_reply_send_endpoint_residual_us",
+            "choreofs_sio_tx_wait_role0_total_us_addr",
+            "choreofs_sio_tx_poll_role0_total_us_addr",
+            "require_appkit_wasi_metrics()",
+            "require_nonzero_counter choreofs_reply_send_fd_write_object",
+            "require_nonzero_counter choreofs_reply_send_poll_oneoff",
+            "require_nonzero_counter choreofs_reply_send_future_poll",
+            "require_nonzero_counter choreofs_reply_encode",
+            "require_nonzero_counter choreofs_sio_tx_poll",
+            "require_nonzero_counter appkit_wasi_complete",
+        ],
+    );
+    assert_absent(
+        "scripts/run_baker_link_hardware_pattern.sh",
+        baker_hardware_script,
+        &[
+            "HIBANA_WASIP1_RUNTIME",
+            "runtime_vm_",
+            "runtime_guest_",
+            "runtime_lower_",
+            "runtime_complete_",
+            "runtime_post_",
+            "require_runtime_wasi_metrics",
         ],
     );
 }
@@ -286,11 +443,27 @@ fn uno_q_uart_carrier_uses_hardware_safe_byte_pacing() {
 
 #[test]
 fn uno_q_llm_demo_uses_input_role_cli_and_choreofs_only() {
+    let manifest = include_str!("../examples/uno-q-heterogeneous/Cargo.toml");
     let uno_q = include_str!("../examples/uno-q-heterogeneous/src/lib.rs");
     let protocol = include_str!("../examples/uno-q-heterogeneous/src/protocol.rs");
     let plan = include_str!("../examples/uno-q-heterogeneous/plan.md");
     let hardware_cli =
         include_str!("../examples/uno-q-heterogeneous/src/bin/uno_q_hardware_proof.rs");
+    let shell_once = include_str!(
+        "../examples/uno-q-heterogeneous/wasip1/guest/src/bin/uno-q-llm-face-shell.rs"
+    );
+    let shell_loop = include_str!(
+        "../examples/uno-q-heterogeneous/wasip1/guest/src/bin/uno-q-llm-face-shell-loop.rs"
+    );
+
+    assert_present(
+        "examples/uno-q-heterogeneous/Cargo.toml",
+        manifest,
+        &[
+            "name = \"host-loopback-proof\"\npath = \"src/bin/host_loopback_proof.rs\"\nrequired-features = [\"runtime-wasip1\"]",
+            "name = \"uno-q-hardware-proof\"\npath = \"src/bin/uno_q_hardware_proof.rs\"\nrequired-features = [\"runtime-wasip1\"]",
+        ],
+    );
 
     assert_present(
         "examples/uno-q-heterogeneous/src/lib.rs",
@@ -314,7 +487,7 @@ fn uno_q_llm_demo_uses_input_role_cli_and_choreofs_only() {
             "DEFAULT_UNO_Q_LOCAL_LLM_SERVER",
             "FACE_FRAME_PATH",
             "pub fn wasi_image() -> appkit::WasiImage<'static>",
-            "branch.recv::<WasiFdWriteReqMsg>()",
+            "branch.recv::<FdWriteReqMsg>()",
             "FaceFrame::decode_payload",
             "m33_board_show_face(frame.face())",
         ],
@@ -410,6 +583,17 @@ fn uno_q_llm_demo_uses_input_role_cli_and_choreofs_only() {
             removed_user_prompt_env.as_str(),
             removed_prompt_file_script.as_str(),
             "swaps in the infinite shell-loop guest",
+            "surprised alias",
+            "shell also accepts",
+        ],
+    );
+    assert_absent(
+        "examples/uno-q-heterogeneous/wasip1/guest/src/bin/uno-q-llm-face-shell*.rs",
+        &format!("{shell_once}\n{shell_loop}"),
+        &[
+            "face[0] == b'v'",
+            "surprised_accepts_model_alias_v",
+            "model alias",
         ],
     );
     assert!(
@@ -428,22 +612,20 @@ fn appkit_has_capsule_shape_without_stale_facades() {
 
     assert_eq!(
         appkit_public.matches("pub use ").count(),
-        4,
-        "src/appkit/mod.rs must expose only the curated attach-storage, WASI, ChoreoFS, and capsule API re-export groups"
+        3,
+        "src/appkit/mod.rs must expose only the curated attach-storage, WASI, and capsule API re-export groups"
     );
     assert_present(
         "src/appkit/mod.rs",
         appkit_public,
         &[
             "mod internal;",
-            "pub use hibana_wasip1_runtime::choreofs::{",
             "pub use internal::{",
             "Capsule",
             "LogicalImage",
-            "EngineCtx, Local, Localside",
-            "Placement",
             "Localside",
-            "WasiGuestDrive",
+            "Placement",
+            "pending",
             "run",
         ],
     );
@@ -459,6 +641,17 @@ fn appkit_has_capsule_shape_without_stale_facades() {
             "pub use internal::*",
             "pub use internal::ArtifactInput",
             "#[doc(hidden)]\npub use internal::ArtifactInput;",
+            "pub use hibana_wasip1_runtime::choreofs::{",
+            "ChoreoFs",
+            "ChoreoFsFacts",
+            "ChoreoFsObject",
+            "ChoreoFsObjectSet",
+            "LedgerFacts",
+            "LocalCtx, Local, Localside",
+            "pub struct Local<Image>",
+            "impl<Image> Local<Image>",
+            "appkit::Local<",
+            "Local::new()",
             "SessionId",
             "RoleSet, ArtifactInput, RunReport",
             "RunReport",
@@ -470,10 +663,9 @@ fn appkit_has_capsule_shape_without_stale_facades() {
         &appkit,
         &[
             "pub trait Capsule",
+            "type Localside: Localside<Self>;",
             "fn choreography() -> impl hibana::runtime::program::Projectable;",
             "fn observe(_: &mut hibana::runtime::tap::TapPort<'_>) {}",
-            "const WASI_GUEST_DRIVE: WasiGuestDrive = WasiGuestDrive::Canonical;",
-            "pub enum WasiGuestDrive",
             "Localside",
             "pub trait LogicalImage",
             "const REQUESTED_ROLES: RoleSet;",
@@ -490,31 +682,48 @@ fn appkit_has_capsule_shape_without_stale_facades() {
             "pub trait WasiGuestImage",
             "fn wasi_guest_lease<'guest, const ROLE: u8>() -> WasiGuestLease<'guest>;",
             "fn wasi_budget<const ROLE: u8>() -> BudgetRun",
+            "pub const fn from_bytes(bytes: &'a [u8]) -> Self",
+            "type Capsule: Capsule;",
             "trait ArtifactInput",
+            "#[cfg(feature = \"wasm-engine-core\")]\nimpl<'a, I> ArtifactInput<I> for WasiImage<'a>",
+            "I: WasiGuestImage,",
             "#[allow(private_bounds)]",
             "NoWasi` never leases storage",
             "drive_canonical_wasi_engine",
             "self.wasi_guest_bytes.is_some()",
+            "struct CanonicalWasiEngine",
+            "pub struct WasiGuestError {\n    _private: (),",
+            "const fn rejected() -> Self",
             "pub struct WasiGuestArena",
             "pub fn lease<'guest>(&'guest mut self)",
             "pub struct WasiGuestLease<'guest>",
-            "Guest::init_in_place(ptr, module)?;",
+            "HibanaWasiGuestStorage::uninit()",
+            "hibana_wasip1_runtime::GuestMemory::new",
+            "resume_wasi_boundary(budget)",
+            "send_wasi_import_request(self.endpoint(), request).await",
+            "recv_wasi_import_completion(self.endpoint(), import).await",
             "type Carrier<'a>: hibana::runtime::transport::Transport + 'a",
             "fn carrier<'a>() -> Self::Carrier<'a>",
             "fn visit_requested_projected_roles<C, V>",
+            "pub trait ResolverRegistry<'cfg, C: Capsule, const ROLE: u8>",
+            "fn resolver<const POLICY: u16>(",
+            "fn register_resolvers<'cfg, R, const ROLE: u8>",
+            "R: ResolverRegistry<'cfg, Self, ROLE>",
+            "struct AttachProjectedResolvers",
+            "C::register_resolvers::<_, ROLE>(&mut resolver_registry);",
             "pub trait Placement",
             "pub enum RoleKind",
-            "fn role_kind(role: u8) -> RoleKind",
+            "fn role_kind<const ROLE: u8>() -> RoleKind",
             "pub trait Localside",
+            "endpoint: hibana::Endpoint<'endpoint, ROLE>",
             "Static WASI import",
-            "pub struct EngineCtx<'endpoint, 'guest, C: Capsule, const ROLE: u8>",
-            "pub struct Local<Image>",
-            "pub fn run<I, C>(artifact: impl ArtifactInput<C, I>)",
-            "fn run_with_artifact<I, C, A>",
-            "pub fn endpoint(&mut self) -> &mut hibana::Endpoint<'a, ROLE>",
+            "pub fn run<I>(artifact: impl ArtifactInput<I>)",
+            "fn run_with_artifact<I, A>",
+            "pub fn pending<'endpoint, E: 'endpoint, const ROLE: u8>",
             "image.safe_state();",
             "const fn appkit_session(",
-            "let projected_roles = collect_projected_roles::<C, I>(&program);",
+            "let program = <I::Capsule as Capsule>::choreography();",
+            "let projected_roles = collect_projected_roles::<I>(&program);",
             "projected_roles.roles() == I::REQUESTED_ROLES",
             "expect(\"projected RoleProgram count must not overflow\")",
             "expect(\"attached projected role count must not overflow\")",
@@ -522,12 +731,7 @@ fn appkit_has_capsule_shape_without_stale_facades() {
             "SessionKitStorage::<I::Carrier<'_>>::uninit()",
             ".rendezvous(rendezvous_slab, carrier)",
             "let mut tap = rendezvous.tap();",
-            "C::observe(&mut tap)",
-            "pub use hibana_wasip1_runtime::choreofs::{",
-            "ChoreoFsObject",
-            "ChoreoFsObjectSet",
-            "LedgerFacts",
-            "DriverFacts",
+            "<I::Capsule as Capsule>::observe(&mut tap)",
         ],
     );
     assert_absent(
@@ -551,6 +755,10 @@ fn appkit_has_capsule_shape_without_stale_facades() {
             "RunReport<I>",
             "RunReport<",
             "RunReport",
+            "WasiGuestDrive",
+            "drive_wasi_guest_once",
+            "drive_wasi_guest_once_blocking",
+            "pub struct LocalCtx",
             "pub fn image_mut",
             ".image_mut()",
             "type Exit<R>",
@@ -581,6 +789,7 @@ fn appkit_has_capsule_shape_without_stale_facades() {
             "pub const fn count(self) -> u8",
             "pub const fn union(self",
             "pub const fn is_subset_of(self",
+            "pub const fn contains(self, role",
             "pub const fn ids(self)",
             "pub const fn len(self) -> u8",
             "pub const fn contains(self, image: ImageId)",
@@ -595,6 +804,20 @@ fn appkit_has_capsule_shape_without_stale_facades() {
             "const CARRIER: CarrierKind",
             "pub const fn projected_roles(&self) -> RoleSet",
             "pub fn can_attach_peer<PeerImage>",
+            "pub trait LogicalImage<C: Capsule>",
+            "pub trait WasiGuestImage<C: Capsule>",
+            "trait ArtifactInput<C: Capsule, I>",
+            "type Local: Localside<Self>;",
+            "C::Local as",
+            "RoleTaskError::Local(",
+            "Local(E)",
+            "LocalRoleTask",
+            "local_role_task",
+            "pub fn run<I, C>(artifact: impl ArtifactInput<C, I>)",
+            "fn run_with_artifact<I, C, A>",
+            "let projected_roles = collect_projected_roles::<C, I>(&program);",
+            "appkit::run::<DriverImage, C>",
+            "appkit::run::<EngineImage, C>",
             "struct ProjectionCaps",
             "struct WasiImports",
             "choreography_fingerprint",
@@ -616,6 +839,20 @@ fn appkit_has_capsule_shape_without_stale_facades() {
             "pub struct SiteId",
             "appkit::ImageId",
             "appkit::SiteId",
+            "BudgetExpired(BudgetExpired)",
+            "pub struct WasiGuestError;",
+            "pub enum WasiGuestError",
+            "impl From<hibana::runtime::wire::CodecError> for WasiGuestError",
+            "WasiGuestErrorKind",
+            "no_wasi_artifact",
+            "guest_rejected",
+            "endpoint_rejected",
+            "protocol_rejected",
+            "unexpected_reply",
+            "fn endpoint(_code",
+            "EndpointRejected(u32)",
+            "Endpoint {\n        code: u32,\n        source: hibana::EndpointError,\n    }",
+            "ProtocolRejected(hibana::runtime::wire::CodecError)",
             "const IMAGE_ID:",
             "const SITE_ID:",
             "#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\npub struct CarrierKind",
@@ -642,17 +879,25 @@ fn appkit_has_capsule_shape_without_stale_facades() {
             "for_image::<",
             "RunInput",
             "pub trait ArtifactInput",
+            "pub const fn from_static",
+            "WasiImage::from_static",
+            "#[cfg(not(feature = \"wasm-engine-core\"))]\nimpl<'a, I> ArtifactInput<I> for WasiImage<'a>",
+            "WASI P1 logical image requires wasm-engine-core",
             "pub(super) trait Sealed",
             "type Artifact:",
             "type Artifact;",
             "pub const fn role(&self) -> u8",
             "pub fn role(&self) -> u8",
             "const fn role(&self) -> u8",
-            "pub const fn facts(&self) -> DriverFacts",
-            "pub fn facts(&self) -> DriverFacts",
+            concat!("fn driver_", "facts("),
+            "pub const fn facts(&self)",
+            "pub fn facts(&self)",
             "pub const fn diagnostic_code(&self) -> u32",
             "pub fn diagnostic_code(&self) -> u32",
             "pub trait Sealed",
+            "Driver ownership for a selected WASI P1 guest image",
+            "Role-typed wrapper around a hibana endpoint attached by appkit",
+            "choreography wrapper",
         ],
     );
     assert_absent(
@@ -691,6 +936,10 @@ fn appkit_has_capsule_shape_without_stale_facades() {
             "pub trait ProjectedRoleVisitor",
             "pub fn visit_projected_role",
             "fn visit_projected_roles<V>(",
+            "fn resolver<const POLICY: u16, const ROLE: u8>",
+            "R: ResolverRegistry<'cfg, Self>,",
+            "C::register_resolvers(&mut resolver_registry);",
+            "if !self.requested_roles.contains(ROLE)",
             "pub struct InProcessCarrier",
             "pub struct InProcessTx",
             "pub struct InProcessRx",
@@ -719,14 +968,11 @@ fn appkit_has_capsule_shape_without_stale_facades() {
             "ActiveWasiGuestLease",
             "InlineWasiGuestLease",
             "StaticWasiGuestLease",
-            "MaybeUninit<hibana_wasip1_runtime::engine::wasm::Guest",
             "poll_embedded_future_to_completion",
-            "Box<hibana_wasip1_runtime::engine::wasm::Guest",
             "Box<dyn Future",
             "Vec<ScheduledTask",
             "Box::pin",
             "std::vec![",
-            "Guest::new(bytes)",
             "pub fn storage<'guest>(&'static self)",
             "pub fn storage<'guest>(&'guest mut self)",
             "pub unsafe fn storage_from_owner",
@@ -752,9 +998,9 @@ fn appkit_does_not_keep_invented_projection_capacity_summaries() {
         "src/appkit",
         &appkit,
         &[
-            "let projected_roles = collect_projected_roles::<C, I>(&program);",
+            "let projected_roles = collect_projected_roles::<I>(&program);",
             "projected_roles.roles() == I::REQUESTED_ROLES",
-            "let session = appkit_session(C::SESSION_ID);",
+            "let session = appkit_session(<I::Capsule as Capsule>::SESSION_ID);",
         ],
     );
     assert_absent(
@@ -771,8 +1017,6 @@ fn appkit_does_not_keep_invented_projection_capacity_summaries() {
             "core::any::type_name",
             "host_metadata_type_fingerprint",
             "I::REQUESTED_ROLES.is_subset_of(projection.roles)",
-            "ProjectionTypeFingerprint::of::<EngineReq>()",
-            "ProjectionTypeFingerprint::of::<EngineRet>()",
             "spec.payload_type == engine_req",
             "spec.payload_type == engine_ret",
         ],
@@ -885,6 +1129,16 @@ fn docs_do_not_teach_internal_artifact_boundary() {
     let rp2w_doc = include_str!("../examples/rp2w-firmware/README.md");
     let memo = include_str!("../memo.md");
 
+    assert_present(
+        "README.md",
+        readme,
+        &[
+            "type Placement: appkit::Placement<Self>;",
+            "pub trait Placement<C: appkit::Capsule>",
+            "fn role_kind<const ROLE: u8>() -> appkit::RoleKind;",
+            "Placement is also selected by the projected const\nrole",
+        ],
+    );
     assert_absent(
         "README.md",
         readme,
@@ -892,13 +1146,40 @@ fn docs_do_not_teach_internal_artifact_boundary() {
             "RunArtifact",
             "RunInput",
             "ArtifactInput",
+            "appkit::*",
+            "appkit::Local<",
+            "Local<Image>",
+            "Local::new()",
+            "generic logical-site marker",
+            "Capsule::run_engine_image()",
+            "appkit::run::<LogicalImage>()",
+            "appkit::run::<LogicalImage, Capsule>",
+            "type Local;",
+            "type Local: appkit::Localside<Self>;",
+            "fn role_kind(role: u8)",
+            "pub trait LogicalImage<C",
+            "appkit::WasiGuestImage<C>",
             "loop-control",
             "control tag",
             "default resolver",
             "fallback",
+            "rescue",
+            "wrapper",
+            "lane mismatch recovery",
+            "WASIP1 runtime",
         ],
     );
-    assert_absent("baker.md", baker_doc, &["default resolver", "fallback"]);
+    assert_absent(
+        "baker.md",
+        baker_doc,
+        &[
+            "default resolver",
+            "fallback",
+            "rescue",
+            "lane-recovery loop",
+            "WASIP1 runtime",
+        ],
+    );
     assert_absent(
         "examples/rp2w-firmware/README.md",
         rp2w_doc,
@@ -914,6 +1195,14 @@ fn docs_do_not_teach_internal_artifact_boundary() {
             "hibana::integration::",
             "type Universe:",
             "type Report;",
+            "type Local;",
+            "type Local: appkit::Localside<Self>;",
+            "fn role_kind(role: u8)",
+            "rescue",
+            "`hibana-pico` wrapper",
+            "wrapper 化",
+            "Appkit Local provides site facts only",
+            "lane mismatch recovery",
             "pub struct RouteKey",
             "## RouteKey",
             "private `projects/`",
@@ -921,13 +1210,34 @@ fn docs_do_not_teach_internal_artifact_boundary() {
             "fallback",
         ],
     );
+    assert_present(
+        "memo.md",
+        memo,
+        &[
+            "type Placement: appkit::Placement<Self>;",
+            "pub trait Placement<C: appkit::Capsule>",
+            "fn role_kind<const ROLE: u8>() -> appkit::RoleKind;",
+            "placement は caller が渡す `u8` ではなく projected const role で決まる",
+        ],
+    );
 }
 
 #[test]
 fn rp2w_firmware_has_no_porting_residue() {
+    let rp2w_manifest = include_str!("../examples/rp2w-firmware/Cargo.toml");
     let rp2w = include_str!("../examples/rp2w-firmware/src/lib.rs");
     let sensor_panel = include_str!("../examples/rp2w-firmware/src/bin/sensor_panel.rs");
     let epf_policy_timer = include_str!("../examples/rp2w-firmware/src/bin/epf_policy_timer.rs");
+    let rp2w_bins = format!("{sensor_panel}\n{epf_policy_timer}");
+
+    assert_present(
+        "examples/rp2w-firmware/Cargo.toml",
+        rp2w_manifest,
+        &[
+            "sensor-panel = [\"wasm-engine-core\", \"dep:hibana-wifi\", \"dep:uno-q-heterogeneous\"]",
+            "name = \"rp2w-sensor-panel\"\npath = \"src/bin/sensor_panel.rs\"\nrequired-features = [\"sensor-panel\"]",
+        ],
+    );
 
     assert_present(
         "examples/rp2w-firmware/src/lib.rs",
@@ -937,7 +1247,10 @@ fn rp2w_firmware_has_no_porting_residue() {
             "pub struct Rp2wPlacement;",
             "fn run_engine_image();",
             "pub fn run_engine_no_wasi<C>()",
+            "#[cfg(feature = \"wasm-engine-core\")]\npub fn run_engine_wasi<'a, C>(image: appkit::WasiImage<'a>)",
             "pub fn run_engine_wasi<'a, C>(image: appkit::WasiImage<'a>)",
+            "struct DriverImage<C>(PhantomData<fn() -> C>);",
+            "struct EngineImage<C>(PhantomData<fn() -> C>);",
             "pub(super) struct SioTransport",
             "unhandled_exception_handler",
             "unhandled_irq_handler",
@@ -949,17 +1262,21 @@ fn rp2w_firmware_has_no_porting_residue() {
     );
     assert_absent(
         "examples/rp2w-firmware",
-        &format!("{rp2w}\n{sensor_panel}\n{epf_policy_timer}"),
+        &format!("{rp2w}\n{rp2w_bins}"),
         &[
             "#[cfg(any())]",
             "if true {",
             "if false",
+            "rp2040",
+            "RP2040",
             "rp2040_sio",
             "rp2040_boot2",
             "default_handler",
             "default_irq_handler",
             "DriverArtifact",
             "EngineArtifact",
+            "struct DriverImage;",
+            "struct EngineImage;",
             "pub struct DriverImage;",
             "pub struct EngineImage;",
             "pub struct Rp2wSioTransport",
@@ -978,6 +1295,9 @@ fn rp2w_firmware_has_no_porting_residue() {
             "ArtifactForImage<SensorPanel, DriverImage>",
             "ArtifactForImage<SensorPanel, EngineImage>",
             "default_timer_irq_resolver",
+            "fn check_image",
+            "check_image::<",
+            "REQUESTED_ROLES.contains",
             ".unwrap_or(0)",
             ".unwrap_or(STAGE_HARD_PANIC)",
             "pub struct SioTx",
@@ -1000,6 +1320,20 @@ fn rp2w_firmware_has_no_porting_residue() {
             "pub struct Rp2wEpfPolicyTimer",
             "pub struct Rp2wEpfPolicyTimerLocal",
             "pub enum Rp2wEpfPolicyTimerError",
+        ],
+    );
+    assert_present(
+        "examples/rp2w-firmware/src/bin",
+        &rp2w_bins,
+        &[
+            "rp2w-firmware examples are RP2350 hardware artifacts; build for thumbv8m.main-none-eabi",
+        ],
+    );
+    assert_absent(
+        "examples/rp2w-firmware/src/bin",
+        &rp2w_bins,
+        &[
+            "#[cfg(not(all(target_arch = \"arm\", target_os = \"none\")))]\nfn main() {\n    rp2w_firmware::run::<",
         ],
     );
     assert_present(
@@ -1033,18 +1367,17 @@ fn rp2w_firmware_has_no_porting_residue() {
 }
 
 #[test]
-fn appkit_local_marker_exposes_site_facts_not_protocol_authority() {
+fn appkit_site_images_are_concrete_types_not_local_marker_wrappers() {
     let appkit = include_str!("../src/appkit/internal.rs");
 
-    assert_present(
-        "src/appkit/internal.rs",
-        appkit,
-        &["pub struct Local<Image>", "impl<Image> Local<Image>"],
-    );
     assert_absent(
         "src/appkit/internal.rs",
         appkit,
         &[
+            "pub struct Local<Image>",
+            "impl<Image> Local<Image>",
+            "appkit::Local<",
+            "Local::new()",
             "#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]",
             "pub mod host",
             "pub mod linux",
@@ -1063,12 +1396,10 @@ fn appkit_local_marker_exposes_site_facts_not_protocol_authority() {
             "pub mod carrier",
             "SioTransport",
             "core_id()",
-            "EngineReq",
             "GuestLedger",
             "WASI import dispatch",
             "protocol authority",
             "authorize WASI",
-            "complete WASI",
             "route mismatch recovery",
             "timeout heuristic",
         ],
@@ -1076,78 +1407,83 @@ fn appkit_local_marker_exposes_site_facts_not_protocol_authority() {
 }
 
 #[test]
-fn wasip1_guest_programs_are_separate_from_examples_and_follow_core_wasi_allowlist() {
+fn wasip1_guest_programs_use_std_without_helper_crates() {
     let root_cargo = include_str!("../Cargo.toml");
-    let helper = include_str!("../guest/hibana-wasip1-guest/src/lib.rs");
-    let sys = include_str!("../guest/hibana-wasip1-guest/src/sys.rs");
-    let program_manifest = include_str!("../guest/wasip1-programs/Cargo.toml");
     let baker_guest_manifest = include_str!("../examples/baker-firmware/wasip1/guest/Cargo.toml");
+    let rp2w_guest_manifest = include_str!("../examples/rp2w-firmware/wasip1/guest/Cargo.toml");
+    let uno_q_guest_manifest =
+        include_str!("../examples/uno-q-heterogeneous/wasip1/guest/Cargo.toml");
     let wasip1_build_script = include_str!("../scripts/check_wasip1_guest_builds.sh");
 
-    assert_present(
-        "guest/hibana-wasip1-guest/src/lib.rs",
-        helper,
-        &["pub mod choreofs;", "pub mod time;"],
-    );
-    assert_absent(
-        "guest/hibana-wasip1-guest/src/lib.rs",
-        helper,
-        &["pub mod baker;", "pub mod net;"],
-    );
-    assert_present(
-        "guest/hibana-wasip1-guest/src/sys.rs",
-        sys,
-        &["fn path_open", "fn fd_write", "fn poll_oneoff"],
-    );
-    assert_absent(
-        "guest/hibana-wasip1-guest/src/sys.rs",
-        sys,
-        &[
-            "fn sock_send",
-            "fn sock_recv",
-            "fn sock_shutdown",
-            "fn sock_accept",
-        ],
-    );
-    assert_present(
-        "guest/wasip1-programs/Cargo.toml",
-        program_manifest,
-        &[
-            "name = \"hibana-pico-wasip1-programs\"",
-            "wasip1-std-choreofs-read",
-            "wasip1-std-choreofs-append",
-            "wasip1-std-choreofs-static-write",
-            "wasip1-memory-grow-ok",
-        ],
-    );
-    assert_absent(
-        "guest/wasip1-programs/Cargo.toml",
-        program_manifest,
-        &[
-            "wasip1-led-",
-            "wasip1-std-sock",
-            "wasip1-std-stream-control",
-            "baker",
-        ],
-    );
     assert_present(
         "examples/baker-firmware/wasip1/guest/Cargo.toml",
         baker_guest_manifest,
         &[
             "name = \"baker-wasip1-guest\"",
             "wasip1-led-choreofs-traffic-cycle",
-            "../../../../guest/hibana-wasip1-guest",
+            "wasip1-led-choreofs-traffic-once",
+            "wasip1-session-mismatch-fd-write",
+        ],
+    );
+    assert_present(
+        "examples/rp2w-firmware/wasip1/guest/Cargo.toml",
+        rp2w_guest_manifest,
+        &[
+            "name = \"rp2w-wasip1-guest\"",
+            "rp2w-epf-policy-timer-guest",
+            "rp2w-sensor-panel-guest",
+        ],
+    );
+    assert_present(
+        "examples/uno-q-heterogeneous/wasip1/guest/Cargo.toml",
+        uno_q_guest_manifest,
+        &[
+            "name = \"uno-q-heterogeneous-wasip1-guest\"",
+            "uno-q-llm-face-shell",
+            "uno-q-llm-face-shell-loop",
+        ],
+    );
+    let guest_manifests =
+        format!("{baker_guest_manifest}\n{rp2w_guest_manifest}\n{uno_q_guest_manifest}");
+    assert_absent(
+        "examples/*/wasip1/guest/Cargo.toml",
+        &guest_manifests,
+        &[
+            "[dependencies]",
+            concat!("hibana-", "wasip1-", "guest"),
+            concat!("hibana_", "wasip1_", "guest"),
+            concat!("../../../../guest/", "hibana-", "wasip1-", "guest"),
+        ],
+    );
+    assert_present(
+        "scripts/check_wasip1_guest_builds.sh",
+        wasip1_build_script,
+        &[
+            "--manifest-path examples/baker-firmware/wasip1/guest/Cargo.toml",
+            "--manifest-path examples/rp2w-firmware/wasip1/guest/Cargo.toml",
+            "--manifest-path examples/uno-q-heterogeneous/wasip1/guest/Cargo.toml",
+            "wasip1-led-choreofs-traffic-cycle.wasm",
+            "wasip1-led-choreofs-traffic-once.wasm",
+            "wasip1-session-mismatch-fd-write.wasm",
+            "rp2w-epf-policy-timer-guest.wasm",
+            "rp2w-sensor-panel-guest.wasm",
+            "uno-q-llm-face-shell-loop.wasm",
+            "uno-q-llm-face-shell.wasm",
         ],
     );
     assert_absent(
         "Cargo.toml",
         root_cargo,
         &[
-            "apps/wasip1/hibana-wasip1-guest",
+            concat!("apps/wasip1/", "hibana-", "wasip1-", "guest"),
             "apps/wasip1/swarm-node-apps",
             "guest/swarm-node-apps",
             "apps/wasip1/wasip1-programs",
+            "guest/wasip1-programs",
             "examples/wasip1-guests",
+            concat!("guest/", "hibana-", "wasip1-", "guest"),
+            concat!("hibana-", "wasip1-", "guest"),
+            concat!("hibana_", "wasip1_", "guest"),
         ],
     );
     assert_absent(
@@ -1159,6 +1495,18 @@ fn wasip1_guest_programs_are_separate_from_examples_and_follow_core_wasi_allowli
             "swarm-coordinator.wasm",
             "swarm-gateway.wasm",
             "swarm-sensor.wasm",
+            "guest/wasip1-programs/Cargo.toml",
+            "wasip1-clock.wasm",
+            "wasip1-exit.wasm",
+            "wasip1-infinite-loop.wasm",
+            "wasip1-memory-grow-ok.wasm",
+            "wasip1-memory-grow-stale-lease.wasm",
+            "wasip1-random.wasm",
+            "wasip1-stderr.wasm",
+            "wasip1-stdin.wasm",
+            "wasip1-stdout.wasm",
+            "wasip1-timer.wasm",
+            "wasip1-trap.wasm",
         ],
     );
 }
@@ -1173,7 +1521,6 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         include_str!("../examples/baker-firmware/src/bin/choreofs_traffic_loop.rs");
     let session_mismatch_bin =
         include_str!("../examples/baker-firmware/src/bin/session_mismatch.rs");
-    let baker_wasi_guest_lib = include_str!("../examples/baker-firmware/wasip1/guest/src/lib.rs");
     let choreofs_wasi_guest = include_str!(
         "../examples/baker-firmware/wasip1/guest/src/bin/wasip1-led-choreofs-traffic-cycle.rs"
     );
@@ -1183,14 +1530,29 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
     let fail_safe_bin = include_str!("../examples/baker-firmware/src/bin/fail_safe.rs");
     let recovery_bin = include_str!("../examples/baker-firmware/src/bin/recovery.rs");
     let many_reentry_bin = include_str!("../examples/baker-firmware/src/bin/many_reentry.rs");
+    let panic_marker_bin = include_str!("../examples/baker-firmware/src/bin/panic_marker.rs");
+    let endpoint_fault_bin = include_str!("../examples/baker-firmware/src/bin/endpoint_fault.rs");
     let endpoint_poison_bin = include_str!("../examples/baker-firmware/src/bin/endpoint_poison.rs");
+    let preview_probe_bin = include_str!("../examples/baker-firmware/src/bin/preview_probe.rs");
+    let deadline_fault_bin = include_str!("../examples/baker-firmware/src/bin/deadline_fault.rs");
     let timer_route_bin = include_str!("../examples/baker-firmware/src/bin/timer_route.rs");
+    let capacity_fault_bin = include_str!("../examples/baker-firmware/src/bin/capacity_fault.rs");
     let epf_policy_timer_bin =
         include_str!("../examples/baker-firmware/src/bin/epf_policy_timer.rs");
     let baker_hardware_script = include_str!("../scripts/run_baker_link_hardware_pattern.sh");
     let readme = include_str!("../README.md");
     let baker_bins = format!(
-        "{traffic_bin}\n{choreofs_bin}\n{choreofs_loop_bin}\n{session_mismatch_bin}\n{fail_safe_bin}\n{recovery_bin}\n{many_reentry_bin}\n{endpoint_poison_bin}\n{timer_route_bin}\n{epf_policy_timer_bin}"
+        "{traffic_bin}\n{choreofs_bin}\n{choreofs_loop_bin}\n{session_mismatch_bin}\n{fail_safe_bin}\n{recovery_bin}\n{many_reentry_bin}\n{panic_marker_bin}\n{endpoint_fault_bin}\n{endpoint_poison_bin}\n{preview_probe_bin}\n{deadline_fault_bin}\n{timer_route_bin}\n{capacity_fault_bin}\n{epf_policy_timer_bin}"
+    );
+
+    assert_present(
+        "examples/baker-firmware/Cargo.toml",
+        baker_manifest,
+        &[
+            "name = \"baker-choreofs-traffic\"\npath = \"src/bin/choreofs_traffic.rs\"\nrequired-features = [\"wasm-engine-core\"]",
+            "name = \"baker-choreofs-traffic-loop\"\npath = \"src/bin/choreofs_traffic_loop.rs\"\nrequired-features = [\"wasm-engine-core\"]",
+            "name = \"baker-session-mismatch\"\npath = \"src/bin/session_mismatch.rs\"\nrequired-features = [\"wasm-engine-core\"]",
+        ],
     );
 
     assert_present(
@@ -1208,33 +1570,51 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "rp2040_sio::core_id()",
             "unhandled_exception_handler",
             "unhandled_irq_handler",
-            "struct DriverImage;",
-            "struct EngineImage;",
             "pub(super) struct SioTransport",
             "fn open<'a>(",
             "lane: u8",
             "operational_deadline_ticks,",
-            "pending: Option<PendingTxFrame>",
-            "struct SioRxAccumulator",
-            "static mut SIO_RX_ACCUM_CORE0",
-            "static mut SIO_RX_ACCUM_CORE1",
-            "fn rx_accumulator(core_id: u8) -> *mut SioRxAccumulator",
-            "sio_rx_accumulator_decodes_peer_role_for_same_core_demux",
+            "pending: Option<PendingMailboxFrame>",
+            "struct SioMailboxSlot",
+            "static mut SIO_MAILBOX_CORE0_TO_CORE1",
+            "static mut SIO_MAILBOX_CORE1_TO_CORE0",
+            "HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE0_TOTAL_US",
+            "HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE1_TOTAL_US",
+            "HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE0_TOTAL_US",
+            "HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE1_TOTAL_US",
+            "HIBANA_CHOREOFS_SIO_TX_POLL_ROLE0_TOTAL_US",
+            "HIBANA_CHOREOFS_SIO_TX_POLL_ROLE1_TOTAL_US",
+            "fn outbound_mailbox(core_id: u8) -> *mut SioMailboxSlot",
+            "fn inbound_mailbox(core_id: u8) -> *mut SioMailboxSlot",
+            "compiler_fence(Ordering::Release)",
+            "compiler_fence(Ordering::Acquire)",
+            "core::arch::asm!(\"dsb sy\", \"sev\", options(nostack, preserves_flags));",
+            "core::arch::asm!(\"wfe\", options(nomem, nostack, preserves_flags));",
+            "mailbox_frame_publish_and_take_preserves_header_and_payload",
             "frame_session_id",
             "frame_lane",
-            "try_pop_until_deadline",
+            "take_mailbox_until_deadline",
             "BAKER_ENGINE_WASI_GUEST_ARENA",
             "baker_engine_wasi_guest_lease",
             "addr_of_mut!(BAKER_ENGINE_WASI_GUEST_ARENA)",
             "arena.lease()",
-            "fifo::try_push(word)",
-            "fifo::try_pop()",
+            "if target_role == tx.local_role",
+            "hibana::runtime::transport::TransportError::Failed",
+            "publish_mailbox_frame(tx.core_id, tx.session_id, tx.local_role, pending)",
+            "take_mailbox_frame(rx.core_id)",
             "context.waker().wake_by_ref()",
             "frame_targets_rx_lane",
             "same_lane_session_mismatch_reaches_endpoint_evidence",
             "let header = rx.frame_header();",
             ".take()",
             "rx.delivered = true;",
+            "fn record_choreofs_sio_tx_wait(local_role: u8, us: u32)",
+            "fn record_choreofs_sio_tx_poll(local_role: u8, us: u32)",
+            "HIBANA_CHOREOFS_REPLY_SEND_FD_WRITE_OBJECT_TOTAL_US",
+            "HIBANA_CHOREOFS_REPLY_SEND_POLL_ONEOFF_TOTAL_US",
+            "pub fn record_choreofs_reply_send_elapsed",
+            "record_choreofs_reply_send_hot_label(label, elapsed)",
+            "finish_tx_poll(tx, poll_start, core::task::Poll::Ready(Ok(())))",
             "hibana::runtime::transport::ReceivedFrame::framed(header, rx.payload())",
             "fn record_sio_direction_unmapped(local_role: u8, peer_role: u8, direction: u8)",
             "_ => record_sio_direction_unmapped(local_role, peer_role, 0)",
@@ -1246,10 +1626,14 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "pub trait BakerCapsuleFacts",
             "fn run_engine_image();",
             "pub fn run_engine_no_wasi<C>()",
+            "#[cfg(feature = \"wasm-engine-core\")]\npub fn run_engine_wasi<'a, C>(image: appkit::WasiImage<'a>)",
             "pub fn run_engine_wasi<'a, C>(image: appkit::WasiImage<'a>)",
             "pub fn baker_timer_route_resolver_ready(timeout_ms: u64) -> bool",
-            "appkit::run::<DriverImage, C>(appkit::NoWasi)",
-            "appkit::run::<DriverImage, C>",
+            "struct DriverImage<C>(PhantomData<fn() -> C>);",
+            "struct EngineImage<C>(PhantomData<fn() -> C>);",
+            "type Capsule = C;",
+            "appkit::run::<DriverImage<C>>(appkit::NoWasi)",
+            "appkit::run::<EngineImage<C>>(image)",
             "C::run_engine_image()",
         ],
     );
@@ -1295,9 +1679,12 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "fn main()",
             "DriverArtifact",
             "EngineArtifact",
+            "struct DriverImage;",
+            "struct EngineImage;",
             "pub struct DriverImage;",
             "pub struct EngineImage;",
             "pub struct BakerSioTransport",
+            "tx.sent_frames = tx.sent_frames.saturating_add(1);\n                return core::task::Poll::Ready(Ok(()));\n            }\n            if bytes.len() > SIO_FRAME_BYTES",
             "pub fn record_stack_high_water",
             "pub fn record_epf_policy_timer_irq_ready",
             "baker_firmware::EngineImage",
@@ -1305,6 +1692,13 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "BakerArtifacts",
             "BakerRunInput",
             "BakerArtifactInput",
+            "fn check_image",
+            "check_image::<",
+            "REQUESTED_ROLES.contains",
+            "SIO_MAILBOX_DOORBELL",
+            "try_pop_until_deadline",
+            "fifo::try_push",
+            "fifo::try_pop()",
             "type Artifact: appkit::RunInput<Self, EngineImage>",
             "type Artifact: appkit::ArtifactInput<Self, EngineImage>",
             "type Artifact;",
@@ -1316,9 +1710,9 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "ArtifactForImage<SessionMismatch, DriverImage>",
             " _lane: u8",
             "impl appkit::Capsule for",
-            "const GREEN_LED: appkit::ChoreoFsObject",
-            "const YELLOW_LED: appkit::ChoreoFsObject",
-            "const RED_LED: appkit::ChoreoFsObject",
+            "const GREEN_LED: choreofs::ChoreoFsObject",
+            "const YELLOW_LED: choreofs::ChoreoFsObject",
+            "const RED_LED: choreofs::ChoreoFsObject",
             "BakerChoreoFsRouteContinue",
             "BakerChoreoFsRouteBreak",
             "baker_drive_wasi_engine",
@@ -1354,16 +1748,19 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         "examples/baker-firmware/src/bin/choreofs_traffic.rs",
         choreofs_bin,
         &[
-            "const GREEN_LED: appkit::ChoreoFsObject",
-            "const YELLOW_LED: appkit::ChoreoFsObject",
-            "const RED_LED: appkit::ChoreoFsObject",
+            "const TRAFFIC_STATE: choreofs::ChoreoFsObject",
+            "FdBinding::write(FdWriteRow::Object)",
             "impl appkit::Capsule for ChoreoFsTraffic",
             "fn choreography()",
             "impl appkit::Localside<ChoreoFsTraffic> for ChoreoFsTrafficLocal",
             "wasip1-led-choreofs-traffic-once.wasm",
-            "driver_path_open(&mut ctx, step.fd, step.object).await?",
-            "driver_fd_write(&mut ctx, step.fd, step.payload).await?",
-            "driver_poll_oneoff(&mut ctx).await?",
+            "fn enter_import(label: u8)",
+            "async fn drive_wasi_startup",
+            "async fn drive_traffic_cycle",
+            "async fn handle_next_state",
+            "handle_path_open(",
+            "handle_fd_write(ctx, choreofs, request, state).await?",
+            "handle_poll_oneoff(ctx, request, timeout_ms).await?",
             "baker_firmware::run::<ChoreoFsTraffic>()",
         ],
     );
@@ -1373,7 +1770,6 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         &[
             "WasiImportLoopContinue",
             "WasiImportLoopBreak",
-            "g::route(",
             "REENTRY_CYCLES",
             "offer_engine_req",
             "ctx.endpoint().offer().await",
@@ -1384,14 +1780,16 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         "examples/baker-firmware/src/bin/choreofs_traffic_loop.rs",
         choreofs_loop_bin,
         &[
-            "const GREEN_LED: appkit::ChoreoFsObject",
-            "const YELLOW_LED: appkit::ChoreoFsObject",
-            "const RED_LED: appkit::ChoreoFsObject",
+            "const TRAFFIC_STATE: choreofs::ChoreoFsObject",
+            "FdBinding::write(FdWriteRow::Object)",
             "impl appkit::Capsule for ChoreoFsTrafficLoop",
             "impl appkit::Localside<ChoreoFsTrafficLoop> for ChoreoFsTrafficLoopLocal",
-            "let cycle = g::route(",
-            "g::send::<1, 0, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>>()",
-            ".roll();",
+            "fn enter_import(label: u8)",
+            "async fn drive_wasi_startup",
+            "async fn drive_traffic_cycle",
+            "async fn handle_next_state",
+            "g::send::<1, 0, FdWriteObjectReqMsg>()",
+            ".roll()",
             "loop {",
             "completed_cycles = completed_cycles.saturating_add(1);",
             "wasip1-led-choreofs-traffic-cycle.wasm",
@@ -1402,6 +1800,7 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         "examples/baker-firmware/src/bin",
         &baker_bins,
         &[
+            "#[cfg(not(all(target_arch = \"arm\", target_os = \"none\")))]\nfn main() {\n    baker_firmware::run::<",
             "BakerArtifacts",
             "ArtifactForImage<ChoreoFsTraffic, EngineImage>",
             "ArtifactForImage<ChoreoFsTrafficLoop, EngineImage>",
@@ -1447,6 +1846,24 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "pub enum PreviewProbeError",
         ],
     );
+    assert_present(
+        "examples/baker-firmware/src/bin",
+        &baker_bins,
+        &["baker-firmware examples are RP2040 hardware artifacts; build for thumbv6m-none-eabi"],
+    );
+    assert_present(
+        "examples/baker-firmware/src/bin/session_mismatch.rs",
+        session_mismatch_bin,
+        &[
+            "RuntimeViolation",
+            "return Err(SessionMismatchError::RuntimeViolation);",
+        ],
+    );
+    assert_absent(
+        "examples/baker-firmware/src/bin/session_mismatch.rs",
+        session_mismatch_bin,
+        &["return Ok(());"],
+    );
     assert_absent(
         "examples/baker-firmware/src/bin/choreofs_traffic.rs",
         choreofs_bin,
@@ -1463,48 +1880,51 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "async fn drive_choreofs_driver",
             "WasiImportLoopContinue",
             "WasiImportLoopBreak",
-        ],
-    );
-    assert_present(
-        "examples/baker-firmware/wasip1/guest/src/lib.rs",
-        baker_wasi_guest_lib,
-        &[
-            "#![no_std]",
-            "use hibana_wasip1_guest::{Error, Result, choreofs, time};",
-            "const DEVICE_PREOPEN_FD: u32 = 9;",
-            "const LED_PATH_PREFIX: &str = \"device/led/\";",
-            "pub struct Led",
-            "time::sleep_ms(ms)",
+            "let write_wait = ||",
+            "let traffic_cycle",
+            "g::seq(write_wait",
+            "const DRIVER_REQUESTED_ROLES",
+            "const ENGINE_REQUESTED_ROLES",
+            "RoleSet::single(2)",
+            "RoleSet::from_bits(0b0011)",
         ],
     );
     assert_present(
         "examples/baker-firmware/wasip1/guest/src/bin/wasip1-led-choreofs-traffic-cycle.rs",
         choreofs_wasi_guest,
         &[
-            "use baker_wasip1_guest::{Led, sleep_ms};",
+            "fs::OpenOptions",
+            "io::{self, Write}",
+            "thread",
+            "time::Duration",
             "fn main()",
-            "Led::open(\"/device/led/green\")",
-            "Led::open(\"/device/led/yellow\")",
-            "Led::open(\"/device/led/red\")",
-            "set_and_wait(&green, true)",
-            "set_and_wait(&yellow, true)",
-            "set_and_wait(&red, true)",
-            "sleep_ms(STEP_MS)",
+            "const TRAFFIC_STATE_PATH: &str = \"/device/traffic/state\";",
+            "open_traffic_state()",
+            "const TRAFFIC_RED: &[u8] = b\"R\";",
+            "const COLOR_STEP: Duration = Duration::from_millis(40);",
+            "const YELLOW_BLINK_STEP: Duration = Duration::from_millis(20);",
+            "set_state(",
+            "TRAFFIC_YELLOW",
+            "thread::sleep(delay);",
         ],
     );
     assert_present(
         "examples/baker-firmware/wasip1/guest/src/bin/wasip1-led-choreofs-traffic-once.rs",
         choreofs_wasi_once_guest,
         &[
-            "use baker_wasip1_guest::{Led, sleep_ms};",
+            "fs::OpenOptions",
+            "io::{self, Write}",
+            "thread",
+            "time::Duration",
             "fn main()",
-            "Led::open(\"/device/led/green\")",
-            "Led::open(\"/device/led/yellow\")",
-            "Led::open(\"/device/led/red\")",
-            "set_and_wait(&green, true)",
-            "set_and_wait(&yellow, true)",
-            "set_and_wait(&red, true)",
-            "sleep_ms(STEP_MS)",
+            "const TRAFFIC_STATE_PATH: &str = \"/device/traffic/state\";",
+            "open_traffic_state()",
+            "const TRAFFIC_RED: &[u8] = b\"R\";",
+            "const COLOR_STEP: Duration = Duration::from_millis(40);",
+            "const YELLOW_BLINK_STEP: Duration = Duration::from_millis(20);",
+            "set_state(",
+            "TRAFFIC_YELLOW",
+            "thread::sleep(delay);",
         ],
     );
     assert_absent(
@@ -1517,6 +1937,9 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
         choreofs_wasi_guest,
         &[
             "#![no_std]",
+            concat!("hibana_", "wasip1_", "guest"),
+            concat!("baker_", "wasip1_", "guest"),
+            "choreofs::",
             "struct Led",
             "LED_PATH_PREFIX",
             "unsafe extern",
@@ -1578,16 +2001,19 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "fn timer_route_resolver",
             "DecisionArm",
             "baker_firmware::baker_timer_route_resolver_ready(100)",
+            "if baker_firmware::baker_timer_route_irq_observed()",
             "Ok(DecisionArm::Right)",
+            "Ok(DecisionArm::Left)",
             "ResolverRef::decision_state",
             ".resolve::<TIMER_ROUTE_POLICY>()",
-            "registry.resolver::<TIMER_ROUTE_POLICY, 0>",
-            "registry.resolver::<TIMER_ROUTE_POLICY, 1>",
-            "ctx.endpoint().send::<TimerExpired>(&1).await?;",
-            "ctx.endpoint().offer().await?",
-            "branch.recv::<TimerExpired>().await?",
-            "let done = ctx.endpoint().recv::<TimerRouteDone>().await?;",
-            "let ack = ctx.endpoint().recv::<TimerRouteAck>().await?;",
+            "fn register_resolvers<'cfg, R, const ROLE: u8>",
+            "R: appkit::ResolverRegistry<'cfg, Self, ROLE>",
+            "registry.resolver::<TIMER_ROUTE_POLICY>(resolver);",
+            "ctx.send::<TimerExpired>(&1).await?;",
+            "let expired = ctx.recv::<TimerExpired>().await?;",
+            "baker_firmware::baker_wait_timer_route_irq_observed(500)",
+            "let done = ctx.recv::<TimerRouteDone>().await?;",
+            "let ack = ctx.recv::<TimerRouteAck>().await?;",
             "if done != 1",
             "baker_firmware::run::<TimerRoute>()",
         ],
@@ -1604,6 +2030,8 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "baker_firmware::baker_timer_route_ready()",
             "baker_firmware::baker_timer_route_finish()",
             "baker_firmware::baker_poll_delay(100)",
+            "branch.recv::<TimerExpired>().await?",
+            "branch.send::<TimerExpired>(&1).await?",
             "fact.send(&1).await?",
             "record_choreofs_driver_trace(0x5452_011",
             "record_choreofs_engine_error_code(0x5452_4",
@@ -1625,6 +2053,11 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "endpoint-poison)",
             "capacity-fault)",
             "bin_name=\"baker-capacity-fault\"",
+            "require_choreofs_sio_cross_core()",
+            "require_nonzero_counter choreofs_sio_core0_to_core1_tx",
+            "require_nonzero_counter choreofs_sio_core0_to_core1_rx",
+            "require_nonzero_counter choreofs_sio_core1_to_core0_tx",
+            "require_nonzero_counter choreofs_sio_core1_to_core0_rx",
         ],
     );
     assert_present(
@@ -1659,10 +2092,9 @@ fn private_baker_artifact_contains_two_logical_images_without_runtime_escape() {
             "Static WASI import",
             "not admission authority",
             "materialized for that logical image",
-            "appkit sends the real projected `EngineReq::ProcExit(code)`",
             "a WASI import becomes meaningful only when the guest actually calls it",
             "`appkit` itself is also a curated facade",
-            "implementation modules under `src/appkit/` remain",
+            "Implementation modules under `src/appkit/` stay",
             "bash ./scripts/check_baker_section_budgets.sh",
             "gates `.text`, `.rodata`, `.data`, `.bss`, and flash-size totals",
         ],
@@ -1680,7 +2112,6 @@ fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
         hetero,
         &[
             "pub struct Control;",
-            "pub fn assert_peer_manifests()",
             "pub struct LinuxControl;",
             "pub struct M33Realtime;",
             "pub struct Rp2040Io;",
@@ -1696,15 +2127,16 @@ fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
             "edge.slot_mut(rx.lane)",
             "edge_slots_are_lane_scoped",
             "impl appkit::Capsule for Control",
-            "impl appkit::LogicalImage<Control> for appkit::Local<image::LinuxControl>",
-            "impl appkit::LogicalImage<Control> for appkit::Local<image::M33Realtime>",
-            "impl appkit::LogicalImage<Control> for appkit::Local<image::Rp2040Io>",
+            "impl appkit::LogicalImage for image::LinuxControl",
+            "impl appkit::LogicalImage for image::M33Realtime",
+            "impl appkit::LogicalImage for image::Rp2040Io",
+            "type Capsule = Control;",
             "const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(0);",
             "const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(1);",
             "const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(2);",
-            "appkit::run::<appkit::Local<image::LinuxControl>, Control>(appkit::NoWasi);",
-            "appkit::run::<appkit::Local<image::M33Realtime>, Control>(appkit::NoWasi);",
-            "appkit::run::<appkit::Local<image::Rp2040Io>, Control>(appkit::NoWasi);",
+            "appkit::run::<image::LinuxControl>(appkit::NoWasi);",
+            "appkit::run::<image::M33Realtime>(appkit::NoWasi);",
+            "appkit::run::<image::Rp2040Io>(appkit::NoWasi);",
         ],
     );
     assert_absent(
@@ -1719,6 +2151,9 @@ fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
             "PEER_IMAGES",
             "peer_image_count",
             "_ => {}",
+            "appkit::run::<image::LinuxControl, Control>",
+            "appkit::run::<image::M33Realtime, Control>",
+            "appkit::run::<image::Rp2040Io, Control>",
         ],
     );
     assert_present(
@@ -1726,8 +2161,8 @@ fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
         linux,
         &[
             "appkit::run::<",
-            "appkit::Local<heterogeneous_split_example::image::LinuxControl>",
-            "heterogeneous_split_example::Control",
+            "heterogeneous_split_example::image::LinuxControl",
+            "<Image as appkit::LogicalImage>::REQUESTED_ROLES",
         ],
     );
     assert_present(
@@ -1739,8 +2174,8 @@ fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
             "#[panic_handler]",
             "pub extern \"C\" fn main() -> !",
             "appkit::run::<",
-            "appkit::Local<heterogeneous_split_example::image::M33Realtime>",
-            "heterogeneous_split_example::Control",
+            "heterogeneous_split_example::image::M33Realtime",
+            "<Image as appkit::LogicalImage>::REQUESTED_ROLES",
         ],
     );
     assert_present(
@@ -1752,8 +2187,8 @@ fn heterogeneous_example_projects_one_capsule_into_separate_logical_images() {
             "#[panic_handler]",
             "pub extern \"C\" fn main() -> !",
             "appkit::run::<",
-            "appkit::Local<heterogeneous_split_example::image::Rp2040Io>",
-            "heterogeneous_split_example::Control",
+            "heterogeneous_split_example::image::Rp2040Io",
+            "<Image as appkit::LogicalImage>::REQUESTED_ROLES",
         ],
     );
     assert_absent(
@@ -1801,17 +2236,20 @@ fn cargo_keeps_plan_private_and_no_demo_meaning_features() {
         "Cargo.toml",
         cargo,
         &[
-            "hibana = { version = \"0.9.0\", default-features = false }",
+            "hibana = { version = \"0.9.4\", default-features = false }",
             "hibana-wasip1-runtime = { path = \"../hibana-wasip1-runtime\", default-features = false }",
-            "[patch.crates-io]",
-            "hibana = { path = \"../hibana\" }",
         ],
     );
     assert_absent(
         "Cargo.toml",
         cargo,
         &[
+            "hibana = { version = \"0.9.1\", default-features = false }",
+            "hibana = { version = \"0.9.0\", default-features = false }",
             "hibana = { git",
+            "hibana-wasip1-runtime = { git = \"https://github.com/hibanaworks/hibana-wasip1-runtime\"",
+            "[patch.crates-io]",
+            "hibana = { path = \"../hibana\" }",
             "baker-choreofs-demo",
             "baker-choreofs-bad-path-demo",
             "baker-choreofs-bad-payload-demo",
@@ -1909,10 +2347,10 @@ fn embedded_runner_keeps_scheduler_and_role_future_poll_boundary_separate() {
     let appkit = appkit_sources();
 
     let resolver_registration = appkit
-        .find("C::register_resolvers(&mut resolver_registry);")
+        .find("C::register_resolvers::<_, ROLE>(&mut resolver_registry);")
         .expect("appkit attach registers capsule resolvers");
     let role_future_start = appkit
-        .find("visit_requested_projected_roles::<C, _>(program, I::REQUESTED_ROLES, &mut visitor);")
+        .find("let mut visitor = AttachProjectedRoles {")
         .expect("appkit attach starts projected role futures");
     assert!(
         resolver_registration < role_future_start,
@@ -1924,22 +2362,23 @@ fn embedded_runner_keeps_scheduler_and_role_future_poll_boundary_separate() {
         &appkit,
         &[
             "#[inline(never)]\nunsafe fn poll_embedded_stored_task",
-            "let task_waker = embedded_task_waker();",
-            "let mut task_context = Context::from_waker(task_waker);",
+            "fn embedded_task_waker(woke: &mut bool) -> Waker",
+            "let task_waker = embedded_task_waker(&mut woke);",
+            "let mut task_context = Context::from_waker(&task_waker);",
+            "if !woke {\n                    embedded_wait_for_event();\n                }",
             "struct EmbeddedScheduledTasks<'task, E>",
             "polls: [Option<ScheduledTaskPoll<E>>; APPKIT_EMBEDDED_ROLE_SLOTS]",
-            "poll_embedded_stored_task(poll, self.slot_ptr(task_idx), &mut task_context)",
-            "fn embedded_wait_for_event() {\n    core::hint::spin_loop();\n}",
+            "poll_embedded_stored_task(poll, self.slot_ptr(task_idx), task_context)",
+            "core::arch::asm!(\"wfe\", options(nomem, nostack, preserves_flags));",
             "future: EmbeddedFutureArena<APPKIT_EMBEDDED_FUTURE_BYTES>",
-            "embedded_storage: EmbeddedAttachStorageRef<'static>",
             "embedded_tasks:",
-            "self.embedded_tasks.push(local_role_task(",
-            "self.embedded_storage",
-            "run_canonical_wasi_engine_forever::<C, ImageTy, ArtifactTy, ROLE>(\n                                self.embedded_storage,",
-            "let ctx_ptr = storage",
-            ".future\n            .cast::<EngineCtx",
-            "ctx_ptr.write(ctx)",
-            "bare-metal WASI logical images attach exactly one role",
+            "self.embedded_tasks.push(localside_role_task(",
+            "run_canonical_wasi_engine_forever::<C, ImageTy, ArtifactTy, ROLE>(\n                                engine,\n                                self.embedded_tasks,",
+            "fn blocking_engine_state<T>(&self) -> *mut T",
+            "self.len < APPKIT_EMBEDDED_ROLE_SLOTS",
+            "blocking_engine_state::<CanonicalWasiEngine",
+            "engine_ptr.write(engine)",
+            "tasks.poll_once(&mut task_context);",
         ],
     );
     assert_absent(
@@ -1953,17 +2392,21 @@ fn embedded_runner_keeps_scheduler_and_role_future_poll_boundary_separate() {
             "fn embedded_task_waker<const ROLE: u8>",
             "EmbeddedTaskContextSlot",
             "EmbeddedWakerSlot",
+            "embedded_storage: EmbeddedAttachStorageRef<'static>",
             "Context<'static>",
             "waker: EmbeddedWakerSlot",
             "embedded_task_context(",
             "fn embedded_future_arena_for_role<const ROLE: u8>",
+            "run_canonical_wasi_engine_forever::<C, ImageTy, ArtifactTy, ROLE>(\n                                self.embedded_storage,",
             "run_canonical_wasi_engine_forever::<C, ImageTy, ROLE>(ctx)",
+            "bare-metal WASI logical images attach exactly one role",
             "APPKIT_EMBEDDED_ROLE0_FUTURE_BYTES",
             "APPKIT_EMBEDDED_ROLE1_FUTURE_BYTES",
             "fn poll_localside_once",
-            "asm!(\"wfe\"",
             "TestTimerFiredFact",
             "TEST_TIMER_FIRED_FACT_LABEL",
+            "APPKIT_EMBEDDED_WASI_COOPERATIVE_POLLS",
+            "cooperative_polls",
         ],
     );
 }

@@ -6,7 +6,7 @@ version = 4
 name = "baker-firmware"
 version = "0.1.0"
 dependencies = [
- "hibana 0.9.1",
+ "hibana",
  "hibana-epf",
  "hibana-pico",
  "hibana-wasip1-runtime",
@@ -16,32 +16,28 @@ dependencies = [
 name = "heterogeneous-split-example"
 version = "0.1.0"
 dependencies = [
- "hibana 0.9.1",
+ "hibana",
  "hibana-pico",
 ]
 
 [[package]]
 name = "hibana"
-version = "0.8.0"
+version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7db409cfbf66cdb46b674560b7a6c0e5b541f1da45b914a22a3a9848eaeb4eb8"
-
-[[package]]
-name = "hibana"
-version = "0.9.1"
+checksum = "af5c790dbf3b63cae9c86401f2f934ead3756636f529484ef8db1f2a7802023b"
 
 [[package]]
 name = "hibana-epf"
 version = "0.1.0"
 dependencies = [
- "hibana 0.9.1",
+ "hibana",
 ]
 
 [[package]]
 name = "hibana-pico"
 version = "0.1.0"
 dependencies = [
- "hibana 0.9.1",
+ "hibana",
  "hibana-wasip1-runtime",
 ]
 
@@ -49,14 +45,14 @@ dependencies = [
 name = "hibana-wasip1-runtime"
 version = "0.1.0"
 dependencies = [
- "hibana 0.9.1",
+ "hibana",
 ]
 
 [[package]]
 name = "hibana-wifi"
 version = "0.1.0"
 dependencies = [
- "hibana 0.8.0",
+ "hibana",
  "hibana-wifi-proto",
 ]
 
@@ -64,7 +60,7 @@ dependencies = [
 name = "hibana-wifi-proto"
 version = "0.1.0"
 dependencies = [
- "hibana 0.8.0",
+ "hibana",
 ]
 
 [[package]]
@@ -77,7 +73,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 name = "rp2w-firmware"
 version = "0.1.0"
 dependencies = [
- "hibana 0.9.1",
+ "hibana",
  "hibana-epf",
  "hibana-pico",
  "hibana-wasip1-runtime",
@@ -89,7 +85,7 @@ dependencies = [
 name = "uno-q-heterogeneous"
 version = "0.1.0"
 dependencies = [
- "hibana 0.9.1",
+ "hibana",
  "hibana-pico",
  "hibana-wasip1-runtime",
  "hibana-wifi",

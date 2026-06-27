@@ -47,12 +47,16 @@ impl From<hibana::runtime::resolver::ResolverError> for TimerRouteError {
 }
 
 fn timer_route_resolver(_: &()) -> Result<DecisionArm, ResolverError> {
-    Ok(DecisionArm::Right)
+    if baker_firmware::baker_timer_route_irq_observed() {
+        Ok(DecisionArm::Right)
+    } else {
+        Ok(DecisionArm::Left)
+    }
 }
 
 impl appkit::Capsule for TimerRoute {
     type Placement = BakerPlacement;
-    type Local = TimerRouteLocal;
+    type Localside = TimerRouteLocal;
 
     fn choreography() -> impl hibana::runtime::program::Projectable {
         g::seq(
@@ -68,15 +72,14 @@ impl appkit::Capsule for TimerRoute {
         )
     }
 
-    fn register_resolvers<'cfg, R>(registry: &mut R)
+    fn register_resolvers<'cfg, R, const ROLE: u8>(registry: &mut R)
     where
-        R: appkit::ResolverRegistry<'cfg, Self>,
+        R: appkit::ResolverRegistry<'cfg, Self, ROLE>,
     {
         baker_firmware::record_choreofs_engine_status(0x5452_0200);
         let resolver =
             ResolverRef::decision_state(&TIMER_ROUTE_RESOLVER_STATE, timer_route_resolver);
-        registry.resolver::<TIMER_ROUTE_POLICY, 0>(resolver);
-        registry.resolver::<TIMER_ROUTE_POLICY, 1>(resolver);
+        registry.resolver::<TIMER_ROUTE_POLICY>(resolver);
         baker_firmware::record_choreofs_engine_status(0x5452_0201);
     }
 }
@@ -92,59 +95,61 @@ impl BakerCapsuleFacts for TimerRoute {
 impl appkit::Localside<TimerRoute> for TimerRouteLocal {
     type Error = TimerRouteError;
 
-    fn engine<'endpoint, 'guest, const ROLE: u8>(
-        mut ctx: appkit::EngineCtx<'endpoint, 'guest, TimerRoute, ROLE>,
+    fn engine<'endpoint, const ROLE: u8>(
+        mut ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 1 {
                 baker_firmware::record_choreofs_engine_status(0x5452_010f);
 
                 while !baker_firmware::baker_timer_route_resolver_ready(100) {
-                    baker_firmware::baker_poll_delay(1);
+                    core::hint::spin_loop();
+                }
+                if !baker_firmware::baker_timer_route_irq_observed() {
+                    return Err(TimerRouteError::RuntimeViolation);
                 }
                 baker_firmware::record_choreofs_engine_status(0x5452_0111);
 
-                ctx.endpoint().send::<TimerExpired>(&1).await?;
+                ctx.send::<TimerExpired>(&1).await?;
                 baker_firmware::record_choreofs_engine_status(0x5452_0112);
 
-                let done = ctx.endpoint().recv::<TimerRouteDone>().await?;
+                let done = ctx.recv::<TimerRouteDone>().await?;
                 if done != 1 {
                     return Err(TimerRouteError::RuntimeViolation);
                 }
                 baker_firmware::record_choreofs_engine_status(0x5452_0113);
 
-                ctx.endpoint().send::<TimerRouteAck>(&1).await?;
+                ctx.send::<TimerRouteAck>(&1).await?;
                 baker_firmware::record_choreofs_engine_status(0x5452_0114);
 
                 baker_firmware::mark_runtime_ready();
-                return ctx.pending().await;
+                return appkit::pending(ctx).await;
             }
-            ctx.pending().await
+            appkit::pending(ctx).await
         }
     }
 
-    fn driver<'a, const ROLE: u8>(
-        mut ctx: appkit::DriverCtx<'a, TimerRoute, ROLE>,
+    fn driver<'endpoint, const ROLE: u8>(
+        mut ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 0 {
                 baker_firmware::record_choreofs_driver_trace(0x5452_000f);
                 baker_firmware::record_choreofs_driver_trace(0x5452_0010);
+                if !baker_firmware::baker_wait_timer_route_irq_observed(500) {
+                    return Err(TimerRouteError::RuntimeViolation);
+                }
 
-                let branch = ctx.endpoint().offer().await?;
-                baker_firmware::record_choreofs_driver_trace(
-                    0x5452_1000 | u32::from(branch.label()),
-                );
-                let expired = branch.recv::<TimerExpired>().await?;
+                let expired = ctx.recv::<TimerExpired>().await?;
                 if expired != 1 {
                     return Err(TimerRouteError::RuntimeViolation);
                 }
                 baker_firmware::record_choreofs_driver_trace(0x5452_0012);
 
-                ctx.endpoint().send::<TimerRouteDone>(&1).await?;
+                ctx.send::<TimerRouteDone>(&1).await?;
                 baker_firmware::record_choreofs_driver_trace(0x5452_0013);
 
-                let ack = ctx.endpoint().recv::<TimerRouteAck>().await?;
+                let ack = ctx.recv::<TimerRouteAck>().await?;
                 if ack != 1 {
                     return Err(TimerRouteError::RuntimeViolation);
                 }
@@ -152,16 +157,16 @@ impl appkit::Localside<TimerRoute> for TimerRouteLocal {
 
                 baker_firmware::mark_runtime_ready();
                 baker_firmware::mark_success(<TimerRoute as BakerCapsuleFacts>::SUCCESS_RESULT);
-                return ctx.pending().await;
+                return appkit::pending(ctx).await;
             }
-            ctx.pending().await
+            appkit::pending(ctx).await
         }
     }
 
-    fn boundary<'a, const ROLE: u8>(
-        ctx: appkit::BoundaryCtx<'a, TimerRoute, ROLE>,
+    fn boundary<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
+        appkit::pending(ctx)
     }
 }
 
@@ -179,7 +184,7 @@ pub extern "C" fn baker_selected_run() -> ! {
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
 fn main() {
-    baker_firmware::run::<TimerRoute>()
+    panic!("baker-firmware examples are RP2040 hardware artifacts; build for thumbv6m-none-eabi")
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]

@@ -32,8 +32,8 @@ examples/baker-firmware
 ```
 
 Both images are projections of the same raw Hibana choreography. Each
-`appkit::run::<LogicalImage, Capsule>()` attaches only that image's requested
-role slice:
+`appkit::run::<LogicalImage>(artifact)` attaches only that image's requested
+role slice; the capsule is the logical image's associated protocol owner:
 
 ```text
 Core0 driver requested roles = role 0
@@ -49,7 +49,7 @@ The current source map is:
 | Layer | File |
 | --- | --- |
 | AppKit capsule/logical-image integration | `src/appkit/mod.rs`, `src/appkit/internal.rs` |
-| Generic logical-site marker | `src/appkit/internal.rs` via `hibana_pico::appkit::Local` |
+| Logical image selection | `src/appkit/internal.rs` via the concrete `appkit::LogicalImage` type |
 | Baker-local RP2040 SIO carrier | `examples/baker-firmware/src/lib.rs` |
 | Baker logical-image/reset support | `examples/baker-firmware/src/lib.rs` |
 | Baker-local boot2 and clock setup | `examples/baker-firmware/src/lib.rs` |
@@ -98,17 +98,15 @@ carrier control proofs. They no longer use a role-2 boundary shortcut or a
 composite `0b101` attach slice.
 
 `choreofs-traffic` and `choreofs-traffic-loop` are the WASI P1 proofs. Core1
-runs the Hibana WASIP1 runtime engine and Core0 runs the driver side. The
+runs the Hibana WASI P1 runtime engine and Core0 runs the driver side. The
 guests are ordinary `std` `wasm32-wasip1` programs. They do not call board APIs;
 they reach the hardware only by making WASI P1 imports that cross the projected
 Endpoint/carrier frontier.
 
-Both proofs start by opening the same ChoreoFS LED object paths:
+Both proofs start by opening the same ChoreoFS traffic-state object path:
 
 ```text
-path_open("device/led/green")
-path_open("device/led/yellow")
-path_open("device/led/red")
+path_open("device/traffic/state")
 ```
 
 `choreofs-traffic` embeds the finite `wasip1-led-choreofs-traffic-once.wasm`
@@ -121,10 +119,13 @@ reentry over the actual `fd_write` / `poll_oneoff` imports:
 
 ```text
 loop {
-  fd_write(green, "1"); poll_oneoff(...)
-  fd_write(yellow, "0"); poll_oneoff(...)
-  fd_write(red, "0"); poll_oneoff(...)
-  ...
+  fd_write_object(state, "G"); poll_oneoff(40ms)
+  fd_write_object(state, "Y"); poll_oneoff(40ms)
+  fd_write_object(state, "0"); poll_oneoff(20ms)
+  fd_write_object(state, "Y"); poll_oneoff(20ms)
+  fd_write_object(state, "0"); poll_oneoff(20ms)
+  fd_write_object(state, "Y"); poll_oneoff(20ms)
+  fd_write_object(state, "R"); poll_oneoff(40ms)
 }
 ```
 
@@ -132,19 +133,19 @@ The guest imports complete through:
 
 ```text
 WASI P1 guest
-  -> Hibana WASIP1 runtime engine side
-  -> typed EngineReq
+  -> Hibana WASI P1 runtime engine side
+  -> typed protocol::*ReqMsg
   -> Endpoint / RP2040 SIO carrier
   -> Driver side
   -> ledger / ChoreoFS / resolver / boundary facts
-  -> typed EngineRet
+  -> typed protocol::*RetMsg
   -> Endpoint / RP2040 SIO carrier
-  -> Hibana WASIP1 runtime engine side
+  -> Hibana WASI P1 runtime engine side
   -> import completion
 ```
 
-There is no host filesystem authority, route inference, timeout rescue,
-lane-recovery loop, or co-located syscall completion.
+There is no host filesystem authority, route inference, timeout bypass,
+lane repair loop, or co-located syscall completion.
 
 `panic-marker`, `endpoint-fault`, `endpoint-poison`, and `deadline-fault` are
 negative evidence proofs. They intentionally terminate through the firmware
@@ -156,7 +157,7 @@ session generation.
 evidence without becoming route authority. `timer-route` is the protocol-time
 counterpart to `deadline-fault`: a timer/clock fact is present in the
 choreography and resolver-selected route arm, so the expired branch is typed
-progress rather than an operational timeout rescue path.
+progress rather than an operational timeout bypass.
 
 `epf-policy-timer` proves that loaded EPF policy bytecode can affect a Hibana
 dynamic policy point on RP2040/SIO without becoming a hook or side channel. The
@@ -189,18 +190,18 @@ Choreography:
   RouteDecision / legal order / phase authority
 ```
 
-The `choreofs-traffic` pattern opens the three configured LED object paths,
-mints their fds through the driver-side materialization path, then performs one
+The `choreofs-traffic` pattern opens the configured traffic-state object path,
+mints its fd through the driver-side materialization path, then performs one
 green/yellow/red traffic cycle through the projected choreography. The finite
 guest then exits through the real WASI `proc_exit` boundary. The hardware proof
 checks:
 
 ```text
 choreofs_engine_status = 0x57414f4b
-choreofs_path_open_count = 3
-choreofs_fd_write_count = 13
-choreofs_poll_count = 13
-choreofs_last_object = 3
+choreofs_path_open_count = 1
+choreofs_fd_write_count = 7
+choreofs_poll_count = 7
+choreofs_last_object = 1
 choreofs_led_mask = 4
 choreofs_seen_led_mask = 7
 ```
@@ -210,9 +211,9 @@ loop. The runner does not require a fixed final LED mask or final object for
 that mode; it checks that at least one full green/yellow/red cycle was observed:
 
 ```text
-choreofs_path_open_count = 3
-choreofs_fd_write_count >= 13
-choreofs_poll_count >= 13
+choreofs_path_open_count = 1
+choreofs_fd_write_count >= 7
+choreofs_poll_count >= 7
 choreofs_seen_led_mask = 7
 ```
 
@@ -270,22 +271,22 @@ choreofs-traffic:
   hardfault pc/lr=0
   choreofs_engine_status=0x57414f4b
   choreofs_engine_error_code=0
-  choreofs_path_open_count=3
-  choreofs_fd_write_count=13
-  choreofs_poll_count=13
-  choreofs_last_object=3
+  choreofs_path_open_count=1
+  choreofs_fd_write_count=7
+  choreofs_poll_count=7
+  choreofs_last_object=1
   choreofs_led_mask=4
   choreofs_seen_led_mask=7
 
 choreofs-traffic-loop:
   result=0x48494f4b
   core0_stage=0x4849000a
-  core1_stage=0x4849000a
+  core1_stage=0x48490004
   hardfault pc/lr=0
   choreofs_engine_error_code=0
-  choreofs_path_open_count=3
-  choreofs_fd_write_count>=13
-  choreofs_poll_count>=13
+  choreofs_path_open_count=1
+  choreofs_fd_write_count>=7
+  choreofs_poll_count>=7
   choreofs_seen_led_mask=7
 
 fail-safe:

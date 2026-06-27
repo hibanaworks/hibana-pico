@@ -5,21 +5,21 @@ use core::{
     arch::{asm, global_asm},
     ptr::{read_volatile, write_volatile},
 };
-use core::{assert, mem::MaybeUninit};
+use core::{assert, marker::PhantomData, mem::MaybeUninit};
 use hibana_pico::appkit;
+use hibana_wasip1_runtime::{choreofs, protocol};
 
 pub struct BakerPlacement;
 
-struct DriverImage;
-struct EngineImage;
+struct DriverImage<C>(PhantomData<fn() -> C>);
+struct EngineImage<C>(PhantomData<fn() -> C>);
 
 mod rp2040_sio {
-    const SIO_FRAME_MAGIC: u32 = 0x4849_5301;
+    use core::sync::atomic::{Ordering, compiler_fence};
+
     const SIO_FRAME_BYTES: usize = 128;
-    const SIO_FRAME_HEADER_WORDS: usize = 4;
-    const SIO_FRAME_PAYLOAD_WORDS: usize = (SIO_FRAME_BYTES + 3) / 4;
-    const SIO_FRAME_WORDS: usize = SIO_FRAME_HEADER_WORDS + SIO_FRAME_PAYLOAD_WORDS;
     const SIO_TRACE_NO_FRAME_LABEL: u8 = 0;
+    const SIO_RX_WAIT_IDLE: u32 = u32::MAX;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(super) struct SioTransport;
@@ -39,13 +39,14 @@ mod rp2040_sio {
             let session_id = port.session_id().raw();
             let tx_session_id = session_id ^ tx_session_xor;
             let lane = port.lane();
-            fifo::clear_errors();
             (
                 SioTx {
                     local_role,
                     core_id: core_id() as u8,
+                    lane,
                     session_id: tx_session_id,
                     sent_frames: 0,
+                    pending_wait_start_us: SIO_RX_WAIT_IDLE,
                     pending: None,
                 },
                 SioRx::new(
@@ -71,17 +72,25 @@ mod rp2040_sio {
     #[inline(always)]
     fn signal_peer() {}
 
+    #[cfg(all(target_arch = "arm", target_os = "none"))]
+    #[inline(always)]
+    fn wait_for_event() {
+        unsafe {
+            core::arch::asm!("wfe", options(nomem, nostack, preserves_flags));
+        }
+    }
+
     #[derive(Debug)]
-    struct PendingTxFrame {
+    struct PendingMailboxFrame {
         peer_role: u8,
         frame_label: u8,
         lane: u8,
         len: usize,
-        word_index: usize,
+        published: bool,
         bytes: [u8; SIO_FRAME_BYTES],
     }
 
-    impl PendingTxFrame {
+    impl PendingMailboxFrame {
         fn new(
             peer_role: u8,
             frame_label: u8,
@@ -97,28 +106,11 @@ mod rp2040_sio {
                 frame_label,
                 lane,
                 len: bytes.len(),
-                word_index: 0,
+                published: false,
                 bytes: [0; SIO_FRAME_BYTES],
             };
             frame.bytes[..bytes.len()].copy_from_slice(bytes);
             Ok(frame)
-        }
-
-        fn total_words(&self) -> usize {
-            SIO_FRAME_HEADER_WORDS + payload_word_count(self.len)
-        }
-
-        fn word(&self, session_id: u32, local_role: u8, index: usize) -> u32 {
-            match index {
-                0 => SIO_FRAME_MAGIC,
-                1 => session_id,
-                2 => encode_meta(local_role, self.peer_role, self.frame_label, self.len),
-                3 => u32::from(self.lane),
-                _ => pack_payload_word(
-                    &self.bytes[..self.len],
-                    (index - SIO_FRAME_HEADER_WORDS) * 4,
-                ),
-            }
         }
     }
 
@@ -126,9 +118,11 @@ mod rp2040_sio {
     pub(super) struct SioTx {
         local_role: u8,
         core_id: u8,
+        lane: u8,
         session_id: u32,
         sent_frames: u16,
-        pending: Option<PendingTxFrame>,
+        pending_wait_start_us: u32,
+        pending: Option<PendingMailboxFrame>,
     }
 
     #[derive(Debug)]
@@ -143,6 +137,7 @@ mod rp2040_sio {
         delivered: bool,
         pending_logged: bool,
         pending_polls: u32,
+        pending_wait_start_us: u32,
         sender_role: u8,
         frame_label: Option<u8>,
         operational_deadline_ticks: u32,
@@ -169,6 +164,7 @@ mod rp2040_sio {
                 delivered: false,
                 pending_logged: false,
                 pending_polls: 0,
+                pending_wait_start_us: SIO_RX_WAIT_IDLE,
                 sender_role: 0,
                 frame_label: None,
                 operational_deadline_ticks,
@@ -233,101 +229,146 @@ mod rp2040_sio {
         };
     }
 
-    #[derive(Clone, Copy, Debug)]
-    struct SioRxAccumulator {
-        words: [u32; SIO_FRAME_WORDS],
-        word_count: usize,
-        expected_words: usize,
+    const BAKER_SIO_ROLE_SLOTS: usize = 3;
+    static mut SIO_RX_STASH_CORE0: [StashedSioFrame; BAKER_SIO_ROLE_SLOTS] =
+        [StashedSioFrame::EMPTY; BAKER_SIO_ROLE_SLOTS];
+    static mut SIO_RX_STASH_CORE1: [StashedSioFrame; BAKER_SIO_ROLE_SLOTS] =
+        [StashedSioFrame::EMPTY; BAKER_SIO_ROLE_SLOTS];
+    static mut SIO_LOCAL_ROLE_CORE_MASKS: [u8; BAKER_SIO_ROLE_SLOTS] = [0; BAKER_SIO_ROLE_SLOTS];
+    static mut SIO_LOCAL_ROLE_LANES: [u8; BAKER_SIO_ROLE_SLOTS * 2] = [0; BAKER_SIO_ROLE_SLOTS * 2];
+
+    #[repr(C)]
+    struct SioMailboxSlot {
+        occupied: u32,
+        session_id: u32,
+        sender_role: u8,
+        peer_role: u8,
+        frame_label: u8,
+        lane: u8,
+        len: u8,
+        _pad: [u8; 3],
+        bytes: [u8; SIO_FRAME_BYTES],
     }
 
-    impl SioRxAccumulator {
+    impl SioMailboxSlot {
         const EMPTY: Self = Self {
-            words: [0; SIO_FRAME_WORDS],
-            word_count: 0,
-            expected_words: 0,
+            occupied: 0,
+            session_id: 0,
+            sender_role: 0,
+            peer_role: 0,
+            frame_label: 0,
+            lane: 0,
+            len: 0,
+            _pad: [0; 3],
+            bytes: [0; SIO_FRAME_BYTES],
         };
+    }
 
-        fn reset(&mut self) {
-            self.word_count = 0;
-            self.expected_words = 0;
+    static mut SIO_MAILBOX_CORE0_TO_CORE1: SioMailboxSlot = SioMailboxSlot::EMPTY;
+    static mut SIO_MAILBOX_CORE1_TO_CORE0: SioMailboxSlot = SioMailboxSlot::EMPTY;
+
+    fn outbound_mailbox(core_id: u8) -> *mut SioMailboxSlot {
+        if core_id == 0 {
+            core::ptr::addr_of_mut!(SIO_MAILBOX_CORE0_TO_CORE1)
+        } else {
+            core::ptr::addr_of_mut!(SIO_MAILBOX_CORE1_TO_CORE0)
         }
+    }
 
-        fn is_partial(&self) -> bool {
-            self.word_count != 0
+    fn inbound_mailbox(core_id: u8) -> *mut SioMailboxSlot {
+        if core_id == 0 {
+            core::ptr::addr_of_mut!(SIO_MAILBOX_CORE1_TO_CORE0)
+        } else {
+            core::ptr::addr_of_mut!(SIO_MAILBOX_CORE0_TO_CORE1)
         }
+    }
 
-        fn push_word(
-            &mut self,
-            word: u32,
-        ) -> Result<Option<DecodedSioFrame>, hibana::runtime::transport::TransportError> {
-            if self.word_count >= SIO_FRAME_WORDS {
-                self.reset();
-                return Err(hibana::runtime::transport::TransportError::Capacity);
+    fn publish_mailbox_frame(
+        core_id: u8,
+        session_id: u32,
+        local_role: u8,
+        frame: &mut PendingMailboxFrame,
+    ) -> bool {
+        if frame.published {
+            return true;
+        }
+        let slot = outbound_mailbox(core_id);
+        unsafe {
+            if core::ptr::read_volatile(core::ptr::addr_of!((*slot).occupied)) != 0 {
+                return false;
             }
-
-            self.words[self.word_count] = word;
-            self.word_count += 1;
-
-            if self.word_count == 1 && word != SIO_FRAME_MAGIC {
-                self.reset();
-                return Err(hibana::runtime::transport::TransportError::Failed);
+            core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).session_id), session_id);
+            core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).sender_role), local_role);
+            core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).peer_role), frame.peer_role);
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!((*slot).frame_label),
+                frame.frame_label,
+            );
+            core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).lane), frame.lane);
+            core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).len), frame.len as u8);
+            let bytes = core::ptr::addr_of_mut!((*slot).bytes).cast::<u8>();
+            let mut idx = 0usize;
+            while idx < frame.len {
+                core::ptr::write_volatile(bytes.add(idx), frame.bytes[idx]);
+                idx += 1;
             }
+            compiler_fence(Ordering::Release);
+            core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).occupied), 1);
+        }
+        frame.published = true;
+        true
+    }
 
-            if self.word_count == SIO_FRAME_HEADER_WORDS {
-                let (sender_role, peer_role, _, len) = decode_meta(self.words[2]);
-                if peer_role == sender_role || len > SIO_FRAME_BYTES {
-                    self.reset();
-                    if len > SIO_FRAME_BYTES {
-                        return Err(hibana::runtime::transport::TransportError::Capacity);
-                    }
-                    return Err(hibana::runtime::transport::TransportError::Failed);
-                }
-                self.expected_words = SIO_FRAME_HEADER_WORDS + payload_word_count(len);
-            }
+    fn clear_outbound_mailbox(core_id: u8) {
+        unsafe {
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!((*outbound_mailbox(core_id)).occupied),
+                0,
+            );
+        }
+    }
 
-            if self.expected_words == 0 || self.word_count < self.expected_words {
+    fn take_mailbox_frame(
+        core_id: u8,
+    ) -> Result<Option<DecodedSioFrame>, hibana::runtime::transport::TransportError> {
+        let slot = inbound_mailbox(core_id);
+        unsafe {
+            if core::ptr::read_volatile(core::ptr::addr_of!((*slot).occupied)) == 0 {
                 return Ok(None);
             }
-
-            let session_id = self.words[1];
-            let meta_word = self.words[2];
-            let lane_word = self.words[3];
-            let (sender_role, peer_role, frame_label, len) = decode_meta(meta_word);
-            let lane = lane_word as u8;
-            let mut bytes = [0; SIO_FRAME_BYTES];
-            let mut offset = 0usize;
-            while offset < len {
-                let word_index = SIO_FRAME_HEADER_WORDS + offset / 4;
-                unpack_payload_word(self.words[word_index], &mut bytes[..len], offset);
-                offset += 4;
+            compiler_fence(Ordering::Acquire);
+            let len = core::ptr::read_volatile(core::ptr::addr_of!((*slot).len)) as usize;
+            if len > SIO_FRAME_BYTES {
+                core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).occupied), 0);
+                signal_peer();
+                return Err(hibana::runtime::transport::TransportError::Capacity);
             }
-            self.reset();
-
-            Ok(Some(DecodedSioFrame {
-                session_id,
+            let sender_role = core::ptr::read_volatile(core::ptr::addr_of!((*slot).sender_role));
+            let peer_role = core::ptr::read_volatile(core::ptr::addr_of!((*slot).peer_role));
+            if sender_role == peer_role {
+                core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).occupied), 0);
+                signal_peer();
+                return Err(hibana::runtime::transport::TransportError::Failed);
+            }
+            let src = core::ptr::addr_of!((*slot).bytes).cast::<u8>();
+            let mut bytes = [0; SIO_FRAME_BYTES];
+            let mut idx = 0usize;
+            while idx < len {
+                bytes[idx] = core::ptr::read_volatile(src.add(idx));
+                idx += 1;
+            }
+            let frame = DecodedSioFrame {
+                session_id: core::ptr::read_volatile(core::ptr::addr_of!((*slot).session_id)),
                 sender_role,
                 peer_role,
-                frame_label,
-                lane,
+                frame_label: core::ptr::read_volatile(core::ptr::addr_of!((*slot).frame_label)),
+                lane: core::ptr::read_volatile(core::ptr::addr_of!((*slot).lane)),
                 len,
                 bytes,
-            }))
-        }
-    }
-
-    const SIO_RX_STASH_ROLES: usize = 16;
-    static mut SIO_RX_ACCUM_CORE0: SioRxAccumulator = SioRxAccumulator::EMPTY;
-    static mut SIO_RX_ACCUM_CORE1: SioRxAccumulator = SioRxAccumulator::EMPTY;
-    static mut SIO_RX_STASH_CORE0: [StashedSioFrame; SIO_RX_STASH_ROLES] =
-        [StashedSioFrame::EMPTY; SIO_RX_STASH_ROLES];
-    static mut SIO_RX_STASH_CORE1: [StashedSioFrame; SIO_RX_STASH_ROLES] =
-        [StashedSioFrame::EMPTY; SIO_RX_STASH_ROLES];
-
-    fn rx_accumulator(core_id: u8) -> *mut SioRxAccumulator {
-        if core_id == 0 {
-            core::ptr::addr_of_mut!(SIO_RX_ACCUM_CORE0)
-        } else {
-            core::ptr::addr_of_mut!(SIO_RX_ACCUM_CORE1)
+            };
+            core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).occupied), 0);
+            signal_peer();
+            Ok(Some(frame))
         }
     }
 
@@ -339,12 +380,78 @@ mod rp2040_sio {
         }
     }
 
-    fn stash_slot(core_id: u8, role: u8) -> Option<*mut StashedSioFrame> {
-        if (role as usize) < SIO_RX_STASH_ROLES {
-            Some(unsafe { rx_stash(core_id).add(role as usize) })
-        } else {
-            None
+    fn baker_role_stash_index(role: u8) -> Option<usize> {
+        match role {
+            0 | 1 | 2 => Some(role as usize),
+            _ => None,
         }
+    }
+
+    fn core_mask(core_id: u8) -> u8 {
+        match core_id {
+            0 => 1,
+            1 => 2,
+            other => panic!("baker SIO transport has no core mask for core {other}"),
+        }
+    }
+
+    fn local_role_lane_slot(role: u8, core_id: u8) -> Option<usize> {
+        let role_index = baker_role_stash_index(role)?;
+        match core_id {
+            0 | 1 => Some(role_index * 2 + core_id as usize),
+            other => panic!("baker SIO transport has no local lane slot for core {other}"),
+        }
+    }
+
+    fn mark_local_role_attached(core_id: u8, role: u8, lane: u8) {
+        let Some(index) = baker_role_stash_index(role) else {
+            panic!("baker SIO transport cannot attach unknown local role {role}");
+        };
+        let lane_slot = local_role_lane_slot(role, core_id)
+            .expect("baker SIO transport cannot attach lane for unknown local role");
+        unsafe {
+            let slot = core::ptr::addr_of_mut!(SIO_LOCAL_ROLE_CORE_MASKS)
+                .cast::<u8>()
+                .add(index);
+            let current = core::ptr::read_volatile(slot);
+            core::ptr::write_volatile(slot, current | core_mask(core_id));
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!(SIO_LOCAL_ROLE_LANES)
+                    .cast::<u8>()
+                    .add(lane_slot),
+                lane,
+            );
+        }
+    }
+
+    fn role_attached_on_core(role: u8, core_id: u8) -> bool {
+        let Some(index) = baker_role_stash_index(role) else {
+            return false;
+        };
+        unsafe {
+            let slot = core::ptr::addr_of!(SIO_LOCAL_ROLE_CORE_MASKS)
+                .cast::<u8>()
+                .add(index);
+            core::ptr::read_volatile(slot) & core_mask(core_id) != 0
+        }
+    }
+
+    fn role_lane_on_core(role: u8, core_id: u8) -> Option<u8> {
+        if !role_attached_on_core(role, core_id) {
+            return None;
+        }
+        let lane_slot = local_role_lane_slot(role, core_id)?;
+        Some(unsafe {
+            core::ptr::read_volatile(
+                core::ptr::addr_of!(SIO_LOCAL_ROLE_LANES)
+                    .cast::<u8>()
+                    .add(lane_slot),
+            )
+        })
+    }
+
+    fn stash_slot(core_id: u8, role: u8) -> Option<*mut StashedSioFrame> {
+        baker_role_stash_index(role).map(|index| unsafe { rx_stash(core_id).add(index) })
     }
 
     fn take_stashed_frame(core_id: u8, role: u8) -> Option<DecodedSioFrame> {
@@ -364,7 +471,7 @@ mod rp2040_sio {
         frame: DecodedSioFrame,
     ) -> Result<(), hibana::runtime::transport::TransportError> {
         let Some(slot) = stash_slot(core_id, frame.peer_role) else {
-            return Err(hibana::runtime::transport::TransportError::Capacity);
+            return Err(hibana::runtime::transport::TransportError::Failed);
         };
         unsafe {
             if (*slot).occupied {
@@ -379,6 +486,7 @@ mod rp2040_sio {
     }
 
     fn stage_frame(rx: &mut SioRx, frame: DecodedSioFrame) {
+        finish_rx_wait(rx);
         rx.frame_session_id = frame.session_id;
         rx.frame_lane = frame.lane;
         rx.frame_label = Some(frame.frame_label);
@@ -392,12 +500,52 @@ mod rp2040_sio {
         frame.lane == rx.lane
     }
 
-    fn baker_role_core(role: u8) -> u8 {
-        match role {
-            0 | 2 => 0,
-            1 => 1,
-            other => panic!("baker SIO transport has no core assignment for role {other}"),
+    fn begin_rx_wait(rx: &mut SioRx) {
+        if rx.pending_wait_start_us == SIO_RX_WAIT_IDLE {
+            rx.pending_wait_start_us = super::choreofs_measurement_start();
         }
+    }
+
+    fn finish_rx_wait(rx: &mut SioRx) {
+        if rx.pending_wait_start_us != SIO_RX_WAIT_IDLE {
+            let elapsed =
+                super::choreofs_measurement_start().wrapping_sub(rx.pending_wait_start_us);
+            rx.pending_wait_start_us = SIO_RX_WAIT_IDLE;
+            super::record_choreofs_sio_rx_wait(rx.local_role, elapsed);
+        }
+    }
+
+    fn clear_rx_wait(rx: &mut SioRx) {
+        rx.pending_wait_start_us = SIO_RX_WAIT_IDLE;
+    }
+
+    fn begin_tx_wait(tx: &mut SioTx) {
+        if tx.pending_wait_start_us == SIO_RX_WAIT_IDLE {
+            tx.pending_wait_start_us = super::choreofs_measurement_start();
+        }
+    }
+
+    fn finish_tx_wait(tx: &mut SioTx) {
+        if tx.pending_wait_start_us != SIO_RX_WAIT_IDLE {
+            let elapsed =
+                super::choreofs_measurement_start().wrapping_sub(tx.pending_wait_start_us);
+            tx.pending_wait_start_us = SIO_RX_WAIT_IDLE;
+            super::record_choreofs_sio_tx_wait(tx.local_role, elapsed);
+        }
+    }
+
+    fn clear_tx_wait(tx: &mut SioTx) {
+        tx.pending_wait_start_us = SIO_RX_WAIT_IDLE;
+    }
+
+    fn finish_tx_poll(
+        tx: &SioTx,
+        start_us: u32,
+        result: core::task::Poll<Result<(), hibana::runtime::transport::TransportError>>,
+    ) -> core::task::Poll<Result<(), hibana::runtime::transport::TransportError>> {
+        let elapsed = super::choreofs_measurement_start().wrapping_sub(start_us);
+        super::record_choreofs_sio_tx_poll(tx.local_role, elapsed);
+        result
     }
 
     #[inline(always)]
@@ -414,149 +562,32 @@ mod rp2040_sio {
     }
 
     #[cfg(all(target_arch = "arm", target_os = "none"))]
-    mod fifo {
-        use core::ptr::{read_volatile, write_volatile};
-
-        const SIO_BASE: usize = 0xd000_0000;
-        const SIO_FIFO_ST: *const u32 = (SIO_BASE + 0x50) as *const u32;
-        const SIO_FIFO_ST_WRITE: *mut u32 = (SIO_BASE + 0x50) as *mut u32;
-        const SIO_FIFO_WR: *mut u32 = (SIO_BASE + 0x54) as *mut u32;
-        const SIO_FIFO_RD: *const u32 = (SIO_BASE + 0x58) as *const u32;
-        const FIFO_VLD: u32 = 1 << 0;
-        const FIFO_RDY: u32 = 1 << 1;
-        const FIFO_WOF: u32 = 1 << 2;
-        const FIFO_ROE: u32 = 1 << 3;
-
-        #[inline(always)]
-        fn ready_to_recv() -> bool {
-            status() & FIFO_VLD != 0
-        }
-
-        #[inline(always)]
-        fn ready_to_send() -> bool {
-            status() & FIFO_RDY != 0
-        }
-
-        #[inline(always)]
-        pub(super) fn status() -> u32 {
-            unsafe { read_volatile(SIO_FIFO_ST) }
-        }
-
-        #[inline(always)]
-        pub(super) fn clear_errors() {
-            unsafe {
-                write_volatile(SIO_FIFO_ST_WRITE, FIFO_WOF | FIFO_ROE);
-            }
-        }
-
-        #[inline(always)]
-        pub(super) fn try_push(word: u32) -> bool {
-            if !ready_to_send() {
-                return false;
-            }
-            unsafe {
-                write_volatile(SIO_FIFO_WR, word);
-            }
-            true
-        }
-
-        #[inline(always)]
-        pub(super) fn try_pop() -> Option<u32> {
-            if ready_to_recv() {
-                Some(unsafe { read_volatile(SIO_FIFO_RD) })
-            } else {
-                None
-            }
-        }
-    }
-
-    #[cfg(not(all(target_arch = "arm", target_os = "none")))]
-    mod fifo {
-        #[inline(always)]
-        pub(super) fn status() -> u32 {
-            0
-        }
-
-        #[inline(always)]
-        pub(super) fn clear_errors() {}
-
-        #[inline(always)]
-        pub(super) fn try_push(word: u32) -> bool {
-            core::hint::black_box(word);
-            false
-        }
-
-        #[inline(always)]
-        pub(super) fn try_pop() -> Option<u32> {
-            None
-        }
-    }
-
-    #[cfg(all(target_arch = "arm", target_os = "none"))]
-    fn try_pop_until_deadline(timeout_ms: u32) -> Option<u32> {
+    fn take_mailbox_until_deadline(
+        core_id: u8,
+        timeout_ms: u32,
+    ) -> Result<Option<DecodedSioFrame>, hibana::runtime::transport::TransportError> {
         super::baker_timer_route_arm(timeout_ms as u64);
         loop {
-            if let Some(word) = fifo::try_pop() {
+            if let Some(frame) = take_mailbox_frame(core_id)? {
                 super::baker_timer_route_finish();
-                return Some(word);
+                return Ok(Some(frame));
             }
             if super::baker_timer_route_ready() {
                 super::baker_timer_route_finish();
-                return None;
+                return Ok(None);
             }
-            unsafe {
-                core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
-            }
+            wait_for_event();
         }
     }
 
     #[cfg(not(all(target_arch = "arm", target_os = "none")))]
-    fn try_pop_until_deadline(timeout_ms: u32) -> Option<u32> {
+    fn take_mailbox_until_deadline(
+        core_id: u8,
+        timeout_ms: u32,
+    ) -> Result<Option<DecodedSioFrame>, hibana::runtime::transport::TransportError> {
+        core::hint::black_box(core_id);
         core::hint::black_box(timeout_ms);
-        fifo::try_pop()
-    }
-
-    fn encode_meta(sender_role: u8, peer_role: u8, frame_label: u8, len: usize) -> u32 {
-        ((frame_label as u32) << 24)
-            | ((peer_role as u32) << 16)
-            | ((sender_role as u32) << 8)
-            | (len as u32)
-    }
-
-    fn decode_meta(word: u32) -> (u8, u8, u8, usize) {
-        let frame_label = (word >> 24) as u8;
-        let peer_role = ((word >> 16) & 0xff) as u8;
-        let sender_role = ((word >> 8) & 0xff) as u8;
-        let len = (word & 0xff) as usize;
-        (sender_role, peer_role, frame_label, len)
-    }
-
-    fn payload_word_count(len: usize) -> usize {
-        (len + 3) / 4
-    }
-
-    fn pack_payload_word(bytes: &[u8], offset: usize) -> u32 {
-        let mut word = 0u32;
-        let mut idx = 0usize;
-        while idx < 4 {
-            let source = offset + idx;
-            if source < bytes.len() {
-                word |= (bytes[source] as u32) << (idx * 8);
-            }
-            idx += 1;
-        }
-        word
-    }
-
-    fn unpack_payload_word(word: u32, bytes: &mut [u8], offset: usize) {
-        let mut idx = 0usize;
-        while idx < 4 {
-            let target = offset + idx;
-            if target < bytes.len() {
-                bytes[target] = ((word >> (idx * 8)) & 0xff) as u8;
-            }
-            idx += 1;
-        }
+        Ok(None)
     }
 
     fn trace_frame(event: u8, local_role: u8, peer_role: u8, len: usize, frame_label: u8) -> u32 {
@@ -571,73 +602,34 @@ mod rp2040_sio {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use core::mem::size_of;
 
         #[test]
-        fn pending_sio_frame_materializes_header_and_payload_words() {
+        fn mailbox_frame_publish_and_take_preserves_header_and_payload() {
             let label = 7;
-            let frame = match PendingTxFrame::new(1, label, 3, b"abcd") {
+            let mut frame = match PendingMailboxFrame::new(1, label, 3, b"abcd") {
                 Ok(frame) => frame,
                 Err(error) => panic!("{error:?}"),
             };
+            clear_outbound_mailbox(0);
 
-            assert_eq!(frame.total_words(), SIO_FRAME_HEADER_WORDS + 1);
-            assert_eq!(frame.word(42, 0, 0), SIO_FRAME_MAGIC);
-            assert_eq!(frame.word(42, 0, 1), 42);
-            assert_eq!(frame.word(42, 0, 2), encode_meta(0, 1, label, 4));
-            assert_eq!(frame.word(42, 0, 3), 3);
-            assert_eq!(frame.word(42, 0, 4), u32::from_le_bytes(*b"abcd"));
-        }
-
-        #[test]
-        fn sio_rx_accumulator_decodes_peer_role_for_same_core_demux() {
-            let label = 9;
-            let frame = match PendingTxFrame::new(1, label, 3, b"abcd") {
-                Ok(frame) => frame,
-                Err(error) => panic!("{error:?}"),
-            };
-            let mut accumulator = SioRxAccumulator::EMPTY;
-
-            assert!(
-                accumulator
-                    .push_word(frame.word(42, 0, 0))
-                    .expect("magic accepted")
-                    .is_none()
-            );
-            assert!(
-                accumulator
-                    .push_word(frame.word(42, 0, 1))
-                    .expect("session accepted")
-                    .is_none()
-            );
-            assert!(accumulator.is_partial());
-
-            assert!(
-                accumulator
-                    .push_word(frame.word(42, 0, 2))
-                    .expect("metadata accepted")
-                    .is_none()
-            );
-            assert!(
-                accumulator
-                    .push_word(frame.word(42, 0, 3))
-                    .expect("lane accepted")
-                    .is_none()
-            );
-            let decoded = match accumulator
-                .push_word(frame.word(42, 0, 4))
-                .expect("payload accepted")
-            {
+            assert!(publish_mailbox_frame(0, 42, 0, &mut frame));
+            let decoded = match take_mailbox_frame(1).expect("mailbox take succeeds") {
                 Some(decoded) => decoded,
-                None => panic!("complete frame must be decoded after payload word"),
+                None => panic!("published mailbox frame must be readable"),
             };
 
             assert_eq!(decoded.session_id, 42);
             assert_eq!(decoded.sender_role, 0);
             assert_eq!(decoded.peer_role, 1);
-            assert_eq!(decoded.frame_label, label);
+            assert_eq!(decoded.frame_label, 7);
             assert_eq!(decoded.lane, 3);
             assert_eq!(&decoded.bytes[..decoded.len], b"abcd");
-            assert!(!accumulator.is_partial());
+            assert!(
+                take_mailbox_frame(1)
+                    .expect("mailbox remains well-formed")
+                    .is_none()
+            );
         }
 
         #[test]
@@ -785,6 +777,98 @@ mod rp2040_sio {
             );
             assert_eq!(payload_bytes, b"sess");
         }
+
+        #[test]
+        fn local_role_registry_maps_same_core_send_to_target_lane() {
+            let transport = SioTransport::new();
+            let label = 11;
+            let _ = take_stashed_frame(1, 0);
+            mark_local_role_attached(1, 0, 7);
+            mark_local_role_attached(1, 1, 3);
+            assert!(role_attached_on_core(0, 1));
+            assert_eq!(role_lane_on_core(0, 1), Some(7));
+            assert_eq!(role_lane_on_core(1, 1), Some(3));
+
+            let mut frame = DecodedSioFrame::EMPTY;
+            frame.session_id = 42;
+            frame.sender_role = 1;
+            frame.peer_role = 0;
+            frame.frame_label = label;
+            frame.lane = role_lane_on_core(0, 1).expect("target role lane must be attached");
+            frame.len = 4;
+            frame.bytes[..4].copy_from_slice(b"core");
+            stash_frame(1, frame).unwrap();
+
+            let waker = core::task::Waker::noop();
+            let mut context = core::task::Context::from_waker(waker);
+            let mut sender_lane = SioRx::new(0, 42, 3, 0, 1);
+            assert!(matches!(
+                <SioTransport as hibana::runtime::transport::Transport>::poll_recv(
+                    &transport,
+                    &mut sender_lane,
+                    &mut context,
+                ),
+                core::task::Poll::Pending
+            ));
+
+            let mut target_lane = SioRx::new(0, 42, 7, 0, 1);
+            let payload_bytes = {
+                let received =
+                    match <SioTransport as hibana::runtime::transport::Transport>::poll_recv(
+                        &transport,
+                        &mut target_lane,
+                        &mut context,
+                    ) {
+                        core::task::Poll::Ready(Ok(received)) => received,
+                        other => panic!("expected target-lane local frame, got {other:?}"),
+                    };
+                received.payload().as_bytes().to_vec()
+            };
+            assert_eq!(
+                target_lane.frame_header().bytes(),
+                [0, 0, 0, 42, 7, 1, 0, label]
+            );
+            assert_eq!(payload_bytes, b"core");
+        }
+
+        #[test]
+        fn baker_sio_stash_is_only_the_baker_role_domain() {
+            assert_eq!(BAKER_SIO_ROLE_SLOTS, 3);
+            assert_eq!(baker_role_stash_index(0), Some(0));
+            assert_eq!(baker_role_stash_index(1), Some(1));
+            assert_eq!(baker_role_stash_index(2), Some(2));
+            assert_eq!(baker_role_stash_index(3), None);
+            assert_eq!(
+                size_of::<[StashedSioFrame; BAKER_SIO_ROLE_SLOTS]>(),
+                size_of::<StashedSioFrame>() * 3
+            );
+        }
+
+        #[test]
+        fn unsupported_stash_role_is_transport_failure() {
+            let mut frame = DecodedSioFrame::EMPTY;
+            frame.peer_role = 3;
+            assert!(matches!(
+                stash_frame(0, frame),
+                Err(hibana::runtime::transport::TransportError::Failed)
+            ));
+        }
+
+        #[test]
+        fn sio_rx_wait_marker_records_pending_boundary() {
+            crate::reset_choreofs_markers();
+            let mut rx = SioRx::new(0, 42, 1, 0, 0);
+
+            begin_rx_wait(&mut rx);
+            finish_rx_wait(&mut rx);
+
+            assert_eq!(
+                super::super::read_marker(core::ptr::addr_of!(
+                    super::super::HIBANA_CHOREOFS_SIO_RX_WAIT_COUNT
+                )),
+                1
+            );
+        }
     }
 
     impl hibana::runtime::transport::Transport for SioTransport {
@@ -803,16 +887,19 @@ mod rp2040_sio {
             let local_role = port.local_role();
             let session_id = port.session_id().raw();
             let lane = port.lane();
-            fifo::clear_errors();
+            let core_id = core_id() as u8;
+            mark_local_role_attached(core_id, local_role, lane);
             (
                 SioTx {
                     local_role,
-                    core_id: core_id() as u8,
+                    core_id,
+                    lane,
                     session_id,
                     sent_frames: 0,
+                    pending_wait_start_us: SIO_RX_WAIT_IDLE,
                     pending: None,
                 },
-                SioRx::new(local_role, session_id, lane, 0, core_id() as u8),
+                SioRx::new(local_role, session_id, lane, 0, core_id),
             )
         }
 
@@ -825,9 +912,14 @@ mod rp2040_sio {
         where
             'a: 'f,
         {
-            core::hint::black_box(core::ptr::addr_of!(*context));
+            let poll_start = super::choreofs_measurement_start();
             let bytes = outgoing.payload().as_bytes();
             let target_role = outgoing.target_role();
+            #[cfg(all(target_arch = "arm", target_os = "none"))]
+            {
+                tx.core_id = core_id() as u8;
+            }
+            mark_local_role_attached(tx.core_id, tx.local_role, tx.lane);
             if target_role == tx.local_role {
                 super::record_choreofs_sio_trace(trace_frame(
                     6,
@@ -836,25 +928,34 @@ mod rp2040_sio {
                     bytes.len(),
                     outgoing.frame_label().raw(),
                 ));
-                tx.sent_frames = tx.sent_frames.saturating_add(1);
-                return core::task::Poll::Ready(Ok(()));
+                return finish_tx_poll(
+                    tx,
+                    poll_start,
+                    core::task::Poll::Ready(Err(
+                        hibana::runtime::transport::TransportError::Failed,
+                    )),
+                );
             }
             if bytes.len() > SIO_FRAME_BYTES {
-                return core::task::Poll::Ready(Err(
-                    hibana::runtime::transport::TransportError::Capacity,
-                ));
+                return finish_tx_poll(
+                    tx,
+                    poll_start,
+                    core::task::Poll::Ready(Err(
+                        hibana::runtime::transport::TransportError::Capacity,
+                    )),
+                );
             }
-            if baker_role_core(target_role) == tx.core_id {
+            if let Some(target_lane) = role_lane_on_core(target_role, tx.core_id) {
                 let mut frame = DecodedSioFrame::EMPTY;
                 frame.session_id = tx.session_id;
                 frame.sender_role = tx.local_role;
                 frame.peer_role = target_role;
                 frame.frame_label = outgoing.frame_label().raw();
-                frame.lane = outgoing.lane();
+                frame.lane = target_lane;
                 frame.len = bytes.len();
                 frame.bytes[..bytes.len()].copy_from_slice(bytes);
                 if let Err(error) = stash_frame(tx.core_id, frame) {
-                    return core::task::Poll::Ready(Err(error));
+                    return finish_tx_poll(tx, poll_start, core::task::Poll::Ready(Err(error)));
                 }
                 super::record_choreofs_sio_trace(trace_frame(
                     14,
@@ -864,8 +965,9 @@ mod rp2040_sio {
                     outgoing.frame_label().raw(),
                 ));
                 context.waker().wake_by_ref();
+                signal_peer();
                 tx.sent_frames = tx.sent_frames.saturating_add(1);
-                return core::task::Poll::Ready(Ok(()));
+                return finish_tx_poll(tx, poll_start, core::task::Poll::Ready(Ok(())));
             }
 
             if tx.pending.is_none() {
@@ -883,61 +985,62 @@ mod rp2040_sio {
                     outgoing.lane() as usize,
                     outgoing.frame_label().raw(),
                 ));
-                let pending = match PendingTxFrame::new(
+                let pending = match PendingMailboxFrame::new(
                     target_role,
                     outgoing.frame_label().raw(),
                     outgoing.lane(),
                     bytes,
                 ) {
                     Ok(pending) => pending,
-                    Err(error) => return core::task::Poll::Ready(Err(error)),
+                    Err(error) => {
+                        return finish_tx_poll(tx, poll_start, core::task::Poll::Ready(Err(error)));
+                    }
                 };
                 tx.pending = Some(pending);
             }
 
-            let mut completed = false;
             while let Some(pending) = tx.pending.as_mut() {
-                if pending.word_index >= pending.total_words() {
-                    completed = true;
-                    break;
+                if !publish_mailbox_frame(tx.core_id, tx.session_id, tx.local_role, pending) {
+                    begin_tx_wait(tx);
+                    signal_peer();
+                    return finish_tx_poll(tx, poll_start, core::task::Poll::Pending);
                 }
-
-                let word = pending.word(tx.session_id, tx.local_role, pending.word_index);
-                if !fifo::try_push(word) {
-                    context.waker().wake_by_ref();
-                    return core::task::Poll::Pending;
-                }
-                pending.word_index += 1;
-            }
-
-            if !completed {
-                return core::task::Poll::Ready(Err(
-                    hibana::runtime::transport::TransportError::Failed,
-                ));
+                finish_tx_wait(tx);
+                signal_peer();
+                break;
             }
 
             let finished = match tx.pending.take() {
                 Some(finished) => finished,
                 None => {
-                    return core::task::Poll::Ready(Err(
-                        hibana::runtime::transport::TransportError::Failed,
-                    ));
+                    return finish_tx_poll(
+                        tx,
+                        poll_start,
+                        core::task::Poll::Ready(Err(
+                            hibana::runtime::transport::TransportError::Failed,
+                        )),
+                    );
                 }
             };
             super::record_choreofs_sio_trace(trace_frame(
                 8,
                 tx.local_role,
                 finished.peer_role,
-                (fifo::status() & 0xff) as usize,
+                finished.len,
                 finished.frame_label,
             ));
             super::record_sio_direction_tx(tx.local_role, finished.peer_role);
             signal_peer();
             tx.sent_frames = tx.sent_frames.saturating_add(1);
-            core::task::Poll::Ready(Ok(()))
+            finish_tx_poll(tx, poll_start, core::task::Poll::Ready(Ok(())))
         }
 
         fn cancel_send<'a>(&self, tx: &'a mut Self::Tx<'a>) {
+            if matches!(tx.pending.as_ref(), Some(pending) if pending.published) {
+                clear_outbound_mailbox(tx.core_id);
+                signal_peer();
+            }
+            clear_tx_wait(tx);
             tx.sent_frames = 0;
             tx.pending = None;
         }
@@ -952,7 +1055,11 @@ mod rp2040_sio {
                 hibana::runtime::transport::TransportError,
             >,
         > {
-            core::hint::black_box(core::ptr::addr_of!(*context));
+            #[cfg(all(target_arch = "arm", target_os = "none"))]
+            {
+                rx.core_id = core_id() as u8;
+            }
+            mark_local_role_attached(rx.core_id, rx.local_role, rx.lane);
             if rx.local_role == 1 {
                 let seen_tx = super::read_core0_to_core1_tx_count();
                 unsafe {
@@ -969,6 +1076,7 @@ mod rp2040_sio {
                 rx.delivered = true;
                 rx.pending_logged = false;
                 rx.pending_polls = 0;
+                clear_rx_wait(rx);
                 super::record_choreofs_sio_trace(trace_frame(
                     3,
                     rx.local_role,
@@ -987,6 +1095,7 @@ mod rp2040_sio {
                 rx.delivered = false;
                 rx.pending_logged = false;
                 rx.pending_polls = 0;
+                clear_rx_wait(rx);
                 rx.len = 0;
                 rx.frame_session_id = rx.session_id;
                 rx.frame_lane = rx.lane;
@@ -1019,9 +1128,14 @@ mod rp2040_sio {
                 ));
             }
             loop {
-                let word = match fifo::try_pop() {
-                    Some(word) => word,
-                    None => {
+                let frame = match take_mailbox_frame(rx.core_id) {
+                    Ok(Some(frame)) => {
+                        finish_rx_wait(rx);
+                        frame
+                    }
+                    Err(error) => return core::task::Poll::Ready(Err(error)),
+                    Ok(None) => {
+                        begin_rx_wait(rx);
                         rx.pending_polls = rx.pending_polls.wrapping_add(1);
                         if rx.local_role == 1 {
                             let seen_tx = super::read_core0_to_core1_tx_count();
@@ -1035,7 +1149,7 @@ mod rp2040_sio {
                             }
                             super::record_choreofs_engine_status(
                                 0x5452_8000
-                                    | ((fifo::status() & 0xff) << 12)
+                                    | (u32::from(rx.core_id) << 12)
                                     | (rx.pending_polls & 0x0fff),
                             );
                         }
@@ -1049,23 +1163,24 @@ mod rp2040_sio {
                             ));
                             rx.pending_logged = true;
                         }
-                        let has_partial_frame =
-                            unsafe { (*rx_accumulator(rx.core_id)).is_partial() };
-                        if has_partial_frame {
-                            context.waker().wake_by_ref();
-                        }
                         if rx.operational_deadline_ticks != 0 {
-                            match try_pop_until_deadline(rx.operational_deadline_ticks) {
-                                Some(word) => {
+                            match take_mailbox_until_deadline(
+                                rx.core_id,
+                                rx.operational_deadline_ticks,
+                            ) {
+                                Ok(Some(frame)) => {
+                                    finish_rx_wait(rx);
                                     rx.pending_logged = false;
                                     rx.pending_polls = 0;
-                                    word
+                                    frame
                                 }
-                                None => {
+                                Ok(None) => {
+                                    clear_rx_wait(rx);
                                     return core::task::Poll::Ready(Err(
                                         hibana::runtime::transport::TransportError::Deadline,
                                     ));
                                 }
+                                Err(error) => return core::task::Poll::Ready(Err(error)),
                             }
                         } else {
                             return core::task::Poll::Pending;
@@ -1086,12 +1201,6 @@ mod rp2040_sio {
                 }
                 rx.pending_logged = false;
                 rx.pending_polls = 0;
-
-                let frame = match unsafe { (&mut *rx_accumulator(rx.core_id)).push_word(word) } {
-                    Ok(Some(frame)) => frame,
-                    Ok(None) => continue,
-                    Err(error) => return core::task::Poll::Ready(Err(error)),
-                };
 
                 if frame.peer_role != rx.local_role {
                     stash_frame(rx.core_id, frame)?;
@@ -1183,7 +1292,6 @@ fn baker_engine_attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
 
 #[cfg(feature = "wasm-engine-core")]
 fn baker_engine_wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
-    core::hint::black_box(ROLE);
     let arena = unsafe { &mut *core::ptr::addr_of_mut!(BAKER_ENGINE_WASI_GUEST_ARENA) };
     arena.lease()
 }
@@ -1379,6 +1487,33 @@ const BAKER_XOSC_HZ: u32 = 12_000_000;
 const BAKER_TIMER_TICK_CYCLES: u32 = BAKER_XOSC_HZ / 1_000_000;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 const BAKER_TIMER_TICKS_PER_MS: u64 = 1_000;
+
+#[cfg(all(feature = "wasm-engine-core", target_arch = "arm", target_os = "none"))]
+unsafe extern "C" {
+    static mut HIBANA_APPKIT_WASI_METRIC_CLOCK: usize;
+    static mut HIBANA_APPKIT_WASI_METRIC_ENABLED: u32;
+    static mut HIBANA_APPKIT_WASI_RESUME_COUNT: u32;
+    static mut HIBANA_APPKIT_WASI_RESUME_LAST_US: u32;
+    static mut HIBANA_APPKIT_WASI_RESUME_TOTAL_US: u32;
+    static mut HIBANA_APPKIT_WASI_RESUME_MAX_US: u32;
+    static mut HIBANA_APPKIT_WASI_REQUEST_SEND_COUNT: u32;
+    static mut HIBANA_APPKIT_WASI_REQUEST_SEND_LAST_US: u32;
+    static mut HIBANA_APPKIT_WASI_REQUEST_SEND_TOTAL_US: u32;
+    static mut HIBANA_APPKIT_WASI_REQUEST_SEND_MAX_US: u32;
+    static mut HIBANA_APPKIT_WASI_COMPLETION_RECV_COUNT: u32;
+    static mut HIBANA_APPKIT_WASI_COMPLETION_RECV_LAST_US: u32;
+    static mut HIBANA_APPKIT_WASI_COMPLETION_RECV_TOTAL_US: u32;
+    static mut HIBANA_APPKIT_WASI_COMPLETION_RECV_MAX_US: u32;
+    static mut HIBANA_APPKIT_WASI_COMPLETE_COUNT: u32;
+    static mut HIBANA_APPKIT_WASI_COMPLETE_LAST_US: u32;
+    static mut HIBANA_APPKIT_WASI_COMPLETE_TOTAL_US: u32;
+    static mut HIBANA_APPKIT_WASI_COMPLETE_MAX_US: u32;
+}
+
+#[cfg(all(feature = "wasm-engine-core", target_arch = "arm", target_os = "none"))]
+extern "C" fn baker_appkit_wasi_metric_clock() -> u32 {
+    unsafe { read_volatile(TIMER_TIMERAWL) }
+}
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 fn nvic_register(base: usize, irq: u8) -> *mut u32 {
@@ -1752,6 +1887,99 @@ static mut HIBANA_CHOREOFS_SIO_ROLE1_POLL_SEEN_CORE0_TX: u32 = 0;
 static mut HIBANA_CHOREOFS_SIO_ROLE1_READY_SEEN_CORE0_TX: u32 = 0;
 #[used]
 #[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_RX_WAIT_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_RX_WAIT_LAST_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_RX_WAIT_TOTAL_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_RX_WAIT_MAX_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE0_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE0_LAST_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE0_TOTAL_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE0_MAX_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE1_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE1_LAST_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE1_TOTAL_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE1_MAX_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_WAIT_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_WAIT_LAST_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_WAIT_TOTAL_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_WAIT_MAX_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE0_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE0_LAST_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE0_TOTAL_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE0_MAX_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE1_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE1_LAST_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE1_TOTAL_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE1_MAX_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_POLL_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_POLL_TOTAL_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_POLL_MAX_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_POLL_ROLE0_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_POLL_ROLE0_TOTAL_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_POLL_ROLE1_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_SIO_TX_POLL_ROLE1_TOTAL_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
 static mut HIBANA_CHOREOFS_PATH_OPEN_COUNT: u32 = 0;
 #[used]
 #[unsafe(no_mangle)]
@@ -1774,6 +2002,84 @@ static mut HIBANA_CHOREOFS_LED_MASK: u32 = 0;
 #[used]
 #[unsafe(no_mangle)]
 static mut HIBANA_CHOREOFS_SEEN_LED_MASK: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_ENGINE_GAP_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_ENGINE_GAP_LAST_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_ENGINE_GAP_TOTAL_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_ENGINE_GAP_MAX_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_DRIVER_IMPORT_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_DRIVER_IMPORT_LAST_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_DRIVER_IMPORT_TOTAL_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_DRIVER_IMPORT_MAX_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_POLL_DELAY_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_POLL_DELAY_LAST_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_POLL_DELAY_TOTAL_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_POLL_DELAY_MAX_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_REQUEST_RECV_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_REQUEST_RECV_LAST_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_REQUEST_RECV_TOTAL_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_REQUEST_RECV_MAX_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_REPLY_SEND_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_REPLY_SEND_LAST_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_REPLY_SEND_TOTAL_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_REPLY_SEND_MAX_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_REPLY_SEND_FD_WRITE_OBJECT_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_REPLY_SEND_FD_WRITE_OBJECT_TOTAL_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_REPLY_SEND_POLL_ONEOFF_COUNT: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_REPLY_SEND_POLL_ONEOFF_TOTAL_US: u32 = 0;
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_CHOREOFS_MEASUREMENTS_FROZEN: u32 = 0;
+static mut HIBANA_CHOREOFS_IMPORT_START_US: u32 = 0;
+static mut HIBANA_CHOREOFS_IMPORT_EXIT_US: u32 = 0;
+static mut HIBANA_CHOREOFS_IMPORT_EXIT_ARMED: u32 = 0;
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 static mut CORE1_STARTED: u32 = 0;
 
@@ -1843,10 +2149,10 @@ pub trait BakerCapsuleFacts: appkit::Capsule<Placement = BakerPlacement> + 'stat
 
     fn run_engine_image();
 
-    fn driver_facts() -> appkit::DriverFacts<'static> {
-        appkit::DriverFacts::new(
-            appkit::ChoreoFsFacts::new(&[]),
-            appkit::LedgerFacts::new(&[]),
+    fn choreofs() -> choreofs::ChoreoFs<'static> {
+        choreofs::ChoreoFs::new(
+            choreofs::ChoreoFsFacts::new(&[]),
+            choreofs::LedgerFacts::new(&[]),
         )
     }
 }
@@ -1949,18 +2255,19 @@ impl<C> appkit::Placement<C> for BakerPlacement
 where
     C: appkit::Capsule<Placement = BakerPlacement>,
 {
-    fn role_kind(role: u8) -> appkit::RoleKind {
-        match role {
+    fn role_kind<const ROLE: u8>() -> appkit::RoleKind {
+        match ROLE {
             1 => appkit::RoleKind::Engine,
             0 => appkit::RoleKind::Driver,
             2 => appkit::RoleKind::Boundary,
-            other => panic!("baker placement has no role {other}"),
+            _ => panic!("baker placement has no role {ROLE}"),
         }
     }
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
 pub fn baker_poll_delay(timeout_ms: u64) {
+    let start = unsafe { read_volatile(TIMER_TIMERAWL) };
     baker_timer_route_arm(timeout_ms);
     while !baker_timer_route_ready() {
         unsafe {
@@ -1968,6 +2275,8 @@ pub fn baker_poll_delay(timeout_ms: u64) {
         }
     }
     baker_timer_route_finish();
+    let elapsed = unsafe { read_volatile(TIMER_TIMERAWL).wrapping_sub(start) };
+    record_choreofs_poll_delay(elapsed);
 }
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
@@ -2892,6 +3201,92 @@ fn increment_marker(slot: *mut u32) -> u32 {
     next
 }
 
+fn record_marker_duration(
+    count: *mut u32,
+    last: *mut u32,
+    total: *mut u32,
+    max: *mut u32,
+    us: u32,
+) {
+    if choreofs_measurements_frozen() {
+        return;
+    }
+    increment_marker(count);
+    write_marker(last, us);
+    write_marker(total, read_marker(total).saturating_add(us));
+    if us > read_marker(max) {
+        write_marker(max, us);
+    }
+}
+
+#[cfg(all(feature = "wasm-engine-core", target_arch = "arm", target_os = "none"))]
+fn install_appkit_wasi_metric_clock() {
+    unsafe {
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_METRIC_CLOCK),
+            baker_appkit_wasi_metric_clock as *const () as usize,
+        );
+    }
+}
+
+#[cfg(not(all(feature = "wasm-engine-core", target_arch = "arm", target_os = "none")))]
+fn install_appkit_wasi_metric_clock() {}
+
+#[cfg(all(feature = "wasm-engine-core", target_arch = "arm", target_os = "none"))]
+fn set_appkit_wasi_metrics_enabled(enabled: bool) {
+    let value = if enabled { 1 } else { 0 };
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_METRIC_ENABLED),
+        value,
+    );
+}
+
+#[cfg(not(all(feature = "wasm-engine-core", target_arch = "arm", target_os = "none")))]
+fn set_appkit_wasi_metrics_enabled(enabled: bool) {
+    core::hint::black_box(enabled);
+}
+
+#[cfg(all(feature = "wasm-engine-core", target_arch = "arm", target_os = "none"))]
+fn reset_appkit_wasi_metric(count: *mut u32, last: *mut u32, total: *mut u32, max: *mut u32) {
+    write_marker(count, 0);
+    write_marker(last, 0);
+    write_marker(total, 0);
+    write_marker(max, 0);
+}
+
+#[cfg(all(feature = "wasm-engine-core", target_arch = "arm", target_os = "none"))]
+fn reset_appkit_wasi_metrics() {
+    set_appkit_wasi_metrics_enabled(false);
+    reset_appkit_wasi_metric(
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_RESUME_COUNT),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_RESUME_LAST_US),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_RESUME_TOTAL_US),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_RESUME_MAX_US),
+    );
+    reset_appkit_wasi_metric(
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_REQUEST_SEND_COUNT),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_REQUEST_SEND_LAST_US),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_REQUEST_SEND_TOTAL_US),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_REQUEST_SEND_MAX_US),
+    );
+    reset_appkit_wasi_metric(
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_COMPLETION_RECV_COUNT),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_COMPLETION_RECV_LAST_US),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_COMPLETION_RECV_TOTAL_US),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_COMPLETION_RECV_MAX_US),
+    );
+    reset_appkit_wasi_metric(
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_COMPLETE_COUNT),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_COMPLETE_LAST_US),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_COMPLETE_TOTAL_US),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_COMPLETE_MAX_US),
+    );
+    set_appkit_wasi_metrics_enabled(true);
+}
+
+#[cfg(not(all(feature = "wasm-engine-core", target_arch = "arm", target_os = "none")))]
+fn reset_appkit_wasi_metrics() {}
+
 pub fn reset_choreofs_markers() {
     write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_STATUS), 0);
     write_marker(
@@ -2935,6 +3330,130 @@ pub fn reset_choreofs_markers() {
         core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_ROLE1_READY_SEEN_CORE0_TX),
         0,
     );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_LAST_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_TOTAL_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_MAX_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE0_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE0_LAST_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE0_TOTAL_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE0_MAX_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE1_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE1_LAST_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE1_TOTAL_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE1_MAX_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_LAST_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_TOTAL_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_MAX_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE0_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE0_LAST_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE0_TOTAL_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE0_MAX_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE1_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE1_LAST_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE1_TOTAL_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE1_MAX_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_POLL_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_POLL_TOTAL_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_POLL_MAX_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_POLL_ROLE0_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_POLL_ROLE0_TOTAL_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_POLL_ROLE1_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_POLL_ROLE1_TOTAL_US),
+        0,
+    );
     let mut trace_index = 0usize;
     while trace_index < 16 {
         unsafe {
@@ -2963,6 +3482,104 @@ pub fn reset_choreofs_markers() {
     write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_OBJECT), 0);
     write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LED_MASK), 0);
     write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SEEN_LED_MASK), 0);
+    write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_GAP_COUNT), 0);
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_GAP_LAST_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_GAP_TOTAL_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_GAP_MAX_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_DRIVER_IMPORT_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_DRIVER_IMPORT_LAST_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_DRIVER_IMPORT_TOTAL_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_DRIVER_IMPORT_MAX_US),
+        0,
+    );
+    write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_POLL_DELAY_COUNT), 0);
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_POLL_DELAY_LAST_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_POLL_DELAY_TOTAL_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_POLL_DELAY_MAX_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REQUEST_RECV_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REQUEST_RECV_LAST_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REQUEST_RECV_TOTAL_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REQUEST_RECV_MAX_US),
+        0,
+    );
+    write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REPLY_SEND_COUNT), 0);
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REPLY_SEND_LAST_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REPLY_SEND_TOTAL_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REPLY_SEND_MAX_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REPLY_SEND_FD_WRITE_OBJECT_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REPLY_SEND_FD_WRITE_OBJECT_TOTAL_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REPLY_SEND_POLL_ONEOFF_COUNT),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REPLY_SEND_POLL_ONEOFF_TOTAL_US),
+        0,
+    );
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_MEASUREMENTS_FROZEN),
+        0,
+    );
+    write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_IMPORT_START_US), 0);
+    write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_IMPORT_EXIT_US), 0);
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_IMPORT_EXIT_ARMED),
+        0,
+    );
+    reset_appkit_wasi_metrics();
 }
 
 pub fn record_choreofs_engine_status(status: u32) {
@@ -2983,7 +3600,108 @@ pub fn record_choreofs_driver_trace(trace: u32) {
     write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_DRIVER_TRACE), trace);
 }
 
-pub fn record_choreofs_path_open(object: appkit::ObjectId) {
+fn record_choreofs_sio_rx_wait(local_role: u8, us: u32) {
+    record_marker_duration(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_COUNT),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_LAST_US),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_TOTAL_US),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_MAX_US),
+        us,
+    );
+    match local_role {
+        0 => record_marker_duration(
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE0_COUNT),
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE0_LAST_US),
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE0_TOTAL_US),
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE0_MAX_US),
+            us,
+        ),
+        1 => record_marker_duration(
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE1_COUNT),
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE1_LAST_US),
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE1_TOTAL_US),
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE1_MAX_US),
+            us,
+        ),
+        2 => {}
+        other => panic!("baker SIO rx wait marker has no role slot for role {other}"),
+    }
+}
+
+fn record_choreofs_sio_tx_wait(local_role: u8, us: u32) {
+    record_marker_duration(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_COUNT),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_LAST_US),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_TOTAL_US),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_MAX_US),
+        us,
+    );
+    match local_role {
+        0 => record_marker_duration(
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE0_COUNT),
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE0_LAST_US),
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE0_TOTAL_US),
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE0_MAX_US),
+            us,
+        ),
+        1 => record_marker_duration(
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE1_COUNT),
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE1_LAST_US),
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE1_TOTAL_US),
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE1_MAX_US),
+            us,
+        ),
+        2 => {}
+        other => panic!("baker SIO tx wait marker has no role slot for role {other}"),
+    }
+}
+
+fn record_choreofs_sio_tx_poll(local_role: u8, us: u32) {
+    if choreofs_measurements_frozen() {
+        return;
+    }
+    increment_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_POLL_COUNT));
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_POLL_TOTAL_US),
+        read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_SIO_TX_POLL_TOTAL_US)).saturating_add(us),
+    );
+    if us > read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_SIO_TX_POLL_MAX_US)) {
+        write_marker(
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_POLL_MAX_US),
+            us,
+        );
+    }
+    match local_role {
+        0 => {
+            increment_marker(core::ptr::addr_of_mut!(
+                HIBANA_CHOREOFS_SIO_TX_POLL_ROLE0_COUNT
+            ));
+            write_marker(
+                core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_POLL_ROLE0_TOTAL_US),
+                read_marker(core::ptr::addr_of!(
+                    HIBANA_CHOREOFS_SIO_TX_POLL_ROLE0_TOTAL_US
+                ))
+                .saturating_add(us),
+            );
+        }
+        1 => {
+            increment_marker(core::ptr::addr_of_mut!(
+                HIBANA_CHOREOFS_SIO_TX_POLL_ROLE1_COUNT
+            ));
+            write_marker(
+                core::ptr::addr_of_mut!(HIBANA_CHOREOFS_SIO_TX_POLL_ROLE1_TOTAL_US),
+                read_marker(core::ptr::addr_of!(
+                    HIBANA_CHOREOFS_SIO_TX_POLL_ROLE1_TOTAL_US
+                ))
+                .saturating_add(us),
+            );
+        }
+        2 => {}
+        other => panic!("baker SIO tx poll marker has no role slot for role {other}"),
+    }
+}
+
+pub fn record_choreofs_path_open(object: choreofs::ObjectId) {
     increment_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_PATH_OPEN_COUNT));
     write_marker(
         core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_OBJECT),
@@ -2991,7 +3709,7 @@ pub fn record_choreofs_path_open(object: appkit::ObjectId) {
     );
 }
 
-pub fn record_choreofs_fd_write(object: appkit::ObjectId) {
+pub fn record_choreofs_fd_write(object: choreofs::ObjectId) {
     increment_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_FD_WRITE_COUNT));
     write_marker(
         core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_OBJECT),
@@ -3012,6 +3730,167 @@ pub fn record_choreofs_poll_timeout(timeout_ticks: u64) {
         core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_POLL_TICKS_HI),
         (timeout_ticks >> 32) as u32,
     );
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn record_choreofs_driver_import_enter() {
+    if choreofs_measurements_frozen() {
+        return;
+    }
+    let now = unsafe { read_volatile(TIMER_TIMERAWL) };
+    if read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_IMPORT_EXIT_ARMED)) != 0 {
+        let elapsed = now.wrapping_sub(read_marker(core::ptr::addr_of!(
+            HIBANA_CHOREOFS_IMPORT_EXIT_US
+        )));
+        record_marker_duration(
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_GAP_COUNT),
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_GAP_LAST_US),
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_GAP_TOTAL_US),
+            core::ptr::addr_of_mut!(HIBANA_CHOREOFS_ENGINE_GAP_MAX_US),
+            elapsed,
+        );
+    }
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_IMPORT_START_US),
+        now,
+    );
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub fn record_choreofs_driver_import_enter() {}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn record_choreofs_driver_import_exit() {
+    if choreofs_measurements_frozen() {
+        return;
+    }
+    let now = unsafe { read_volatile(TIMER_TIMERAWL) };
+    let elapsed = now.wrapping_sub(read_marker(core::ptr::addr_of!(
+        HIBANA_CHOREOFS_IMPORT_START_US
+    )));
+    record_marker_duration(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_DRIVER_IMPORT_COUNT),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_DRIVER_IMPORT_LAST_US),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_DRIVER_IMPORT_TOTAL_US),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_DRIVER_IMPORT_MAX_US),
+        elapsed,
+    );
+    write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_IMPORT_EXIT_US), now);
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_IMPORT_EXIT_ARMED),
+        1,
+    );
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub fn record_choreofs_driver_import_exit() {}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn choreofs_measurement_start() -> u32 {
+    unsafe { read_volatile(TIMER_TIMERAWL) }
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub fn choreofs_measurement_start() -> u32 {
+    0
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+fn record_choreofs_poll_delay(us: u32) {
+    if choreofs_measurements_frozen() {
+        return;
+    }
+    record_marker_duration(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_POLL_DELAY_COUNT),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_POLL_DELAY_LAST_US),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_POLL_DELAY_TOTAL_US),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_POLL_DELAY_MAX_US),
+        us,
+    );
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn record_choreofs_request_recv_elapsed(start_us: u32) {
+    if choreofs_measurements_frozen() {
+        return;
+    }
+    let elapsed = choreofs_measurement_start().wrapping_sub(start_us);
+    record_marker_duration(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REQUEST_RECV_COUNT),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REQUEST_RECV_LAST_US),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REQUEST_RECV_TOTAL_US),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REQUEST_RECV_MAX_US),
+        elapsed,
+    );
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub fn record_choreofs_request_recv_elapsed(start_us: u32) {
+    core::hint::black_box(start_us);
+}
+
+fn record_choreofs_reply_send_hot_label(label: u8, elapsed: u32) {
+    match label {
+        protocol::LABEL_WASI_FD_WRITE_OBJECT => {
+            increment_marker(core::ptr::addr_of_mut!(
+                HIBANA_CHOREOFS_REPLY_SEND_FD_WRITE_OBJECT_COUNT
+            ));
+            write_marker(
+                core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REPLY_SEND_FD_WRITE_OBJECT_TOTAL_US),
+                read_marker(core::ptr::addr_of!(
+                    HIBANA_CHOREOFS_REPLY_SEND_FD_WRITE_OBJECT_TOTAL_US
+                ))
+                .saturating_add(elapsed),
+            );
+        }
+        protocol::LABEL_WASI_POLL_ONEOFF => {
+            increment_marker(core::ptr::addr_of_mut!(
+                HIBANA_CHOREOFS_REPLY_SEND_POLL_ONEOFF_COUNT
+            ));
+            write_marker(
+                core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REPLY_SEND_POLL_ONEOFF_TOTAL_US),
+                read_marker(core::ptr::addr_of!(
+                    HIBANA_CHOREOFS_REPLY_SEND_POLL_ONEOFF_TOTAL_US
+                ))
+                .saturating_add(elapsed),
+            );
+        }
+        _ => {}
+    }
+}
+
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub fn record_choreofs_reply_send_elapsed(start_us: u32, label: u8) {
+    if choreofs_measurements_frozen() {
+        return;
+    }
+    let elapsed = choreofs_measurement_start().wrapping_sub(start_us);
+    record_choreofs_reply_send_hot_label(label, elapsed);
+    record_marker_duration(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REPLY_SEND_COUNT),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REPLY_SEND_LAST_US),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REPLY_SEND_TOTAL_US),
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_REPLY_SEND_MAX_US),
+        elapsed,
+    );
+}
+
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub fn record_choreofs_reply_send_elapsed(start_us: u32, label: u8) {
+    core::hint::black_box(start_us);
+    core::hint::black_box(label);
+}
+
+fn choreofs_measurements_frozen() -> bool {
+    read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_MEASUREMENTS_FROZEN)) != 0
+}
+
+pub fn freeze_choreofs_measurements() {
+    write_marker(
+        core::ptr::addr_of_mut!(HIBANA_CHOREOFS_MEASUREMENTS_FROZEN),
+        1,
+    );
+    set_appkit_wasi_metrics_enabled(false);
 }
 
 pub fn record_choreofs_led_mask(mask: u32, high: bool) {
@@ -3038,6 +3917,7 @@ pub fn mark_success(result: u32) {
 pub fn assert_choreofs_markers(
     expected_path_opens: u32,
     expected_writes: u32,
+    expected_polls: u32,
     expected_final_led_mask: u32,
     expected_seen_led_mask: u32,
 ) {
@@ -3048,7 +3928,7 @@ pub fn assert_choreofs_markers(
     let seen_led_mask = read_marker(core::ptr::addr_of!(HIBANA_CHOREOFS_SEEN_LED_MASK));
     assert!(path_opens == expected_path_opens);
     assert!(writes == expected_writes);
-    assert!(polls == expected_writes);
+    assert!(polls == expected_polls);
     assert!(led_mask == expected_final_led_mask);
     assert!(seen_led_mask == expected_seen_led_mask);
 }
@@ -3138,30 +4018,23 @@ pub fn run_engine_no_wasi<C>()
 where
     C: BakerCapsuleFacts + 'static,
 {
-    check_image::<EngineImage, C>(1);
-    appkit::run::<EngineImage, C>(appkit::NoWasi);
+    appkit::run::<EngineImage<C>>(appkit::NoWasi);
 }
 
+#[cfg(feature = "wasm-engine-core")]
 pub fn run_engine_wasi<'a, C>(image: appkit::WasiImage<'a>)
 where
     C: BakerCapsuleFacts + 'static,
 {
-    check_image::<EngineImage, C>(1);
-    appkit::run::<EngineImage, C>(image);
+    appkit::run::<EngineImage<C>>(image);
 }
 
-fn check_image<I, C>(required_role: u8)
-where
-    C: BakerCapsuleFacts + 'static,
-    I: appkit::LogicalImage<C>,
-{
-    assert!(I::REQUESTED_ROLES.contains(required_role));
-}
-
-impl<C> appkit::LogicalImage<C> for DriverImage
+impl<C> appkit::LogicalImage for DriverImage<C>
 where
     C: BakerCapsuleFacts + 'static,
 {
+    type Capsule = C;
+
     type Carrier<'a>
         = BakerSioTransport<C>
     where
@@ -3169,7 +4042,7 @@ where
     const REQUESTED_ROLES: appkit::RoleSet = C::DRIVER_REQUESTED_ROLES;
 
     fn init() -> Self {
-        Self
+        Self(PhantomData)
     }
 
     fn safe_state(&mut self) {
@@ -3187,16 +4060,14 @@ where
     fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
         baker_driver_attach_storage()
     }
-
-    fn driver_facts() -> appkit::DriverFacts<'static> {
-        C::driver_facts()
-    }
 }
 
-impl<C> appkit::LogicalImage<C> for EngineImage
+impl<C> appkit::LogicalImage for EngineImage<C>
 where
     C: BakerCapsuleFacts + 'static,
 {
+    type Capsule = C;
+
     type Carrier<'a>
         = BakerSioTransport<C>
     where
@@ -3204,7 +4075,7 @@ where
     const REQUESTED_ROLES: appkit::RoleSet = C::ENGINE_REQUESTED_ROLES;
 
     fn init() -> Self {
-        Self
+        Self(PhantomData)
     }
 
     fn safe_state(&mut self) {
@@ -3225,7 +4096,7 @@ where
 }
 
 #[cfg(feature = "wasm-engine-core")]
-impl<C> appkit::WasiGuestImage<C> for EngineImage
+impl<C> appkit::WasiGuestImage for EngineImage<C>
 where
     C: BakerCapsuleFacts + 'static,
 {
@@ -3239,9 +4110,9 @@ where
     C: BakerCapsuleFacts + 'static,
 {
     mark_stage(STAGE_RUNTIME_BEGIN);
+    install_appkit_wasi_metric_clock();
     if rp2040_sio::core_id() == 0 {
-        check_image::<DriverImage, C>(0);
-        appkit::run::<DriverImage, C>(appkit::NoWasi);
+        appkit::run::<DriverImage<C>>(appkit::NoWasi);
     } else {
         C::run_engine_image();
     }

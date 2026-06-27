@@ -5,13 +5,14 @@ use core::{
     arch::{asm, global_asm},
     ptr::{read_volatile, write_volatile},
 };
-use core::{assert, assert_eq, mem::MaybeUninit};
+use core::{assert, assert_eq, marker::PhantomData, mem::MaybeUninit};
 use hibana_pico::appkit;
+use hibana_wasip1_runtime::choreofs;
 
 pub struct Rp2wPlacement;
 
-struct DriverImage;
-struct EngineImage;
+struct DriverImage<C>(PhantomData<fn() -> C>);
+struct EngineImage<C>(PhantomData<fn() -> C>);
 
 mod rp2350_sio {
     const SIO_FRAME_MAGIC: u32 = 0x4849_5301;
@@ -1183,7 +1184,6 @@ fn rp2w_engine_attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
 
 #[cfg(feature = "wasm-engine-core")]
 fn rp2w_engine_wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
-    core::hint::black_box(ROLE);
     let arena = unsafe { &mut *core::ptr::addr_of_mut!(RP2W_ENGINE_WASI_GUEST_ARENA) };
     arena.lease()
 }
@@ -1998,10 +1998,10 @@ pub trait Rp2wCapsuleFacts: appkit::Capsule<Placement = Rp2wPlacement> + 'static
 
     fn run_engine_image();
 
-    fn driver_facts() -> appkit::DriverFacts<'static> {
-        appkit::DriverFacts::new(
-            appkit::ChoreoFsFacts::new(&[]),
-            appkit::LedgerFacts::new(&[]),
+    fn choreofs() -> choreofs::ChoreoFs<'static> {
+        choreofs::ChoreoFs::new(
+            choreofs::ChoreoFsFacts::new(&[]),
+            choreofs::LedgerFacts::new(&[]),
         )
     }
 }
@@ -2104,12 +2104,12 @@ impl<C> appkit::Placement<C> for Rp2wPlacement
 where
     C: appkit::Capsule<Placement = Rp2wPlacement>,
 {
-    fn role_kind(role: u8) -> appkit::RoleKind {
-        match role {
+    fn role_kind<const ROLE: u8>() -> appkit::RoleKind {
+        match ROLE {
             1 => appkit::RoleKind::Engine,
             0 => appkit::RoleKind::Driver,
             2 => appkit::RoleKind::Boundary,
-            other => panic!("rp2w placement has no role {other}"),
+            _ => panic!("rp2w placement has no role {ROLE}"),
         }
     }
 }
@@ -3435,7 +3435,7 @@ pub fn record_choreofs_driver_trace(trace: u32) {
     write_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_DRIVER_TRACE), trace);
 }
 
-pub fn record_choreofs_path_open(object: appkit::ObjectId) {
+pub fn record_choreofs_path_open(object: choreofs::ObjectId) {
     increment_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_PATH_OPEN_COUNT));
     write_marker(
         core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_OBJECT),
@@ -3443,7 +3443,7 @@ pub fn record_choreofs_path_open(object: appkit::ObjectId) {
     );
 }
 
-pub fn record_choreofs_fd_write(object: appkit::ObjectId) {
+pub fn record_choreofs_fd_write(object: choreofs::ObjectId) {
     increment_marker(core::ptr::addr_of_mut!(HIBANA_CHOREOFS_FD_WRITE_COUNT));
     write_marker(
         core::ptr::addr_of_mut!(HIBANA_CHOREOFS_LAST_OBJECT),
@@ -4062,30 +4062,23 @@ pub fn run_engine_no_wasi<C>()
 where
     C: Rp2wCapsuleFacts + 'static,
 {
-    check_image::<EngineImage, C>(1);
-    appkit::run::<EngineImage, C>(appkit::NoWasi);
+    appkit::run::<EngineImage<C>>(appkit::NoWasi);
 }
 
+#[cfg(feature = "wasm-engine-core")]
 pub fn run_engine_wasi<'a, C>(image: appkit::WasiImage<'a>)
 where
     C: Rp2wCapsuleFacts + 'static,
 {
-    check_image::<EngineImage, C>(1);
-    appkit::run::<EngineImage, C>(image);
+    appkit::run::<EngineImage<C>>(image);
 }
 
-fn check_image<I, C>(required_role: u8)
-where
-    C: Rp2wCapsuleFacts + 'static,
-    I: appkit::LogicalImage<C>,
-{
-    assert!(I::REQUESTED_ROLES.contains(required_role));
-}
-
-impl<C> appkit::LogicalImage<C> for DriverImage
+impl<C> appkit::LogicalImage for DriverImage<C>
 where
     C: Rp2wCapsuleFacts + 'static,
 {
+    type Capsule = C;
+
     type Carrier<'a>
         = Rp2wSioTransport<C>
     where
@@ -4093,7 +4086,7 @@ where
     const REQUESTED_ROLES: appkit::RoleSet = C::DRIVER_REQUESTED_ROLES;
 
     fn init() -> Self {
-        Self
+        Self(PhantomData)
     }
 
     fn safe_state(&mut self) {
@@ -4111,16 +4104,14 @@ where
     fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
         rp2w_driver_attach_storage()
     }
-
-    fn driver_facts() -> appkit::DriverFacts<'static> {
-        C::driver_facts()
-    }
 }
 
-impl<C> appkit::LogicalImage<C> for EngineImage
+impl<C> appkit::LogicalImage for EngineImage<C>
 where
     C: Rp2wCapsuleFacts + 'static,
 {
+    type Capsule = C;
+
     type Carrier<'a>
         = Rp2wSioTransport<C>
     where
@@ -4128,7 +4119,7 @@ where
     const REQUESTED_ROLES: appkit::RoleSet = C::ENGINE_REQUESTED_ROLES;
 
     fn init() -> Self {
-        Self
+        Self(PhantomData)
     }
 
     fn safe_state(&mut self) {
@@ -4149,7 +4140,7 @@ where
 }
 
 #[cfg(feature = "wasm-engine-core")]
-impl<C> appkit::WasiGuestImage<C> for EngineImage
+impl<C> appkit::WasiGuestImage for EngineImage<C>
 where
     C: Rp2wCapsuleFacts + 'static,
 {
@@ -4164,8 +4155,7 @@ where
 {
     mark_stage(STAGE_RUNTIME_BEGIN);
     if rp2350_sio::core_id() == 0 {
-        check_image::<DriverImage, C>(0);
-        appkit::run::<DriverImage, C>(appkit::NoWasi);
+        appkit::run::<DriverImage<C>>(appkit::NoWasi);
     } else {
         C::run_engine_image();
     }

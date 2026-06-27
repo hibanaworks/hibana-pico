@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-hibana = { version = "0.9.0", default-features = false }
+hibana = { version = "0.9.4", default-features = false }
 hibana-epf = { path = "../../../hibana-epf", default-features = false }
 hibana-pico = { path = "../.." }
 hibana-wasip1-runtime = { path = "../../../hibana-wasip1-runtime", default-features = false }
@@ -22,10 +22,12 @@ path = "src/bin/traffic.rs"
 [[bin]]
 name = "baker-choreofs-traffic"
 path = "src/bin/choreofs_traffic.rs"
+required-features = ["wasm-engine-core"]
 
 [[bin]]
 name = "baker-choreofs-traffic-loop"
 path = "src/bin/choreofs_traffic_loop.rs"
+required-features = ["wasm-engine-core"]
 
 [[bin]]
 name = "baker-fail-safe"
@@ -66,6 +68,7 @@ path = "src/bin/timer_route.rs"
 [[bin]]
 name = "baker-session-mismatch"
 path = "src/bin/session_mismatch.rs"
+required-features = ["wasm-engine-core"]
 
 [[bin]]
 name = "baker-capacity-fault"

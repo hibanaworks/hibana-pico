@@ -345,7 +345,7 @@ impl hibana::runtime::transport::Transport for ExampleCarrier {
 
 impl appkit::Capsule for Control {
     type Placement = ControlPlacement;
-    type Local = ControlLocal;
+    type Localside = ControlLocal;
 
     fn choreography() -> impl Projectable {
         g::seq(
@@ -359,12 +359,12 @@ impl appkit::Capsule for Control {
 }
 
 impl appkit::Placement<Control> for ControlPlacement {
-    fn role_kind(role: u8) -> appkit::RoleKind {
-        match role {
+    fn role_kind<const ROLE: u8>() -> appkit::RoleKind {
+        match ROLE {
             0 => appkit::RoleKind::Engine,
             1 => appkit::RoleKind::Driver,
             2 => appkit::RoleKind::Boundary,
-            other => panic!("heterogeneous split placement has no role {other}"),
+            _ => panic!("heterogeneous split placement has no role {ROLE}"),
         }
     }
 }
@@ -372,61 +372,58 @@ impl appkit::Placement<Control> for ControlPlacement {
 impl appkit::Localside<Control> for ControlLocal {
     type Error = core::convert::Infallible;
 
-    fn engine<'endpoint, 'guest, const ROLE: u8>(
-        mut ctx: appkit::EngineCtx<'endpoint, 'guest, Control, ROLE>,
+    fn engine<'endpoint, const ROLE: u8>(
+        mut ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             assert_eq!(ROLE, 0);
-            ctx.endpoint()
-                .send::<g::Msg<31, ()>>(&())
+            ctx.send::<g::Msg<31, ()>>(&())
                 .await
                 .expect("role0 sends through example carrier");
             write_counter(core::ptr::addr_of_mut!(ROLE0_PHASE), 1);
-            ctx.pending().await
+            appkit::pending(ctx).await
         }
     }
 
-    fn driver<'a, const ROLE: u8>(
-        mut ctx: appkit::DriverCtx<'a, Control, ROLE>,
+    fn driver<'endpoint, const ROLE: u8>(
+        mut ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             assert_eq!(ROLE, 1);
-            ctx.endpoint()
-                .recv::<g::Msg<31, ()>>()
+            ctx.recv::<g::Msg<31, ()>>()
                 .await
                 .expect("role1 receives through example carrier");
-            ctx.endpoint()
-                .send::<g::Msg<32, ()>>(&())
+            ctx.send::<g::Msg<32, ()>>(&())
                 .await
                 .expect("role1 sends through example carrier");
-            ctx.pending().await
+            appkit::pending(ctx).await
         }
     }
 
-    fn boundary<'a, const ROLE: u8>(
-        mut ctx: appkit::BoundaryCtx<'a, Control, ROLE>,
+    fn boundary<'endpoint, const ROLE: u8>(
+        mut ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             assert_eq!(ROLE, 2);
-            ctx.endpoint()
-                .recv::<g::Msg<32, ()>>()
+            ctx.recv::<g::Msg<32, ()>>()
                 .await
                 .expect("role2 receives through example carrier");
-            ctx.endpoint()
-                .send::<g::Msg<33, ()>>(&())
+            ctx.send::<g::Msg<33, ()>>(&())
                 .await
                 .expect("role2 sends through example carrier");
-            ctx.pending().await
+            appkit::pending(ctx).await
         }
     }
 }
 
-impl appkit::LogicalImage<Control> for appkit::Local<image::LinuxControl> {
+impl appkit::LogicalImage for image::LinuxControl {
+    type Capsule = Control;
+
     type Carrier<'a> = ExampleCarrier;
     const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(0);
 
     fn init() -> Self {
-        Self::new()
+        Self
     }
 
     fn safe_state(&mut self) {}
@@ -441,12 +438,14 @@ impl appkit::LogicalImage<Control> for appkit::Local<image::LinuxControl> {
     }
 }
 
-impl appkit::LogicalImage<Control> for appkit::Local<image::M33Realtime> {
+impl appkit::LogicalImage for image::M33Realtime {
+    type Capsule = Control;
+
     type Carrier<'a> = ExampleCarrier;
     const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(1);
 
     fn init() -> Self {
-        Self::new()
+        Self
     }
 
     fn safe_state(&mut self) {}
@@ -461,12 +460,14 @@ impl appkit::LogicalImage<Control> for appkit::Local<image::M33Realtime> {
     }
 }
 
-impl appkit::LogicalImage<Control> for appkit::Local<image::Rp2040Io> {
+impl appkit::LogicalImage for image::Rp2040Io {
+    type Capsule = Control;
+
     type Carrier<'a> = ExampleCarrier;
     const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(2);
 
     fn init() -> Self {
-        Self::new()
+        Self
     }
 
     fn safe_state(&mut self) {}
@@ -498,15 +499,15 @@ fn reset_live_carrier_evidence() {
 
 pub fn assert_projected_role_progress() {
     reset_live_carrier_evidence();
-    appkit::run::<appkit::Local<image::LinuxControl>, Control>(appkit::NoWasi);
+    appkit::run::<image::LinuxControl>(appkit::NoWasi);
     assert_eq!(read_counter(core::ptr::addr_of!(ROLE0_PHASE)), 1);
     assert_eq!(read_counter(core::ptr::addr_of!(ROLE0_TO_ROLE1_SENT)), 1);
     assert_eq!(read_counter(core::ptr::addr_of!(ROLE0_TO_ROLE1_RECV)), 0);
-    appkit::run::<appkit::Local<image::M33Realtime>, Control>(appkit::NoWasi);
+    appkit::run::<image::M33Realtime>(appkit::NoWasi);
     assert_eq!(read_counter(core::ptr::addr_of!(ROLE0_TO_ROLE1_RECV)), 1);
     assert_eq!(read_counter(core::ptr::addr_of!(ROLE1_TO_ROLE2_SENT)), 1);
     assert_eq!(read_counter(core::ptr::addr_of!(ROLE1_TO_ROLE2_RECV)), 0);
-    appkit::run::<appkit::Local<image::Rp2040Io>, Control>(appkit::NoWasi);
+    appkit::run::<image::Rp2040Io>(appkit::NoWasi);
     assert_eq!(read_counter(core::ptr::addr_of!(ROLE1_TO_ROLE2_RECV)), 1);
     assert_eq!(read_counter(core::ptr::addr_of!(ROLE2_TO_ROLE0_SENT)), 1);
     assert_eq!(read_counter(core::ptr::addr_of!(ROLE2_TO_ROLE0_RECV)), 0);

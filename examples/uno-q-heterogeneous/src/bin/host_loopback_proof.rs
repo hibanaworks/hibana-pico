@@ -2,12 +2,12 @@ use hibana_pico::appkit;
 use uno_q_heterogeneous::{UnoQCapsule, image};
 
 fn main() {
-    type Proof = appkit::Local<image::HostLoopbackProof>;
+    type Proof = image::HostLoopbackProof;
 
-    appkit::run::<Proof, UnoQCapsule>(image::HostLoopbackProof::wasi_image());
+    appkit::run::<Proof>(image::HostLoopbackProof::wasi_image());
 
     assert_eq!(
-        <Proof as appkit::LogicalImage<UnoQCapsule>>::REQUESTED_ROLES,
+        <Proof as appkit::LogicalImage>::REQUESTED_ROLES,
         appkit::RoleSet::from_bits(0x1f)
     );
 

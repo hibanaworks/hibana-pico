@@ -15,10 +15,12 @@ use hibana::{
     },
 };
 use hibana_pico::appkit;
+use hibana_wasip1_runtime::choreofs;
 use hibana_wasip1_runtime::protocol::{
-    EngineReq, EngineRet, FdReadDone, FdWriteDone, LABEL_WASI_FD_READ, LABEL_WASI_FD_READ_RET,
-    LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET, LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET,
-    LABEL_WASI_PROC_EXIT, PathOpened,
+    FdBinding, FdRead, FdReadDone, FdReadDoneRet, FdReadReq, FdReadReqMsg, FdReadRetMsg, FdReadRow,
+    FdWrite, FdWriteDone, FdWriteDoneRet, FdWriteReq, FdWriteReqMsg, FdWriteRetMsg, FdWriteRow,
+    LABEL_WASI_FD_READ, LABEL_WASI_FD_WRITE, PathOpen, PathOpenReq, PathOpenReqMsg, PathOpenRetMsg,
+    PathOpened, PathOpenedRet,
 };
 use protocol::{
     FACE_ANGRY, FACE_HAPPY, FACE_MOUTH_CLOSED, FACE_MOUTH_ROUND, FACE_MOUTH_SMALL, FACE_MOUTH_WIDE,
@@ -184,14 +186,15 @@ fn drain_uno_q_uart_byte(_file: &std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
-const FACE_FRAME_OBJECT: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
+const FACE_FRAME_OBJECT: choreofs::ChoreoFsObject = choreofs::ChoreoFsObject::writable(
     FACE_FRAME_PATH,
-    appkit::ObjectId(71_005),
-    appkit::FdSpec::new(FACE_FRAME_FD as u32, FD_WRITE_RIGHT, 1),
+    choreofs::ObjectId(71_005),
+    choreofs::FdSpec::new(FACE_FRAME_FD as u32, FD_WRITE_RIGHT, 1),
+    FdBinding::write(FdWriteRow::Base),
 );
 
-static UNO_Q_DRIVER_FACTS: appkit::ChoreoFsObjectSet<1> =
-    appkit::ChoreoFsObjectSet::new([FACE_FRAME_OBJECT]);
+static UNO_Q_DRIVER_FACTS: choreofs::ChoreoFsObjectSet<1> =
+    choreofs::ChoreoFsObjectSet::new([FACE_FRAME_OBJECT]);
 
 #[cfg(feature = "embed-wasip1-artifacts")]
 const WASM_UNO_Q_LLM_FACE_SHELL: &[u8] = include_bytes!(concat!(
@@ -210,25 +213,25 @@ const WASM_UNO_Q_LLM_FACE_SHELL_LOOP: &[u8] = &[];
 
 impl image::HostLoopbackProof {
     pub fn wasi_image() -> appkit::WasiImage<'static> {
-        appkit::WasiImage::from_static(WASM_UNO_Q_LLM_FACE_SHELL)
+        appkit::WasiImage::from_bytes(WASM_UNO_Q_LLM_FACE_SHELL)
     }
 }
 
 impl image::HardwarePeerProof {
     pub fn wasi_image() -> appkit::WasiImage<'static> {
-        appkit::WasiImage::from_static(WASM_UNO_Q_LLM_FACE_SHELL)
+        appkit::WasiImage::from_bytes(WASM_UNO_Q_LLM_FACE_SHELL)
     }
 }
 
 impl image::HardwarePeerLoopProof {
     pub fn wasi_image() -> appkit::WasiImage<'static> {
-        appkit::WasiImage::from_static(WASM_UNO_Q_LLM_FACE_SHELL_LOOP)
+        appkit::WasiImage::from_bytes(WASM_UNO_Q_LLM_FACE_SHELL_LOOP)
     }
 }
 
 impl image::WasiLlmCellProcess {
     pub fn wasi_image() -> appkit::WasiImage<'static> {
-        appkit::WasiImage::from_static(WASM_UNO_Q_LLM_FACE_SHELL)
+        appkit::WasiImage::from_bytes(WASM_UNO_Q_LLM_FACE_SHELL)
     }
 }
 
@@ -237,7 +240,6 @@ static mut UNO_Q_WASI_GUEST_ARENA: appkit::WasiGuestArena = appkit::WasiGuestAre
 
 #[cfg(feature = "runtime-wasip1")]
 fn uno_q_wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
-    core::hint::black_box(ROLE);
     unsafe { (&mut *core::ptr::addr_of_mut!(UNO_Q_WASI_GUEST_ARENA)).lease() }
 }
 
@@ -265,13 +267,6 @@ static WASI_CELL_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLAB
 static M33_LED_ATTACH_STORAGE: appkit::EmbeddedAttachStorage<UNO_Q_ATTACH_SLAB_BYTES> =
     appkit::EmbeddedAttachStorage::empty();
 
-type WasiPathOpenReqMsg = g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>;
-type WasiPathOpenRetMsg = g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>;
-type WasiFdReadReqMsg = g::Msg<LABEL_WASI_FD_READ, EngineReq>;
-type WasiFdReadRetMsg = g::Msg<LABEL_WASI_FD_READ_RET, EngineRet>;
-type WasiFdWriteReqMsg = g::Msg<LABEL_WASI_FD_WRITE, EngineReq>;
-type WasiFdWriteRetMsg = g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>;
-type WasiProcExitReqMsg = g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>;
 type HumanInputReqMsg = g::Msg<LABEL_HUMAN_INPUT_REQ, u8>;
 type HumanInputTextMsg = g::Msg<LABEL_HUMAN_INPUT_TEXT, HumanInputText>;
 type HumanInputAckMsg = g::Msg<LABEL_HUMAN_INPUT_ACK, u8>;
@@ -307,13 +302,13 @@ impl From<protocol::ProtocolError> for UnoQRuntimeError {
 
 impl appkit::Capsule for UnoQCapsule {
     type Placement = UnoQPlacement;
-    type Local = UnoQLocal;
+    type Localside = UnoQLocal;
 
     fn choreography() -> impl Projectable {
         let stdout_write = || {
             g::seq(
-                g::send::<ROLE_WASI_LLM_CELL, ROLE_LOCAL_LLM, WasiFdWriteReqMsg>(),
-                g::send::<ROLE_LOCAL_LLM, ROLE_WASI_LLM_CELL, WasiFdWriteRetMsg>(),
+                g::send::<ROLE_WASI_LLM_CELL, ROLE_LOCAL_LLM, FdWriteReqMsg>(),
+                g::send::<ROLE_LOCAL_LLM, ROLE_WASI_LLM_CELL, FdWriteRetMsg>(),
             )
         };
         let human_input_turn = || {
@@ -337,16 +332,16 @@ impl appkit::Capsule for UnoQCapsule {
         let input_context_turn = || g::par(human_input_turn(), pico2w_sensor_turn());
         let stdin_read = || {
             g::seq(
-                g::send::<ROLE_WASI_LLM_CELL, ROLE_LOCAL_LLM, WasiFdReadReqMsg>(),
+                g::send::<ROLE_WASI_LLM_CELL, ROLE_LOCAL_LLM, FdReadReqMsg>(),
                 g::seq(
                     input_context_turn(),
-                    g::send::<ROLE_LOCAL_LLM, ROLE_WASI_LLM_CELL, WasiFdReadRetMsg>(),
+                    g::send::<ROLE_LOCAL_LLM, ROLE_WASI_LLM_CELL, FdReadRetMsg>(),
                 ),
             )
         };
         let face_frame_commit = g::seq(
-            g::send::<ROLE_WASI_LLM_CELL, ROLE_M33_LED_KERNEL, WasiFdWriteReqMsg>(),
-            g::send::<ROLE_M33_LED_KERNEL, ROLE_WASI_LLM_CELL, WasiFdWriteRetMsg>(),
+            g::send::<ROLE_WASI_LLM_CELL, ROLE_M33_LED_KERNEL, FdWriteReqMsg>(),
+            g::send::<ROLE_M33_LED_KERNEL, ROLE_WASI_LLM_CELL, FdWriteRetMsg>(),
         );
         let frame_cycle = g::seq(
             stdin_read(),
@@ -355,34 +350,20 @@ impl appkit::Capsule for UnoQCapsule {
                 g::seq(stdin_read(), g::seq(face_frame_commit, stdout_write())),
             ),
         );
-        let proc_exit_all = g::seq(
-            g::send::<ROLE_WASI_LLM_CELL, ROLE_LOCAL_LLM, WasiProcExitReqMsg>(),
-            g::seq(
-                g::send::<ROLE_WASI_LLM_CELL, ROLE_M33_LED_KERNEL, WasiProcExitReqMsg>(),
-                g::seq(
-                    g::send::<ROLE_WASI_LLM_CELL, ROLE_HUMAN_INPUT, WasiProcExitReqMsg>(),
-                    g::send::<ROLE_WASI_LLM_CELL, ROLE_PICO2W_SENSOR, WasiProcExitReqMsg>(),
-                ),
-            ),
-        );
-        let face_frame_loop = g::route(frame_cycle, proc_exit_all).roll();
+        let face_frame_loop = frame_cycle.roll();
         g::seq(
-            g::send::<ROLE_WASI_LLM_CELL, ROLE_LOCAL_LLM, WasiPathOpenReqMsg>(),
+            g::send::<ROLE_WASI_LLM_CELL, ROLE_LOCAL_LLM, PathOpenReqMsg>(),
             g::seq(
-                g::send::<ROLE_LOCAL_LLM, ROLE_WASI_LLM_CELL, WasiPathOpenRetMsg>(),
+                g::send::<ROLE_LOCAL_LLM, ROLE_WASI_LLM_CELL, PathOpenRetMsg>(),
                 g::seq(
-                    g::send::<ROLE_WASI_LLM_CELL, ROLE_LOCAL_LLM, WasiPathOpenReqMsg>(),
+                    g::send::<ROLE_WASI_LLM_CELL, ROLE_LOCAL_LLM, PathOpenReqMsg>(),
                     g::seq(
-                        g::send::<ROLE_LOCAL_LLM, ROLE_WASI_LLM_CELL, WasiPathOpenRetMsg>(),
+                        g::send::<ROLE_LOCAL_LLM, ROLE_WASI_LLM_CELL, PathOpenRetMsg>(),
                         g::seq(
-                            g::send::<ROLE_WASI_LLM_CELL, ROLE_M33_LED_KERNEL, WasiPathOpenReqMsg>(
-                            ),
+                            g::send::<ROLE_WASI_LLM_CELL, ROLE_M33_LED_KERNEL, PathOpenReqMsg>(),
                             g::seq(
-                                g::send::<
-                                    ROLE_M33_LED_KERNEL,
-                                    ROLE_WASI_LLM_CELL,
-                                    WasiPathOpenRetMsg,
-                                >(),
+                                g::send::<ROLE_M33_LED_KERNEL, ROLE_WASI_LLM_CELL, PathOpenRetMsg>(
+                                ),
                                 g::seq(stdout_write(), face_frame_loop),
                             ),
                         ),
@@ -394,14 +375,14 @@ impl appkit::Capsule for UnoQCapsule {
 }
 
 impl appkit::Placement<UnoQCapsule> for UnoQPlacement {
-    fn role_kind(role: u8) -> appkit::RoleKind {
-        match role {
+    fn role_kind<const ROLE: u8>() -> appkit::RoleKind {
+        match ROLE {
             ROLE_WASI_LLM_CELL => appkit::RoleKind::Engine,
             ROLE_M33_LED_KERNEL => appkit::RoleKind::Driver,
             ROLE_LOCAL_LLM => appkit::RoleKind::Boundary,
             ROLE_HUMAN_INPUT => appkit::RoleKind::Boundary,
             ROLE_PICO2W_SENSOR => appkit::RoleKind::Boundary,
-            other => panic!("uno-q placement has no role {other}"),
+            _ => panic!("uno-q placement has no role {ROLE}"),
         }
     }
 }
@@ -438,29 +419,29 @@ fn m33_role_step(step: u32) {
     core::hint::black_box(step);
 }
 
-async fn run_m33_driver<const ROLE: u8>(
-    mut ctx: appkit::DriverCtx<'_, UnoQCapsule, ROLE>,
+async fn run_m33_driver<'endpoint, const ROLE: u8>(
+    mut ctx: hibana::Endpoint<'endpoint, ROLE>,
 ) -> appkit::RoleResult<UnoQRuntimeError> {
     if ROLE != ROLE_M33_LED_KERNEL {
-        return ctx.pending().await;
+        return appkit::pending(ctx).await;
     }
 
     m33_role_step(0x0100);
     m33_board_ready();
 
     m33_role_step(0x0200);
-    let request = expect_path_open(ctx.endpoint().recv::<WasiPathOpenReqMsg>().await?)?;
+    let request = expect_path_open(ctx.recv::<PathOpenReqMsg>().await?)?;
     m33_role_step(0x0201);
     complete_path_open(&mut ctx, request, FACE_FRAME_PATH, FD_WRITE_RIGHT).await?;
 
     m33_role_step(0x0500);
     drive_face_frame_loop(&mut ctx).await?;
     m33_role_step(0x0501);
-    ctx.pending().await
+    appkit::pending(ctx).await
 }
 
-async fn run_boundary<const ROLE: u8>(
-    mut ctx: appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
+async fn run_boundary<'endpoint, const ROLE: u8>(
+    mut ctx: hibana::Endpoint<'endpoint, ROLE>,
 ) -> appkit::RoleResult<UnoQRuntimeError> {
     match ROLE {
         ROLE_LOCAL_LLM => {
@@ -468,7 +449,7 @@ async fn run_boundary<const ROLE: u8>(
             if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
                 eprintln!("uno-q local LLM boundary: open stdin");
             }
-            let request = expect_path_open(ctx.endpoint().recv::<WasiPathOpenReqMsg>().await?)?;
+            let request = expect_path_open(ctx.recv::<PathOpenReqMsg>().await?)?;
             complete_boundary_path_open(
                 &mut ctx,
                 request,
@@ -481,7 +462,7 @@ async fn run_boundary<const ROLE: u8>(
             if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
                 eprintln!("uno-q local LLM boundary: open stdout");
             }
-            let request = expect_path_open(ctx.endpoint().recv::<WasiPathOpenReqMsg>().await?)?;
+            let request = expect_path_open(ctx.recv::<PathOpenReqMsg>().await?)?;
             complete_boundary_path_open(
                 &mut ctx,
                 request,
@@ -491,17 +472,17 @@ async fn run_boundary<const ROLE: u8>(
             )
             .await?;
             let mut source = LocalLlmShellSource::new();
-            let write = expect_fd_write(ctx.endpoint().recv::<WasiFdWriteReqMsg>().await?)?;
+            let write = expect_fd_write(ctx.recv::<FdWriteReqMsg>().await?)?;
             complete_local_llm_stdout_write(&mut ctx, &mut source, write).await?;
             loop {
-                let branch = ctx.endpoint().offer().await?;
+                let branch = ctx.offer().await?;
                 #[cfg(not(target_os = "none"))]
                 if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
                     eprintln!("uno-q local LLM boundary branch label={}", branch.label());
                 }
                 match branch.label() {
                     LABEL_WASI_FD_READ => {
-                        let read = expect_fd_read(branch.recv::<WasiFdReadReqMsg>().await?)?;
+                        let read = expect_fd_read(branch.recv::<FdReadReqMsg>().await?)?;
                         complete_local_llm_stdin_read_with_input_context_read(
                             &mut ctx,
                             &mut source,
@@ -509,8 +490,7 @@ async fn run_boundary<const ROLE: u8>(
                         )
                         .await?;
 
-                        let write =
-                            expect_fd_write(ctx.endpoint().recv::<WasiFdWriteReqMsg>().await?)?;
+                        let write = expect_fd_write(ctx.recv::<FdWriteReqMsg>().await?)?;
                         complete_local_llm_stdout_write(&mut ctx, &mut source, write).await?;
 
                         complete_local_llm_stdin_read_with_input_context(&mut ctx, &mut source)
@@ -518,19 +498,8 @@ async fn run_boundary<const ROLE: u8>(
 
                         yield_to_peer_roles().await;
 
-                        let write =
-                            expect_fd_write(ctx.endpoint().recv::<WasiFdWriteReqMsg>().await?)?;
+                        let write = expect_fd_write(ctx.recv::<FdWriteReqMsg>().await?)?;
                         complete_local_llm_stdout_write(&mut ctx, &mut source, write).await?;
-                    }
-                    LABEL_WASI_PROC_EXIT => {
-                        let proc_exit = branch.recv::<WasiProcExitReqMsg>().await?;
-                        let EngineReq::ProcExit(status) = proc_exit else {
-                            return Err(UnoQRuntimeError::RuntimeViolation);
-                        };
-                        if status.code() != 0 {
-                            return Err(UnoQRuntimeError::RuntimeViolation);
-                        }
-                        break;
                     }
                     _ => return Err(UnoQRuntimeError::RuntimeViolation),
                 }
@@ -543,7 +512,7 @@ async fn run_boundary<const ROLE: u8>(
             }
             let mut source = HumanInputSource::from_env();
             loop {
-                let branch = ctx.endpoint().offer().await?;
+                let branch = ctx.offer().await?;
                 #[cfg(not(target_os = "none"))]
                 if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
                     eprintln!("uno-q human input boundary branch label={}", branch.label());
@@ -554,16 +523,6 @@ async fn run_boundary<const ROLE: u8>(
                         complete_human_input_turn_after_request(&mut ctx, &mut source, request)
                             .await?;
                         complete_human_input_turn_recv(&mut ctx, &mut source).await?;
-                    }
-                    LABEL_WASI_PROC_EXIT => {
-                        let proc_exit = branch.recv::<WasiProcExitReqMsg>().await?;
-                        let EngineReq::ProcExit(status) = proc_exit else {
-                            return Err(UnoQRuntimeError::RuntimeViolation);
-                        };
-                        if status.code() != 0 {
-                            return Err(UnoQRuntimeError::RuntimeViolation);
-                        }
-                        break;
                     }
                     _ => return Err(UnoQRuntimeError::RuntimeViolation),
                 }
@@ -576,7 +535,7 @@ async fn run_boundary<const ROLE: u8>(
             }
             let mut source = Pico2wSensorSource::from_env();
             loop {
-                let branch = ctx.endpoint().offer().await?;
+                let branch = ctx.offer().await?;
                 #[cfg(not(target_os = "none"))]
                 if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
                     eprintln!(
@@ -591,27 +550,17 @@ async fn run_boundary<const ROLE: u8>(
                             .await?;
                         complete_pico2w_sensor_turn_recv(&mut ctx, &mut source).await?;
                     }
-                    LABEL_WASI_PROC_EXIT => {
-                        let proc_exit = branch.recv::<WasiProcExitReqMsg>().await?;
-                        let EngineReq::ProcExit(status) = proc_exit else {
-                            return Err(UnoQRuntimeError::RuntimeViolation);
-                        };
-                        if status.code() != 0 {
-                            return Err(UnoQRuntimeError::RuntimeViolation);
-                        }
-                        break;
-                    }
                     _ => return Err(UnoQRuntimeError::RuntimeViolation),
                 }
             }
         }
-        _ => return ctx.pending().await,
+        _ => return appkit::pending(ctx).await,
     }
-    ctx.pending().await
+    appkit::pending(ctx).await
 }
 
 async fn complete_local_llm_stdout_write<const ROLE: u8>(
-    ctx: &mut appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     source: &mut LocalLlmShellSource,
     write: hibana_wasip1_runtime::protocol::FdWrite,
 ) -> Result<(), UnoQRuntimeError> {
@@ -628,12 +577,11 @@ async fn complete_local_llm_stdout_write<const ROLE: u8>(
         return Err(UnoQRuntimeError::RuntimeViolation);
     }
     source.observe_shell_output(write.as_bytes());
-    ctx.endpoint()
-        .send::<WasiFdWriteRetMsg>(&EngineRet::FdWriteDone(FdWriteDone::new(
-            write.fd(),
-            write.len() as u8,
-        )))
-        .await?;
+    ctx.send::<FdWriteRetMsg>(&FdWriteDoneRet(FdWriteDone::new(
+        write.fd(),
+        write.len() as u8,
+    )))
+    .await?;
     #[cfg(not(target_os = "none"))]
     if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
         eprintln!("uno-q local LLM stdout ack");
@@ -642,7 +590,7 @@ async fn complete_local_llm_stdout_write<const ROLE: u8>(
 }
 
 async fn complete_local_llm_stdin_read<const ROLE: u8>(
-    ctx: &mut appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     source: &mut LocalLlmShellSource,
     read: hibana_wasip1_runtime::protocol::FdRead,
 ) -> Result<(), UnoQRuntimeError> {
@@ -666,53 +614,48 @@ async fn complete_local_llm_stdin_read<const ROLE: u8>(
             core::str::from_utf8(&command[..len]).unwrap_or("<binary>")
         );
     }
-    ctx.endpoint()
-        .send::<WasiFdReadRetMsg>(&EngineRet::FdReadDone(FdReadDone::new_with_lease(
-            read.fd(),
-            read.lease_id(),
-            &command[..len],
-        )?))
-        .await?;
+    let reply = FdReadDone::new(read.fd(), &command[..len])?;
+    ctx.send::<FdReadRetMsg>(&FdReadDoneRet(reply)).await?;
     Ok(())
 }
 
 async fn complete_local_llm_stdin_read_with_input_context<const ROLE: u8>(
-    ctx: &mut appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     source: &mut LocalLlmShellSource,
 ) -> Result<(), UnoQRuntimeError> {
-    let read = expect_fd_read(ctx.endpoint().recv::<WasiFdReadReqMsg>().await?)?;
+    let read = expect_fd_read(ctx.recv::<FdReadReqMsg>().await?)?;
     complete_local_llm_stdin_read_with_input_context_read(ctx, source, read).await
 }
 
 async fn complete_local_llm_stdin_read_with_input_context_read<const ROLE: u8>(
-    ctx: &mut appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     source: &mut LocalLlmShellSource,
     read: hibana_wasip1_runtime::protocol::FdRead,
 ) -> Result<(), UnoQRuntimeError> {
     yield_to_peer_roles().await;
-    ctx.endpoint().send::<HumanInputReqMsg>(&0).await?;
-    ctx.endpoint().send::<Pico2wSensorReqMsg>(&0).await?;
+    ctx.send::<HumanInputReqMsg>(&0).await?;
+    ctx.send::<Pico2wSensorReqMsg>(&0).await?;
     yield_to_peer_roles().await;
-    let human_input = ctx.endpoint().recv::<HumanInputTextMsg>().await?;
-    let sensor_sample = ctx.endpoint().recv::<Pico2wSensorSampleMsg>().await?;
+    let human_input = ctx.recv::<HumanInputTextMsg>().await?;
+    let sensor_sample = ctx.recv::<Pico2wSensorSampleMsg>().await?;
     source.observe_human_input(human_input)?;
     source.observe_pico2w_sensor_sample(sensor_sample);
-    ctx.endpoint().send::<HumanInputAckMsg>(&0).await?;
-    ctx.endpoint().send::<Pico2wSensorAckMsg>(&0).await?;
+    ctx.send::<HumanInputAckMsg>(&0).await?;
+    ctx.send::<Pico2wSensorAckMsg>(&0).await?;
     yield_to_peer_roles().await;
     complete_local_llm_stdin_read(ctx, source, read).await
 }
 
 async fn complete_human_input_turn_recv<const ROLE: u8>(
-    ctx: &mut appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     source: &mut HumanInputSource,
 ) -> Result<(), UnoQRuntimeError> {
-    let request = ctx.endpoint().recv::<HumanInputReqMsg>().await?;
+    let request = ctx.recv::<HumanInputReqMsg>().await?;
     complete_human_input_turn_after_request(ctx, source, request).await
 }
 
 async fn complete_human_input_turn_after_request<const ROLE: u8>(
-    ctx: &mut appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     source: &mut HumanInputSource,
     request: u8,
 ) -> Result<(), UnoQRuntimeError> {
@@ -724,8 +667,8 @@ async fn complete_human_input_turn_after_request<const ROLE: u8>(
     if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
         eprintln!("uno-q human input boundary send len={}", input.len());
     }
-    ctx.endpoint().send::<HumanInputTextMsg>(&input).await?;
-    let ack = ctx.endpoint().recv::<HumanInputAckMsg>().await?;
+    ctx.send::<HumanInputTextMsg>(&input).await?;
+    let ack = ctx.recv::<HumanInputAckMsg>().await?;
     if ack != 0 {
         return Err(UnoQRuntimeError::RuntimeViolation);
     }
@@ -733,15 +676,15 @@ async fn complete_human_input_turn_after_request<const ROLE: u8>(
 }
 
 async fn complete_pico2w_sensor_turn_recv<const ROLE: u8>(
-    ctx: &mut appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     source: &mut Pico2wSensorSource,
 ) -> Result<(), UnoQRuntimeError> {
-    let request = ctx.endpoint().recv::<Pico2wSensorReqMsg>().await?;
+    let request = ctx.recv::<Pico2wSensorReqMsg>().await?;
     complete_pico2w_sensor_turn_after_request(ctx, source, request).await
 }
 
 async fn complete_pico2w_sensor_turn_after_request<const ROLE: u8>(
-    ctx: &mut appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     source: &mut Pico2wSensorSource,
     request: u8,
 ) -> Result<(), UnoQRuntimeError> {
@@ -757,10 +700,8 @@ async fn complete_pico2w_sensor_turn_after_request<const ROLE: u8>(
             sample.seq()
         );
     }
-    ctx.endpoint()
-        .send::<Pico2wSensorSampleMsg>(&sample)
-        .await?;
-    let ack = ctx.endpoint().recv::<Pico2wSensorAckMsg>().await?;
+    ctx.send::<Pico2wSensorSampleMsg>(&sample).await?;
+    let ack = ctx.recv::<Pico2wSensorAckMsg>().await?;
     if ack != 0 {
         return Err(UnoQRuntimeError::RuntimeViolation);
     }
@@ -790,7 +731,7 @@ fn yield_to_peer_roles() -> YieldToPeerRoles {
 }
 
 async fn drive_face_frame_loop<const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, UnoQCapsule, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
 ) -> Result<(), UnoQRuntimeError> {
     let mut ordinal = 0u8;
     loop {
@@ -799,7 +740,7 @@ async fn drive_face_frame_loop<const ROLE: u8>(
         if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
             eprintln!("uno-q-face passive offer ordinal={ordinal}");
         }
-        let branch = match ctx.endpoint().offer().await {
+        let branch = match ctx.offer().await {
             Ok(branch) => branch,
             Err(error) => {
                 m33_role_step(0xed20_0000 | u32::from(ordinal));
@@ -817,7 +758,7 @@ async fn drive_face_frame_loop<const ROLE: u8>(
         match branch.label() {
             LABEL_WASI_FD_WRITE => {
                 m33_role_step(0x0d22_0000 | u32::from(ordinal));
-                let write = match branch.recv::<WasiFdWriteReqMsg>().await {
+                let write = match branch.recv::<FdWriteReqMsg>().await {
                     Ok(request) => match expect_fd_write(request) {
                         Ok(write) => write,
                         Err(error) => {
@@ -865,26 +806,6 @@ async fn drive_face_frame_loop<const ROLE: u8>(
                 send_fd_write_done(ctx, write.fd(), write.len()).await?;
                 ordinal = ordinal.wrapping_add(1);
                 yield_to_peer_roles().await;
-            }
-            LABEL_WASI_PROC_EXIT => {
-                m33_role_step(0x0d26_0000 | u32::from(ordinal));
-                let proc_exit = match branch.recv::<WasiProcExitReqMsg>().await {
-                    Ok(request) => request,
-                    Err(error) => {
-                        m33_role_step(0xed26_0000 | u32::from(ordinal));
-                        return Err(error.into());
-                    }
-                };
-                let EngineReq::ProcExit(status) = proc_exit else {
-                    m33_role_step(0xed26_1000 | u32::from(ordinal));
-                    return Err(UnoQRuntimeError::RuntimeViolation);
-                };
-                if status.code() != 0 {
-                    m33_role_step(0xed26_2000 | u32::from(status.code() as u8));
-                    return Err(UnoQRuntimeError::RuntimeViolation);
-                }
-                m33_role_step(0x0d27_0000 | u32::from(ordinal));
-                break;
             }
             label => {
                 m33_role_step(0xed21_0000 | (u32::from(ordinal) << 8) | u32::from(label));
@@ -2892,55 +2813,40 @@ fn copy_llm_terminal_input_from_output(
 impl appkit::Localside<UnoQCapsule> for UnoQLocal {
     type Error = UnoQRuntimeError;
 
-    fn engine<'endpoint, 'guest, const ROLE: u8>(
-        ctx: appkit::EngineCtx<'endpoint, 'guest, UnoQCapsule, ROLE>,
+    fn engine<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
+        appkit::pending(ctx)
     }
 
-    fn driver<'a, const ROLE: u8>(
-        ctx: appkit::DriverCtx<'a, UnoQCapsule, ROLE>,
+    fn driver<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         run_m33_driver(ctx)
     }
 
-    fn boundary<'a, const ROLE: u8>(
-        ctx: appkit::BoundaryCtx<'a, UnoQCapsule, ROLE>,
+    fn boundary<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         run_boundary(ctx)
     }
 }
 
-fn expect_path_open(
-    request: EngineReq,
-) -> Result<hibana_wasip1_runtime::protocol::PathOpen, UnoQRuntimeError> {
-    match request {
-        EngineReq::PathOpen(request) => Ok(request),
-        _ => Err(UnoQRuntimeError::RuntimeViolation),
-    }
+fn expect_path_open(request: PathOpenReq) -> Result<PathOpen, UnoQRuntimeError> {
+    Ok(request.0)
 }
 
-fn expect_fd_write(
-    request: EngineReq,
-) -> Result<hibana_wasip1_runtime::protocol::FdWrite, UnoQRuntimeError> {
-    match request {
-        EngineReq::FdWrite(request) => Ok(request),
-        _ => Err(UnoQRuntimeError::RuntimeViolation),
-    }
+fn expect_fd_write(request: FdWriteReq) -> Result<FdWrite, UnoQRuntimeError> {
+    Ok(request.0)
 }
 
-fn expect_fd_read(
-    request: EngineReq,
-) -> Result<hibana_wasip1_runtime::protocol::FdRead, UnoQRuntimeError> {
-    match request {
-        EngineReq::FdRead(request) => Ok(request),
-        _ => Err(UnoQRuntimeError::RuntimeViolation),
-    }
+fn expect_fd_read(request: FdReadReq) -> Result<FdRead, UnoQRuntimeError> {
+    Ok(request.0)
 }
 
 async fn complete_path_open<const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, UnoQCapsule, ROLE>,
-    request: hibana_wasip1_runtime::protocol::PathOpen,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
+    request: PathOpen,
     expected_path: &[u8],
     expected_rights: u64,
 ) -> Result<(), UnoQRuntimeError> {
@@ -2950,10 +2856,11 @@ async fn complete_path_open<const ROLE: u8>(
     if request.path() != expected_path {
         return Err(UnoQRuntimeError::RuntimeViolation);
     }
-    let Some(object) = ctx.choreofs().resolve(expected_path) else {
+    let Some(object) = UNO_Q_DRIVER_FACTS.choreofs().facts().resolve(expected_path) else {
         return Err(UnoQRuntimeError::RuntimeViolation);
     };
-    let Some(fd) = ctx
+    let Some(fd) = UNO_Q_DRIVER_FACTS
+        .choreofs()
         .ledger()
         .fds()
         .iter()
@@ -2962,14 +2869,19 @@ async fn complete_path_open<const ROLE: u8>(
     else {
         return Err(UnoQRuntimeError::RuntimeViolation);
     };
-    let reply = EngineRet::PathOpened(PathOpened::new(fd.fd() as u8, 0));
-    ctx.endpoint().send::<WasiPathOpenRetMsg>(&reply).await?;
+    let binding = fd_binding_for_rights(expected_rights)?;
+    ctx.send::<PathOpenRetMsg>(&PathOpenedRet(PathOpened::new_with_binding(
+        fd.fd() as u8,
+        0,
+        binding,
+    )))
+    .await?;
     Ok(())
 }
 
 async fn complete_boundary_path_open<const ROLE: u8>(
-    ctx: &mut appkit::BoundaryCtx<'_, UnoQCapsule, ROLE>,
-    request: hibana_wasip1_runtime::protocol::PathOpen,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
+    request: PathOpen,
     expected_path: &[u8],
     expected_rights: u64,
     returned_fd: u8,
@@ -2992,7 +2904,11 @@ async fn complete_boundary_path_open<const ROLE: u8>(
     if request.path() != expected_path {
         return Err(UnoQRuntimeError::RuntimeViolation);
     }
-    let reply = EngineRet::PathOpened(PathOpened::new(returned_fd, 0));
+    let reply = PathOpenedRet(PathOpened::new_with_binding(
+        returned_fd,
+        0,
+        fd_binding_for_rights(expected_rights)?,
+    ));
     #[cfg(not(target_os = "none"))]
     if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
         eprintln!(
@@ -3002,7 +2918,7 @@ async fn complete_boundary_path_open<const ROLE: u8>(
             core::str::from_utf8(expected_path).unwrap_or("<binary>")
         );
     }
-    ctx.endpoint().send::<WasiPathOpenRetMsg>(&reply).await?;
+    ctx.send::<PathOpenRetMsg>(&reply).await?;
     #[cfg(not(target_os = "none"))]
     if std::env::var_os("UNO_Q_HIBANA_TRACE").is_some() {
         eprintln!(
@@ -3013,13 +2929,21 @@ async fn complete_boundary_path_open<const ROLE: u8>(
     Ok(())
 }
 
+fn fd_binding_for_rights(rights: u64) -> Result<FdBinding, UnoQRuntimeError> {
+    match rights {
+        FD_READ_RIGHT => Ok(FdBinding::read(FdReadRow::Base)),
+        FD_WRITE_RIGHT => Ok(FdBinding::write(FdWriteRow::Base)),
+        _ => Err(UnoQRuntimeError::RuntimeViolation),
+    }
+}
+
 fn expect_fd_object<const ROLE: u8>(
-    ctx: &appkit::DriverCtx<'_, UnoQCapsule, ROLE>,
+    ctx: &hibana::Endpoint<'_, ROLE>,
     fd: u8,
-    object: appkit::ObjectId,
+    object: choreofs::ObjectId,
     rights: u64,
 ) -> Result<(), UnoQRuntimeError> {
-    let Some(fact) = ctx.ledger().fd(fd as u32) else {
+    let Some(fact) = UNO_Q_DRIVER_FACTS.choreofs().ledger().fd(fd as u32) else {
         return Err(UnoQRuntimeError::RuntimeViolation);
     };
     if fact.object() != object || fact.rights() != rights {
@@ -3029,12 +2953,12 @@ fn expect_fd_object<const ROLE: u8>(
 }
 
 async fn send_fd_write_done<const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, UnoQCapsule, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     fd: u8,
     len: usize,
 ) -> Result<(), UnoQRuntimeError> {
-    let reply = EngineRet::FdWriteDone(FdWriteDone::new(fd, len as u8));
-    ctx.endpoint().send::<WasiFdWriteRetMsg>(&reply).await?;
+    ctx.send::<FdWriteRetMsg>(&FdWriteDoneRet(FdWriteDone::new(fd, len as u8)))
+        .await?;
     Ok(())
 }
 
@@ -4173,7 +4097,9 @@ impl hibana::runtime::transport::Transport for ProofCarrier {
 
 macro_rules! impl_nowasi_image {
     ($image:ty, $roles:expr, $storage:ident) => {
-        impl appkit::LogicalImage<UnoQCapsule> for appkit::Local<$image> {
+        impl appkit::LogicalImage for $image {
+            type Capsule = UnoQCapsule;
+
             type Carrier<'a>
                 = ProofCarrier
             where
@@ -4182,7 +4108,7 @@ macro_rules! impl_nowasi_image {
             const REQUESTED_ROLES: appkit::RoleSet = $roles;
 
             fn init() -> Self {
-                appkit::Local::new()
+                Self
             }
 
             fn safe_state(&mut self) {}
@@ -4198,15 +4124,13 @@ macro_rules! impl_nowasi_image {
             fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
                 $storage.lease()
             }
-
-            fn driver_facts() -> appkit::DriverFacts<'static> {
-                UNO_Q_DRIVER_FACTS.driver_facts()
-            }
         }
     };
 }
 
-impl appkit::LogicalImage<UnoQCapsule> for appkit::Local<image::HostLoopbackProof> {
+impl appkit::LogicalImage for image::HostLoopbackProof {
+    type Capsule = UnoQCapsule;
+
     type Carrier<'a>
         = ProofCarrier
     where
@@ -4215,7 +4139,7 @@ impl appkit::LogicalImage<UnoQCapsule> for appkit::Local<image::HostLoopbackProo
     const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::from_bits(0x1f);
 
     fn init() -> Self {
-        appkit::Local::new()
+        Self
     }
 
     fn safe_state(&mut self) {}
@@ -4231,15 +4155,13 @@ impl appkit::LogicalImage<UnoQCapsule> for appkit::Local<image::HostLoopbackProo
     fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
         HOST_PROOF_ATTACH_STORAGE.lease()
     }
-
-    fn driver_facts() -> appkit::DriverFacts<'static> {
-        UNO_Q_DRIVER_FACTS.driver_facts()
-    }
 }
 
 macro_rules! impl_hardware_peer_wasi_image {
     ($image:ty) => {
-        impl appkit::LogicalImage<UnoQCapsule> for appkit::Local<$image> {
+        impl appkit::LogicalImage for $image {
+            type Capsule = UnoQCapsule;
+
             #[cfg(not(target_os = "none"))]
             type Carrier<'a>
                 = HardwarePeerCarrier
@@ -4256,7 +4178,7 @@ macro_rules! impl_hardware_peer_wasi_image {
                 appkit::RoleSet::from_bits(HARDWARE_PEER_ROLE_BITS);
 
             fn init() -> Self {
-                appkit::Local::new()
+                Self
             }
 
             fn safe_state(&mut self) {}
@@ -4281,10 +4203,6 @@ macro_rules! impl_hardware_peer_wasi_image {
             fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
                 HARDWARE_PEER_ATTACH_STORAGE.lease()
             }
-
-            fn driver_facts() -> appkit::DriverFacts<'static> {
-                UNO_Q_DRIVER_FACTS.driver_facts()
-            }
         }
     };
 }
@@ -4292,7 +4210,9 @@ macro_rules! impl_hardware_peer_wasi_image {
 impl_hardware_peer_wasi_image!(image::HardwarePeerProof);
 impl_hardware_peer_wasi_image!(image::HardwarePeerLoopProof);
 
-impl appkit::LogicalImage<UnoQCapsule> for appkit::Local<image::WasiLlmCellProcess> {
+impl appkit::LogicalImage for image::WasiLlmCellProcess {
+    type Capsule = UnoQCapsule;
+
     type Carrier<'a>
         = ProofCarrier
     where
@@ -4301,7 +4221,7 @@ impl appkit::LogicalImage<UnoQCapsule> for appkit::Local<image::WasiLlmCellProce
     const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(ROLE_WASI_LLM_CELL);
 
     fn init() -> Self {
-        appkit::Local::new()
+        Self
     }
 
     fn safe_state(&mut self) {}
@@ -4337,7 +4257,9 @@ impl_nowasi_image!(
     PICO2W_SENSOR_ATTACH_STORAGE
 );
 
-impl appkit::LogicalImage<UnoQCapsule> for appkit::Local<image::M33LedKernelImage> {
+impl appkit::LogicalImage for image::M33LedKernelImage {
+    type Capsule = UnoQCapsule;
+
     #[cfg(target_os = "none")]
     type Carrier<'a>
         = UnoQUartCarrier
@@ -4353,7 +4275,7 @@ impl appkit::LogicalImage<UnoQCapsule> for appkit::Local<image::M33LedKernelImag
     const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(ROLE_M33_LED_KERNEL);
 
     fn init() -> Self {
-        appkit::Local::new()
+        Self
     }
 
     fn safe_state(&mut self) {}
@@ -4378,35 +4300,31 @@ impl appkit::LogicalImage<UnoQCapsule> for appkit::Local<image::M33LedKernelImag
     fn attach_storage() -> appkit::EmbeddedAttachStorageRef<'static> {
         M33_LED_ATTACH_STORAGE.lease()
     }
-
-    fn driver_facts() -> appkit::DriverFacts<'static> {
-        UNO_Q_DRIVER_FACTS.driver_facts()
-    }
 }
 
 #[cfg(feature = "runtime-wasip1")]
-impl appkit::WasiGuestImage<UnoQCapsule> for appkit::Local<image::HostLoopbackProof> {
+impl appkit::WasiGuestImage for image::HostLoopbackProof {
     fn wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
         uno_q_wasi_guest_lease::<ROLE>()
     }
 }
 
 #[cfg(feature = "runtime-wasip1")]
-impl appkit::WasiGuestImage<UnoQCapsule> for appkit::Local<image::HardwarePeerProof> {
+impl appkit::WasiGuestImage for image::HardwarePeerProof {
     fn wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
         uno_q_wasi_guest_lease::<ROLE>()
     }
 }
 
 #[cfg(feature = "runtime-wasip1")]
-impl appkit::WasiGuestImage<UnoQCapsule> for appkit::Local<image::HardwarePeerLoopProof> {
+impl appkit::WasiGuestImage for image::HardwarePeerLoopProof {
     fn wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
         uno_q_wasi_guest_lease::<ROLE>()
     }
 }
 
 #[cfg(feature = "runtime-wasip1")]
-impl appkit::WasiGuestImage<UnoQCapsule> for appkit::Local<image::WasiLlmCellProcess> {
+impl appkit::WasiGuestImage for image::WasiLlmCellProcess {
     fn wasi_guest_lease<'guest, const ROLE: u8>() -> appkit::WasiGuestLease<'guest> {
         uno_q_wasi_guest_lease::<ROLE>()
     }
@@ -4709,26 +4627,31 @@ mod tests {
             text(&['"', '/', 'l', 'l', 'm', '/', 'f', 'r', 'a', 'm', 'e', '"']);
         for source in [shell_guest, shell_loop_guest] {
             assert!(source.contains("fn main()"));
-            assert!(source.contains("choreofs::open_read"));
-            assert!(source.contains("choreofs::open_write"));
+            assert!(source.contains("fs::{File, OpenOptions}"));
+            assert!(source.contains("io::{self, Read, Write}"));
+            assert!(source.contains("OpenOptions::new().read(true).open(\"/llm/stdin\")"));
+            assert!(source.contains("OpenOptions::new().write(true).open(\"/llm/stdout\")"));
+            assert!(source.contains("OpenOptions::new().write(true).open(\"/face/frame\")"));
             assert!(source.contains("\"/llm/stdin\""));
             assert!(source.contains("\"/llm/stdout\""));
             assert!(source.contains("\"/face/frame\""));
             assert!(source.contains("ShellCommand::Catalog"));
             assert!(source.contains("find ChoreoFS -type f"));
             assert!(source.contains("is_catalog_discovery_command"));
-            assert!(source.contains("face[0] == b'v'"));
+            assert!(source.contains("face[0] == b'u'"));
             assert!(source.contains("echo "));
             assert!(source.contains(" > /face/frame"));
             assert!(source.contains("SHELL_INVALID_COMMAND"));
             assert!(source.contains("ShellCommand::Invalid"));
-            assert!(source.contains("read_once"));
-            assert!(source.contains("write_once_exact"));
+            assert!(source.contains("stdin.read(&mut buffer)?"));
+            assert!(source.contains("file.write_all(bytes)?"));
             for forbidden in [
                 "#![no_std]",
                 "#![no_main]",
                 "__main_void",
                 "panic_handler",
+                concat!("hibana_", "wasip1_", "guest"),
+                "choreofs::",
                 "time::sleep",
                 "sleep_ms",
                 "face_hold",
@@ -4739,6 +4662,9 @@ mod tests {
                 "FACE_MOUTH_",
                 "EMOTION_FRAMES",
                 "MOUTH_FRAMES",
+                "face[0] == b'v'",
+                "surprised_accepts_model_alias_v",
+                "model alias",
                 removed_llm_frame_path.as_str(),
             ] {
                 assert!(
@@ -4757,11 +4683,11 @@ mod tests {
 
         let source = include_str!("lib.rs");
         assert!(
-            source.contains("branch.recv::<WasiFdWriteReqMsg>()"),
+            source.contains("branch.recv::<FdWriteReqMsg>()"),
             "local LLM must decode projected stdout writes through offer"
         );
         assert!(
-            source.contains("branch.recv::<WasiFdReadReqMsg>()"),
+            source.contains("branch.recv::<FdReadReqMsg>()"),
             "local LLM must decode projected stdin reads through offer"
         );
         assert!(

@@ -9,11 +9,12 @@ use hibana::{
     },
 };
 use hibana_pico::appkit;
+use hibana_wasip1_runtime::choreofs;
 use hibana_wasip1_runtime::protocol::{
-    EngineReq, EngineRet, FdRead, FdReadDone, FdWrite, FdWriteDone, LABEL_WASI_FD_READ,
-    LABEL_WASI_FD_READ_RET, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET, LABEL_WASI_PATH_OPEN,
-    LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF, LABEL_WASI_POLL_ONEOFF_RET,
-    LABEL_WASI_PROC_EXIT, PathOpen, PathOpened, PollReady,
+    FdBinding, FdRead, FdReadDone, FdReadDoneRet, FdReadReqMsg, FdReadRetMsg, FdReadRow, FdWrite,
+    FdWriteDone, FdWriteDoneRet, FdWriteReqMsg, FdWriteRetMsg, FdWriteRow, LABEL_WASI_FD_READ,
+    PathOpen, PathOpenReqMsg, PathOpenRetMsg, PathOpened, PathOpenedRet, PollOneoffReqMsg,
+    PollOneoffRetMsg, PollReady, PollReadyRet,
 };
 #[cfg(feature = "embed-cyw43-artifacts")]
 use hibana_wifi::proto::udp::parse_udp_ipv4_packet;
@@ -489,24 +490,28 @@ const CYW43_NVRAM: &[u8] = concat!(
 )
 .as_bytes();
 
-const SENSOR_SAMPLE: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
+const SENSOR_SAMPLE: choreofs::ChoreoFsObject = choreofs::ChoreoFsObject::readable(
     b"device/rp2w/sample",
-    appkit::ObjectId(1),
-    appkit::FdSpec::new(SENSOR_SAMPLE_FD as u32, FD_READ_RIGHT, 1),
+    choreofs::ObjectId(1),
+    choreofs::FdSpec::new(SENSOR_SAMPLE_FD as u32, FD_READ_RIGHT, 1),
+    b"",
+    FdBinding::read(FdReadRow::Base),
 );
-const DISPLAY: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
+const DISPLAY: choreofs::ChoreoFsObject = choreofs::ChoreoFsObject::writable(
     b"device/rp2w/display",
-    appkit::ObjectId(2),
-    appkit::FdSpec::new(DISPLAY_FD as u32, FD_WRITE_RIGHT, 1),
+    choreofs::ObjectId(2),
+    choreofs::FdSpec::new(DISPLAY_FD as u32, FD_WRITE_RIGHT, 1),
+    FdBinding::write(FdWriteRow::Base),
 );
-const UNO_Q_UDP: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
+const UNO_Q_UDP: choreofs::ChoreoFsObject = choreofs::ChoreoFsObject::writable(
     UNO_Q_SENSOR_UDP_PATH,
-    appkit::ObjectId(3),
-    appkit::FdSpec::new(UNO_Q_UDP_FD as u32, FD_WRITE_RIGHT, 1),
+    choreofs::ObjectId(3),
+    choreofs::FdSpec::new(UNO_Q_UDP_FD as u32, FD_WRITE_RIGHT, 1),
+    FdBinding::write(FdWriteRow::Base),
 );
 
-static OBJECT_FACTS: appkit::ChoreoFsObjectSet<3> =
-    appkit::ChoreoFsObjectSet::new([SENSOR_SAMPLE, DISPLAY, UNO_Q_UDP]);
+static OBJECT_FACTS: choreofs::ChoreoFsObjectSet<3> =
+    choreofs::ChoreoFsObjectSet::new([SENSOR_SAMPLE, DISPLAY, UNO_Q_UDP]);
 
 struct SensorPanel;
 struct SensorPanelLocal;
@@ -532,23 +537,23 @@ impl From<hibana::runtime::wire::CodecError> for SensorPanelError {
 
 impl appkit::Capsule for SensorPanel {
     type Placement = Rp2wPlacement;
-    type Local = SensorPanelLocal;
+    type Localside = SensorPanelLocal;
 
     fn choreography() -> impl Projectable {
         let path_open = || {
             g::seq(
-                g::send::<1, 0, g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>>(),
-                g::send::<0, 1, g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>>(),
+                g::send::<1, 0, PathOpenReqMsg>(),
+                g::send::<0, 1, PathOpenRetMsg>(),
             )
         };
         let fd_read = || {
             g::seq(
-                g::send::<1, 0, g::Msg<LABEL_WASI_FD_READ, EngineReq>>(),
-                g::send::<0, 1, g::Msg<LABEL_WASI_FD_READ_RET, EngineRet>>(),
+                g::send::<1, 0, FdReadReqMsg>(),
+                g::send::<0, 1, FdReadRetMsg>(),
             )
         };
-        let fd_write_req = || g::send::<1, 0, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>();
-        let fd_write_ret = || g::send::<0, 1, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>>();
+        let fd_write_req = || g::send::<1, 0, FdWriteReqMsg>();
+        let fd_write_ret = || g::send::<0, 1, FdWriteRetMsg>();
         let fd_write = || g::seq(fd_write_req(), fd_write_ret());
         let cyw43_bringup = || {
             let power = || {
@@ -752,8 +757,8 @@ impl appkit::Capsule for SensorPanel {
         };
         let poll = || {
             g::seq(
-                g::send::<1, 0, g::Msg<LABEL_WASI_POLL_ONEOFF, EngineReq>>(),
-                g::send::<0, 1, g::Msg<LABEL_WASI_POLL_ONEOFF_RET, EngineRet>>(),
+                g::send::<1, 0, PollOneoffReqMsg>(),
+                g::send::<0, 1, PollOneoffRetMsg>(),
             )
         };
         let sample_cycle = || {
@@ -762,13 +767,7 @@ impl appkit::Capsule for SensorPanel {
                 g::seq(fd_write(), g::seq(fd_write_after_wifi_ack(), poll())),
             )
         };
-        let admitted_cycle = || {
-            g::route(
-                sample_cycle(),
-                g::send::<1, 0, g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>>(),
-            )
-            .roll()
-        };
+        let admitted_cycle = || sample_cycle().roll();
         g::seq(
             cyw43_bringup(),
             g::seq(
@@ -788,28 +787,28 @@ impl Rp2wCapsuleFacts for SensorPanel {
     );
 
     fn run_engine_image() {
-        rp2w_firmware::run_engine_wasi::<Self>(appkit::WasiImage::from_static(WASM_SENSOR_PANEL));
+        rp2w_firmware::run_engine_wasi::<Self>(appkit::WasiImage::from_bytes(WASM_SENSOR_PANEL));
     }
 
-    fn driver_facts() -> appkit::DriverFacts<'static> {
-        OBJECT_FACTS.driver_facts()
+    fn choreofs() -> choreofs::ChoreoFs<'static> {
+        OBJECT_FACTS.choreofs()
     }
 }
 
 impl appkit::Localside<SensorPanel> for SensorPanelLocal {
     type Error = SensorPanelError;
 
-    fn engine<'endpoint, 'guest, const ROLE: u8>(
-        ctx: appkit::EngineCtx<'endpoint, 'guest, SensorPanel, ROLE>,
+    fn engine<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
+        appkit::pending(ctx)
     }
 
-    fn driver<'a, const ROLE: u8>(
-        mut ctx: appkit::DriverCtx<'a, SensorPanel, ROLE>,
+    fn driver<'endpoint, const ROLE: u8>(
+        mut ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
-            if ROLE == 0 && !ctx.choreofs().entries().is_empty() {
+            if ROLE == 0 && !OBJECT_FACTS.choreofs().facts().entries().is_empty() {
                 rp2w_firmware::reset_choreofs_markers();
                 rp2w_firmware::record_choreofs_engine_status(
                     rp2w_firmware::CHOREOFS_DRIVER_STARTED,
@@ -824,9 +823,7 @@ impl appkit::Localside<SensorPanel> for SensorPanelLocal {
 
                 let mut cycles = 0u32;
                 loop {
-                    if !driver_admit_cycle(&mut ctx).await? {
-                        break;
-                    }
+                    driver_admit_cycle(&mut ctx).await?;
                     driver_fd_write_display(&mut ctx).await?;
                     driver_fd_write_uno_q(&mut ctx).await?;
                     driver_poll_oneoff(&mut ctx).await?;
@@ -839,12 +836,12 @@ impl appkit::Localside<SensorPanel> for SensorPanelLocal {
                     }
                 }
             }
-            ctx.pending().await
+            appkit::pending(ctx).await
         }
     }
 
-    fn boundary<'a, const ROLE: u8>(
-        mut ctx: appkit::BoundaryCtx<'a, SensorPanel, ROLE>,
+    fn boundary<'endpoint, const ROLE: u8>(
+        mut ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == wifi_roles::CYW43_DRIVER {
@@ -856,7 +853,7 @@ impl appkit::Localside<SensorPanel> for SensorPanelLocal {
                     cyw43_boundary_rx_udp(&mut ctx, &mut wifi).await?;
                 }
             }
-            ctx.pending().await
+            appkit::pending(ctx).await
         }
     }
 }
@@ -1130,32 +1127,8 @@ fn read_u16_be_local(bytes: &[u8]) -> u16 {
     u16::from_be_bytes([bytes[0], bytes[1]])
 }
 
-async fn recv_engine_req<const ROLE: u8, const LABEL: u8>(
-    ctx: &mut appkit::DriverCtx<'_, SensorPanel, ROLE>,
-) -> Result<EngineReq, SensorPanelError> {
-    loop {
-        match ctx.endpoint().recv::<g::Msg<LABEL, EngineReq>>().await {
-            Ok(request) => return Ok(request),
-            Err(error) => {
-                core::hint::black_box(error);
-                rp2w_firmware::rp2w_poll_delay(1);
-            }
-        }
-    }
-}
-
-async fn send_engine_ret<const ROLE: u8, const LABEL: u8>(
-    ctx: &mut appkit::DriverCtx<'_, SensorPanel, ROLE>,
-    reply: EngineRet,
-) -> Result<(), SensorPanelError> {
-    ctx.endpoint()
-        .send::<g::Msg<LABEL, EngineRet>>(&reply)
-        .await?;
-    Ok(())
-}
-
 async fn driver_cyw43_bootstrap<const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, SensorPanel, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
 ) -> Result<(), SensorPanelError> {
     driver_cyw43_step::<ROLE, WifiPowerOnMsg, WifiPowerReadyMsg>(ctx, 0).await?;
     driver_cyw43_step::<ROLE, WifiGspiProbeMsg, WifiGspiReadyMsg>(ctx, 0).await?;
@@ -1175,15 +1148,15 @@ async fn driver_cyw43_bootstrap<const ROLE: u8>(
 }
 
 async fn driver_cyw43_step<const ROLE: u8, Req, Ret>(
-    ctx: &mut appkit::DriverCtx<'_, SensorPanel, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     request: u32,
 ) -> Result<u32, SensorPanelError>
 where
     Req: hibana::g::Message<Payload = u32>,
     Ret: hibana::g::Message<Payload = u32>,
 {
-    ctx.endpoint().send::<Req>(&request).await?;
-    let reply = ctx.endpoint().recv::<Ret>().await?;
+    ctx.send::<Req>(&request).await?;
+    let reply = ctx.recv::<Ret>().await?;
     Ok(reply)
 }
 
@@ -1218,43 +1191,41 @@ fn cyw43_clm_len() -> u32 {
 }
 
 async fn driver_path_open<const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, SensorPanel, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     expected_fd: u8,
-    expected_object: appkit::ObjectId,
+    expected_object: choreofs::ObjectId,
 ) -> Result<(), SensorPanelError> {
-    let request = match recv_engine_req::<ROLE, LABEL_WASI_PATH_OPEN>(ctx).await? {
-        EngineReq::PathOpen(request) => request,
-        other => {
-            core::hint::black_box(other);
-            return Err(SensorPanelError::RuntimeViolation);
-        }
-    };
+    let request = ctx.recv::<PathOpenReqMsg>().await?.0;
     handle_path_open(ctx, request, expected_fd, expected_object).await
 }
 
 async fn handle_path_open<const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, SensorPanel, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     request: PathOpen,
     expected_fd: u8,
-    expected_object: appkit::ObjectId,
+    expected_object: choreofs::ObjectId,
 ) -> Result<(), SensorPanelError> {
-    let expected_rights = if expected_fd == SENSOR_SAMPLE_FD {
-        FD_READ_RIGHT
-    } else {
-        FD_WRITE_RIGHT
+    let (expected_rights, binding) = match expected_fd {
+        SENSOR_SAMPLE_FD => (FD_READ_RIGHT, FdBinding::read(FdReadRow::Base)),
+        DISPLAY_FD | UNO_Q_UDP_FD => (FD_WRITE_RIGHT, FdBinding::write(FdWriteRow::Base)),
+        _ => return Err(SensorPanelError::RuntimeViolation),
     };
     if request.preopen_fd() != DEVICE_PREOPEN_FD || request.rights_base() != expected_rights {
         core::hint::black_box(request);
         return Err(SensorPanelError::RuntimeViolation);
     }
-    let object = match ctx.choreofs().resolve(request.path()) {
+    let object = match OBJECT_FACTS.choreofs().facts().resolve(request.path()) {
         Some(object) => object,
         None => {
             core::hint::black_box(request);
             return Err(SensorPanelError::RuntimeViolation);
         }
     };
-    let fact = match find_ledger_fd(ctx.ledger(), object, request.rights_base()) {
+    let fact = match find_ledger_fd(
+        OBJECT_FACTS.choreofs().ledger(),
+        object,
+        request.rights_base(),
+    ) {
         Some(fact) => fact,
         None => {
             core::hint::black_box((object, request.rights_base()));
@@ -1266,60 +1237,31 @@ async fn handle_path_open<const ROLE: u8>(
         return Err(SensorPanelError::RuntimeViolation);
     }
     rp2w_firmware::record_choreofs_path_open(object);
-    send_engine_ret::<ROLE, LABEL_WASI_PATH_OPEN_RET>(
-        ctx,
-        EngineRet::PathOpened(PathOpened::new(fact.fd() as u8, 0)),
-    )
-    .await
+    ctx.send::<PathOpenRetMsg>(&PathOpenedRet(PathOpened::new_with_binding(
+        fact.fd() as u8,
+        0,
+        binding,
+    )))
+    .await?;
+    Ok(())
 }
 
 async fn driver_admit_cycle<const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, SensorPanel, ROLE>,
-) -> Result<bool, SensorPanelError> {
-    let branch = ctx.endpoint().offer().await?;
-    match branch.label() {
-        LABEL_WASI_FD_READ => {
-            let request = match branch
-                .recv::<g::Msg<LABEL_WASI_FD_READ, EngineReq>>()
-                .await?
-            {
-                EngineReq::FdRead(request) => request,
-                other => {
-                    core::hint::black_box(other);
-                    return Err(SensorPanelError::RuntimeViolation);
-                }
-            };
-            handle_fd_read(ctx, request).await?;
-            Ok(true)
-        }
-        LABEL_WASI_PROC_EXIT => {
-            let request = branch
-                .recv::<g::Msg<LABEL_WASI_PROC_EXIT, EngineReq>>()
-                .await?;
-            match request {
-                EngineReq::ProcExit(status) if status.code() == 0 => Ok(false),
-                other => {
-                    core::hint::black_box(other);
-                    Err(SensorPanelError::RuntimeViolation)
-                }
-            }
-        }
-        other => {
-            core::hint::black_box(other);
-            Err(SensorPanelError::RuntimeViolation)
-        }
-    }
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
+) -> Result<(), SensorPanelError> {
+    let request = ctx.recv::<FdReadReqMsg>().await?.0;
+    handle_fd_read(ctx, request).await
 }
 
 async fn handle_fd_read<const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, SensorPanel, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     request: FdRead,
 ) -> Result<(), SensorPanelError> {
     if request.fd() != SENSOR_SAMPLE_FD {
         core::hint::black_box(request);
         return Err(SensorPanelError::RuntimeViolation);
     }
-    let fact = match ctx.ledger().fd(request.fd() as u32) {
+    let fact = match OBJECT_FACTS.choreofs().ledger().fd(request.fd() as u32) {
         Some(fact) if fact.object() == SENSOR_SAMPLE.object() && fact.rights() == FD_READ_RIGHT => {
             fact
         }
@@ -1340,58 +1282,44 @@ async fn handle_fd_read<const ROLE: u8>(
         return Err(SensorPanelError::RuntimeViolation);
     }
     let bytes = &buffer[..len];
-    let reply = EngineRet::FdReadDone(FdReadDone::new_with_lease(
-        request.fd(),
-        request.lease_id(),
-        bytes,
-    )?);
+    let reply = FdReadDone::new(request.fd(), bytes)?;
     rp2w_firmware::record_choreofs_path_open(fact.object());
-    send_engine_ret::<ROLE, LABEL_WASI_FD_READ_RET>(ctx, reply).await
+    ctx.send::<FdReadRetMsg>(&FdReadDoneRet(reply)).await?;
+    Ok(())
 }
 
 async fn driver_fd_write_display<const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, SensorPanel, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
 ) -> Result<(), SensorPanelError> {
-    let request = match recv_engine_req::<ROLE, LABEL_WASI_FD_WRITE>(ctx).await? {
-        EngineReq::FdWrite(request) => request,
-        other => {
-            core::hint::black_box(other);
-            return Err(SensorPanelError::RuntimeViolation);
-        }
-    };
+    let request = ctx.recv::<FdWriteReqMsg>().await?.0;
     handle_fd_write_display(ctx, request).await
 }
 
 async fn handle_fd_write_display<const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, SensorPanel, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     request: FdWrite,
 ) -> Result<(), SensorPanelError> {
     let fact = validate_fd_write(ctx, request, DISPLAY_FD, DISPLAY.object())?;
     let _ = pico2w_sample_from_payload(request.as_bytes())?;
     let _ = rp2w_firmware::rp2w_lcd_write_pico2w_sensor_sample(request.as_bytes());
     rp2w_firmware::record_choreofs_fd_write(fact.object());
-    send_engine_ret::<ROLE, LABEL_WASI_FD_WRITE_RET>(
-        ctx,
-        EngineRet::FdWriteDone(FdWriteDone::new(request.fd(), request.len() as u8)),
-    )
-    .await
+    ctx.send::<FdWriteRetMsg>(&FdWriteDoneRet(FdWriteDone::new(
+        request.fd(),
+        request.len() as u8,
+    )))
+    .await?;
+    Ok(())
 }
 
 async fn driver_fd_write_uno_q<const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, SensorPanel, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
 ) -> Result<(), SensorPanelError> {
-    let request = match recv_engine_req::<ROLE, LABEL_WASI_FD_WRITE>(ctx).await? {
-        EngineReq::FdWrite(request) => request,
-        other => {
-            core::hint::black_box(other);
-            return Err(SensorPanelError::RuntimeViolation);
-        }
-    };
+    let request = ctx.recv::<FdWriteReqMsg>().await?.0;
     handle_fd_write_uno_q(ctx, request).await
 }
 
 async fn handle_fd_write_uno_q<const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, SensorPanel, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     request: FdWrite,
 ) -> Result<(), SensorPanelError> {
     let fact = validate_fd_write(ctx, request, UNO_Q_UDP_FD, UNO_Q_UDP.object())?;
@@ -1409,9 +1337,9 @@ async fn handle_fd_write_uno_q<const ROLE: u8>(
             return Err(SensorPanelError::RuntimeViolation);
         }
     };
-    ctx.endpoint().send::<WifiTxUdpMsg>(&datagram).await?;
+    ctx.send::<WifiTxUdpMsg>(&datagram).await?;
 
-    let branch = ctx.endpoint().offer().await?;
+    let branch = ctx.offer().await?;
     let tx_ok = match branch.label() {
         wifi_labels::TX_DONE => {
             let result = branch.recv::<WifiTxDoneMsg>().await?;
@@ -1438,17 +1366,17 @@ async fn handle_fd_write_uno_q<const ROLE: u8>(
     } else {
         FdWriteDone::new_with_errno(request.fd(), 0, WASI_ERRNO_IO)
     };
-    send_engine_ret::<ROLE, LABEL_WASI_FD_WRITE_RET>(ctx, EngineRet::FdWriteDone(reply)).await
+    ctx.send::<FdWriteRetMsg>(&FdWriteDoneRet(reply)).await?;
+    Ok(())
 }
 
 async fn poll_wifi_udp_ack<const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, SensorPanel, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     expected_seq: u16,
 ) -> Result<bool, SensorPanelError> {
-    ctx.endpoint()
-        .send::<WifiRxPollMsg>(&rp2w_firmware::RP2W_UNO_Q_SENSOR_UDP_SRC_PORT)
+    ctx.send::<WifiRxPollMsg>(&rp2w_firmware::RP2W_UNO_Q_SENSOR_UDP_SRC_PORT)
         .await?;
-    let branch = ctx.endpoint().offer().await?;
+    let branch = ctx.offer().await?;
     match branch.label() {
         wifi_labels::RX_UDP => {
             let packet = branch.recv::<WifiRxPacketMsg>().await?;
@@ -1470,16 +1398,16 @@ async fn poll_wifi_udp_ack<const ROLE: u8>(
 }
 
 fn validate_fd_write<const ROLE: u8>(
-    ctx: &appkit::DriverCtx<'_, SensorPanel, ROLE>,
+    ctx: &hibana::Endpoint<'_, ROLE>,
     request: FdWrite,
     expected_fd: u8,
-    expected_object: appkit::ObjectId,
-) -> Result<appkit::LedgerFdFact, SensorPanelError> {
+    expected_object: choreofs::ObjectId,
+) -> Result<choreofs::LedgerFdFact, SensorPanelError> {
     if request.fd() != expected_fd {
         core::hint::black_box(request);
         return Err(SensorPanelError::RuntimeViolation);
     }
-    match ctx.ledger().fd(request.fd() as u32) {
+    match OBJECT_FACTS.choreofs().ledger().fd(request.fd() as u32) {
         Some(fact) if fact.object() == expected_object && fact.rights() == FD_WRITE_RIGHT => {
             Ok(fact)
         }
@@ -1584,18 +1512,16 @@ mod sensor_panel_tests {
             "sensor-panel choreography must mirror fd_read -> fd_write -> fd_write -> poll"
         );
         assert!(
-            panel.contains("if!driver_admit_cycle(&mutctx).await?{break;}driver_fd_write_display(&mutctx).await?;driver_fd_write_uno_q(&mutctx).await?;driver_poll_oneoff(&mutctx).await?;"),
+            panel.contains("driver_admit_cycle(&mutctx).await?;driver_fd_write_display(&mutctx).await?;driver_fd_write_uno_q(&mutctx).await?;driver_poll_oneoff(&mutctx).await?;"),
             "local side must admit the rolled read arm before the same two fd_write imports"
         );
 
-        let read = guest.find("letlen=sample.read_once(&mutbuffer)?;").unwrap();
-        let display = guest
-            .find("display.write_once_exact(&buffer[..len])?;")
+        let read = guest.find("letlen=sample.read(&mutbuffer)?;").unwrap();
+        let display = guest.find("display.write_all(&buffer[..len])?;").unwrap();
+        let uno_q = guest.find("uno_q.write_all(&buffer[..len])?;").unwrap();
+        let poll = guest
+            .find("thread::sleep(Duration::from_millis(u64::from(SAMPLE_MS)));")
             .unwrap();
-        let uno_q = guest
-            .find("uno_q.write_once_exact(&buffer[..len])?;")
-            .unwrap();
-        let poll = guest.find("time::sleep_ms(SAMPLE_MS)?;").unwrap();
         assert!(read < display && display < uno_q && uno_q < poll);
     }
 
@@ -1607,15 +1533,11 @@ mod sensor_panel_tests {
         )));
 
         assert!(
-            panel.contains(
-                "letfd_write_req=||g::send::<1,0,g::Msg<LABEL_WASI_FD_WRITE,EngineReq>>();"
-            ),
+            panel.contains("letfd_write_req=||g::send::<1,0,FdWriteReqMsg>();"),
             "fd_write request must use the normal WASI fd_write label"
         );
         assert!(
-            panel.contains(
-                "letfd_write_ret=||g::send::<0,1,g::Msg<LABEL_WASI_FD_WRITE_RET,EngineRet>>();"
-            ),
+            panel.contains("letfd_write_ret=||g::send::<0,1,FdWriteRetMsg>();"),
             "fd_write return must use the normal WASI fd_write_ret label"
         );
         assert!(
@@ -1628,10 +1550,10 @@ mod sensor_panel_tests {
 }
 
 async fn cyw43_boundary_tx_udp<const ROLE: u8>(
-    ctx: &mut appkit::BoundaryCtx<'_, SensorPanel, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     wifi: &mut UnoQWifiSender,
 ) -> Result<(), SensorPanelError> {
-    let branch = ctx.endpoint().offer().await?;
+    let branch = ctx.offer().await?;
     if branch.label() != wifi_labels::TX_UDP {
         core::hint::black_box(branch.label());
         return Err(SensorPanelError::RuntimeViolation);
@@ -1642,19 +1564,17 @@ async fn cyw43_boundary_tx_udp<const ROLE: u8>(
     );
     match wifi.send_datagram(&datagram) {
         Ok(written) => {
-            ctx.endpoint()
-                .send::<WifiTxDoneMsg>(&(written as u32))
-                .await?;
+            ctx.send::<WifiTxDoneMsg>(&(written as u32)).await?;
         }
         Err(()) => {
-            ctx.endpoint().send::<WifiTxErrMsg>(&1).await?;
+            ctx.send::<WifiTxErrMsg>(&1).await?;
         }
     }
     Ok(())
 }
 
 async fn cyw43_boundary_bootstrap<const ROLE: u8>(
-    ctx: &mut appkit::BoundaryCtx<'_, SensorPanel, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
 ) -> Result<UnoQWifiSender, SensorPanelError> {
     lcd_network_status(b"WiFi joining", b"sensor -> UnoQ");
     rp2w_firmware::record_choreofs_driver_trace(WIFI_TRACE_BOOT_ATTEMPT);
@@ -1667,75 +1587,67 @@ async fn cyw43_boundary_bootstrap<const ROLE: u8>(
             rp2w_firmware::Rp2wCyw43GspiDriver::new(rp2w_firmware::Rp2wCyw43GspiBitbang::new());
         let mut scratch = [0u8; 1536];
 
-        let _ = ctx.endpoint().recv::<WifiPowerOnMsg>().await?;
+        let _ = ctx.recv::<WifiPowerOnMsg>().await?;
         rp2w_firmware::rp2w_cyw43_gspi_init();
         rp2w_firmware::rp2w_cyw43_gspi_reset();
-        ctx.endpoint().send::<WifiPowerReadyMsg>(&0).await?;
+        ctx.send::<WifiPowerReadyMsg>(&0).await?;
 
-        let _ = ctx.endpoint().recv::<WifiGspiProbeMsg>().await?;
+        let _ = ctx.recv::<WifiGspiProbeMsg>().await?;
         driver.bring_up_bus().map_err(cyw43_bootstrap_error)?;
-        ctx.endpoint().send::<WifiGspiReadyMsg>(&0).await?;
+        ctx.send::<WifiGspiReadyMsg>(&0).await?;
 
-        let _ = ctx.endpoint().recv::<WifiBackplaneInitMsg>().await?;
+        let _ = ctx.recv::<WifiBackplaneInitMsg>().await?;
         let clock = driver
             .bring_up_backplane_clock()
             .map_err(cyw43_bootstrap_error)?;
         let _ = driver
             .read_backplane_u32(backplane::CHIPCOMMON_SR_CONTROL1)
             .map_err(cyw43_bootstrap_error)?;
-        ctx.endpoint()
-            .send::<WifiBackplaneReadyMsg>(&u32::from(clock))
-            .await?;
+        ctx.send::<WifiBackplaneReadyMsg>(&u32::from(clock)).await?;
 
-        let _ = ctx.endpoint().recv::<WifiFirmwareLoadMsg>().await?;
+        let _ = ctx.recv::<WifiFirmwareLoadMsg>().await?;
         driver
             .prepare_firmware_download()
             .map_err(cyw43_bootstrap_error)?;
         driver
             .write_backplane_bytes(0, CYW43_FIRMWARE, &mut scratch)
             .map_err(cyw43_bootstrap_error)?;
-        ctx.endpoint()
-            .send::<WifiFirmwareLoadedMsg>(&cyw43_firmware_len())
+        ctx.send::<WifiFirmwareLoadedMsg>(&cyw43_firmware_len())
             .await?;
 
-        let _ = ctx.endpoint().recv::<WifiNvramLoadMsg>().await?;
-        ctx.endpoint()
-            .send::<WifiNvramLoadedMsg>(&cyw43_nvram_len())
-            .await?;
+        let _ = ctx.recv::<WifiNvramLoadMsg>().await?;
+        ctx.send::<WifiNvramLoadedMsg>(&cyw43_nvram_len()).await?;
 
-        let _ = ctx.endpoint().recv::<WifiFirmwareStartMsg>().await?;
+        let _ = ctx.recv::<WifiFirmwareStartMsg>().await?;
         let ht_clock = driver
             .boot_uploaded_firmware(CYW43_NVRAM, &mut scratch)
             .map_err(cyw43_bootstrap_error)?;
         rp2w_firmware::record_choreofs_engine_status(u32::from(ht_clock));
-        ctx.endpoint()
-            .send::<WifiFirmwareStartedMsg>(&u32::from(ht_clock))
+        ctx.send::<WifiFirmwareStartedMsg>(&u32::from(ht_clock))
             .await?;
 
-        let _ = ctx.endpoint().recv::<WifiClmLoadMsg>().await?;
+        let _ = ctx.recv::<WifiClmLoadMsg>().await?;
         driver
             .load_clm(CYW43_CLM, &mut scratch)
             .map_err(cyw43_bootstrap_error)?;
-        ctx.endpoint()
-            .send::<WifiClmDoneMsg>(&cyw43_clm_len())
-            .await?;
+        ctx.send::<WifiClmDoneMsg>(&cyw43_clm_len()).await?;
 
-        let _ = ctx.endpoint().recv::<WifiCdcUpMsg>().await?;
+        let _ = ctx.recv::<WifiCdcUpMsg>().await?;
         driver
             .set_station_mac(RP2W_WIFI_LOCAL_MAC, &mut scratch)
             .map_err(cyw43_bootstrap_error)?;
         driver
             .ioctl_set(ioctl::WLC_UP, &[], &mut scratch)
             .map_err(cyw43_bootstrap_error)?;
-        ctx.endpoint().send::<WifiCdcUpDoneMsg>(&0).await?;
+        ctx.send::<WifiCdcUpDoneMsg>(&0).await?;
 
-        let _ = ctx.endpoint().recv::<WifiJoinMsg>().await?;
+        let _ = ctx.recv::<WifiJoinMsg>().await?;
         driver
             .join_wpa2(RP2W_WIFI_SSID, RP2W_WIFI_KEY, &mut scratch)
             .map_err(cyw43_bootstrap_error)?;
-        ctx.endpoint().send::<WifiJoinDoneMsg>(&0).await?;
+        ctx.send::<WifiJoinDoneMsg>(&0).await?;
 
-        let _ = ctx.endpoint().recv::<WifiLinkPollMsg>().await?;
+        let _ = ctx.recv::<WifiLinkPollMsg>().await?;
         let bssid = driver
             .wait_for_bssid(&mut scratch)
             .map_err(cyw43_bootstrap_error)?;
@@ -1743,37 +1655,36 @@ async fn cyw43_boundary_bootstrap<const ROLE: u8>(
             bssid[0], bssid[1], bssid[2], bssid[3],
         ]));
         rp2w_firmware::record_choreofs_driver_trace(WIFI_TRACE_WIFI_SEND_OK | u32::from(clock));
-        ctx.endpoint()
-            .send::<WifiLinkUpMsg>(&u32::from_be_bytes([
-                bssid[0], bssid[1], bssid[2], bssid[3],
-            ]))
-            .await?;
+        ctx.send::<WifiLinkUpMsg>(&u32::from_be_bytes([
+            bssid[0], bssid[1], bssid[2], bssid[3],
+        ]))
+        .await?;
         lcd_network_status(b"WiFi joined", b"UnoQ UDP ready");
         Ok(UnoQWifiSender::ready(driver))
     }
 
     #[cfg(not(feature = "embed-cyw43-artifacts"))]
     {
-        let _ = ctx.endpoint().recv::<WifiPowerOnMsg>().await?;
-        ctx.endpoint().send::<WifiPowerReadyMsg>(&0).await?;
-        let _ = ctx.endpoint().recv::<WifiGspiProbeMsg>().await?;
-        ctx.endpoint().send::<WifiGspiReadyMsg>(&0).await?;
-        let _ = ctx.endpoint().recv::<WifiBackplaneInitMsg>().await?;
-        ctx.endpoint().send::<WifiBackplaneReadyMsg>(&0).await?;
-        let _ = ctx.endpoint().recv::<WifiFirmwareLoadMsg>().await?;
-        ctx.endpoint().send::<WifiFirmwareLoadedMsg>(&0).await?;
-        let _ = ctx.endpoint().recv::<WifiNvramLoadMsg>().await?;
-        ctx.endpoint().send::<WifiNvramLoadedMsg>(&0).await?;
-        let _ = ctx.endpoint().recv::<WifiFirmwareStartMsg>().await?;
-        ctx.endpoint().send::<WifiFirmwareStartedMsg>(&0).await?;
-        let _ = ctx.endpoint().recv::<WifiClmLoadMsg>().await?;
-        ctx.endpoint().send::<WifiClmDoneMsg>(&0).await?;
-        let _ = ctx.endpoint().recv::<WifiCdcUpMsg>().await?;
-        ctx.endpoint().send::<WifiCdcUpDoneMsg>(&0).await?;
-        let _ = ctx.endpoint().recv::<WifiJoinMsg>().await?;
-        ctx.endpoint().send::<WifiJoinDoneMsg>(&0).await?;
-        let _ = ctx.endpoint().recv::<WifiLinkPollMsg>().await?;
-        ctx.endpoint().send::<WifiLinkUpMsg>(&0).await?;
+        let _ = ctx.recv::<WifiPowerOnMsg>().await?;
+        ctx.send::<WifiPowerReadyMsg>(&0).await?;
+        let _ = ctx.recv::<WifiGspiProbeMsg>().await?;
+        ctx.send::<WifiGspiReadyMsg>(&0).await?;
+        let _ = ctx.recv::<WifiBackplaneInitMsg>().await?;
+        ctx.send::<WifiBackplaneReadyMsg>(&0).await?;
+        let _ = ctx.recv::<WifiFirmwareLoadMsg>().await?;
+        ctx.send::<WifiFirmwareLoadedMsg>(&0).await?;
+        let _ = ctx.recv::<WifiNvramLoadMsg>().await?;
+        ctx.send::<WifiNvramLoadedMsg>(&0).await?;
+        let _ = ctx.recv::<WifiFirmwareStartMsg>().await?;
+        ctx.send::<WifiFirmwareStartedMsg>(&0).await?;
+        let _ = ctx.recv::<WifiClmLoadMsg>().await?;
+        ctx.send::<WifiClmDoneMsg>(&0).await?;
+        let _ = ctx.recv::<WifiCdcUpMsg>().await?;
+        ctx.send::<WifiCdcUpDoneMsg>(&0).await?;
+        let _ = ctx.recv::<WifiJoinMsg>().await?;
+        ctx.send::<WifiJoinDoneMsg>(&0).await?;
+        let _ = ctx.recv::<WifiLinkPollMsg>().await?;
+        ctx.send::<WifiLinkUpMsg>(&0).await?;
         rp2w_firmware::record_choreofs_driver_trace(WIFI_TRACE_BOOT_ERR);
         lcd_network_status(b"WiFi disabled", b"build feature");
         Ok(UnoQWifiSender::unavailable())
@@ -1788,10 +1699,10 @@ fn cyw43_bootstrap_error(error: rp2w_firmware::Rp2wCyw43GspiError) -> SensorPane
 }
 
 async fn cyw43_boundary_rx_udp<const ROLE: u8>(
-    ctx: &mut appkit::BoundaryCtx<'_, SensorPanel, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
     wifi: &mut UnoQWifiSender,
 ) -> Result<(), SensorPanelError> {
-    let branch = ctx.endpoint().offer().await?;
+    let branch = ctx.offer().await?;
     if branch.label() != wifi_labels::RX_UDP_POLL {
         core::hint::black_box(branch.label());
         return Err(SensorPanelError::RuntimeViolation);
@@ -1800,25 +1711,19 @@ async fn cyw43_boundary_rx_udp<const ROLE: u8>(
     rp2w_firmware::record_choreofs_driver_trace(WIFI_TRACE_RX_REQ | u32::from(local_port & 0xff));
     match wifi.recv_packet(local_port) {
         Ok(Some(packet)) => {
-            ctx.endpoint().send::<WifiRxPacketMsg>(&packet).await?;
+            ctx.send::<WifiRxPacketMsg>(&packet).await?;
         }
         Ok(None) | Err(()) => {
-            ctx.endpoint().send::<WifiRxPendingMsg>(&0).await?;
+            ctx.send::<WifiRxPendingMsg>(&0).await?;
         }
     }
     Ok(())
 }
 
 async fn driver_poll_oneoff<const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, SensorPanel, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
 ) -> Result<(), SensorPanelError> {
-    let request = match recv_engine_req::<ROLE, LABEL_WASI_POLL_ONEOFF>(ctx).await? {
-        EngineReq::PollOneoff(request) => request,
-        other => {
-            core::hint::black_box(other);
-            return Err(SensorPanelError::RuntimeViolation);
-        }
-    };
+    let request = ctx.recv::<PollOneoffReqMsg>().await?.0;
     rp2w_firmware::record_choreofs_poll_timeout(request.timeout_tick());
     if request.timeout_tick() != EXPECTED_POLL_TIMEOUT_MS {
         #[cfg(feature = "wasm-engine-core")]
@@ -1828,18 +1733,16 @@ async fn driver_poll_oneoff<const ROLE: u8>(
     }
     rp2w_firmware::rp2w_poll_delay(request.timeout_tick());
     rp2w_firmware::record_choreofs_poll();
-    send_engine_ret::<ROLE, LABEL_WASI_POLL_ONEOFF_RET>(
-        ctx,
-        EngineRet::PollReady(PollReady::new(1)),
-    )
-    .await
+    ctx.send::<PollOneoffRetMsg>(&PollReadyRet(PollReady::new(1)))
+        .await?;
+    Ok(())
 }
 
 fn find_ledger_fd(
-    ledger: appkit::LedgerFacts<'_>,
-    object: appkit::ObjectId,
+    ledger: choreofs::LedgerFacts<'_>,
+    object: choreofs::ObjectId,
     rights: u64,
-) -> Option<appkit::LedgerFdFact> {
+) -> Option<choreofs::LedgerFdFact> {
     let facts = ledger.fds();
     let mut index = 0usize;
     while index < facts.len() {
@@ -1866,7 +1769,9 @@ pub extern "C" fn rp2w_selected_run() -> ! {
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
 fn main() {
-    rp2w_firmware::run::<SensorPanel>()
+    panic!(
+        "rp2w-firmware examples are RP2350 hardware artifacts; build for thumbv8m.main-none-eabi"
+    )
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -1892,11 +1797,11 @@ mod rp2w_firmware {
     pub(super) const CHOREOFS_DRIVER_STARTED: u32 = 0x5741_0010;
     pub(super) const CHOREOFS_GPIO_READY: u32 = 0x5741_0020;
 
-    pub(super) fn record_choreofs_path_open(object: appkit::ObjectId) {
+    pub(super) fn record_choreofs_path_open(object: choreofs::ObjectId) {
         ::rp2w_firmware::record_choreofs_path_open(object);
     }
 
-    pub(super) fn record_choreofs_fd_write(object: appkit::ObjectId) {
+    pub(super) fn record_choreofs_fd_write(object: choreofs::ObjectId) {
         ::rp2w_firmware::record_choreofs_fd_write(object);
     }
 

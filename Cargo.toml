@@ -17,17 +17,12 @@ exclude = [
     "examples/baker-firmware/wasip1/guest",
     "examples/rp2w-firmware/wasip1/guest",
     "examples/uno-q-heterogeneous/wasip1/guest",
-    "guest/hibana-wasip1-guest",
-    "guest/wasip1-programs",
 ]
 resolver = "3"
 
 [dependencies]
-hibana = { version = "0.9.0", default-features = false }
+hibana = { version = "0.9.4", default-features = false }
 hibana-wasip1-runtime = { path = "../hibana-wasip1-runtime", default-features = false }
-
-[patch.crates-io]
-hibana = { path = "../hibana" }
 
 [features]
 default = []

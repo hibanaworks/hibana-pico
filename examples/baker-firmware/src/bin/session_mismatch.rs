@@ -4,17 +4,21 @@
 use baker_firmware::{BakerCapsuleFacts, BakerPlacement};
 use hibana::g;
 use hibana_pico::appkit;
-#[cfg(feature = "wasm-engine-core")]
-use hibana_wasip1_runtime::protocol::BudgetRun;
+use hibana_wasip1_runtime::choreofs;
 use hibana_wasip1_runtime::protocol::{
-    EngineReq, EngineRet, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET, LABEL_WASI_PATH_OPEN,
-    LABEL_WASI_PATH_OPEN_RET, PathOpen, PathOpened,
+    FdBinding, FdCloseReqMsg, FdCloseRetMsg, FdFdstatGetReqMsg, FdFdstatGetRetMsg, FdPrestat,
+    FdPrestatDirNameDone, FdPrestatDirNameReqMsg, FdPrestatDirNameRetMsg, FdPrestatGetReqMsg,
+    FdPrestatGetRetMsg, FdStat, FdStatRet, FdWrite, FdWriteReqMsg, FdWriteRetMsg, FdWriteRow,
+    MemRights, PathOpen, PathOpenReqMsg, PathOpenRetMsg,
 };
 
-const DEVICE_PREOPEN_FD: u8 = 9;
-const SESSION_MISMATCH_FD: u8 = 3;
-const SESSION_MISMATCH_OBJECT: appkit::ObjectId = appkit::ObjectId(4);
+const ROOT_PREOPEN_FD: u8 = 3;
+const SESSION_MISMATCH_FD: u8 = 4;
+const SESSION_MISMATCH_OBJECT: choreofs::ObjectId = choreofs::ObjectId(4);
+const ROOT_PREOPEN_NAME: &[u8] = b"/";
 const FD_WRITE_RIGHT: u64 = 1 << 6;
+const SESSION_MISMATCH_PAYLOAD: &[u8] = b"session mismatch\n";
+const ERRNO_BADF: u16 = 8;
 const RESULT_SESSION_MISMATCH_OK: u32 = 0x4849_534d;
 
 #[cfg(feature = "embed-wasip1-artifacts")]
@@ -25,40 +29,75 @@ const WASM_SESSION_MISMATCH: &[u8] = include_bytes!(concat!(
 #[cfg(not(feature = "embed-wasip1-artifacts"))]
 const WASM_SESSION_MISMATCH: &[u8] = &[];
 
-const SESSION_MISMATCH_FILE: appkit::ChoreoFsObject = appkit::ChoreoFsObject::new(
+const SESSION_MISMATCH_FILE: choreofs::ChoreoFsObject = choreofs::ChoreoFsObject::writable(
     b"device/session-mismatch",
     SESSION_MISMATCH_OBJECT,
-    appkit::FdSpec::new(SESSION_MISMATCH_FD as u32, FD_WRITE_RIGHT, 1),
+    choreofs::FdSpec::new(SESSION_MISMATCH_FD as u32, FD_WRITE_RIGHT, 1),
+    FdBinding::write(FdWriteRow::Base),
 );
-static OBJECT_FACTS: appkit::ChoreoFsObjectSet<1> =
-    appkit::ChoreoFsObjectSet::new([SESSION_MISMATCH_FILE]);
+static OBJECT_FACTS: choreofs::ChoreoFsObjectSet<1> =
+    choreofs::ChoreoFsObjectSet::new([SESSION_MISMATCH_FILE]);
 
 struct SessionMismatch;
 struct SessionMismatchLocal;
 
 impl appkit::Capsule for SessionMismatch {
     type Placement = BakerPlacement;
-    type Local = SessionMismatchLocal;
+    type Localside = SessionMismatchLocal;
 
     fn choreography() -> impl hibana::runtime::program::Projectable {
-        g::seq(
-            g::send::<1, 0, g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>>(),
+        let fd_prestat_get = || {
             g::seq(
-                g::send::<0, 1, g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>>(),
-                g::seq(
-                    g::send::<1, 0, g::Msg<LABEL_WASI_FD_WRITE, EngineReq>>(),
-                    g::send::<0, 1, g::Msg<LABEL_WASI_FD_WRITE_RET, EngineRet>>(),
-                ),
+                g::send::<1, 0, FdPrestatGetReqMsg>(),
+                g::send::<0, 1, FdPrestatGetRetMsg>(),
+            )
+        };
+        let fd_prestat_dir_name = || {
+            g::seq(
+                g::send::<1, 0, FdPrestatDirNameReqMsg>(),
+                g::send::<0, 1, FdPrestatDirNameRetMsg>(),
+            )
+        };
+        let fd_fdstat_get = || {
+            g::seq(
+                g::send::<1, 0, FdFdstatGetReqMsg>(),
+                g::send::<0, 1, FdFdstatGetRetMsg>(),
+            )
+        };
+        let path_open = || {
+            g::seq(
+                g::send::<1, 0, PathOpenReqMsg>(),
+                g::send::<0, 1, PathOpenRetMsg>(),
+            )
+        };
+        let fd_write = || {
+            g::seq(
+                g::send::<1, 0, FdWriteReqMsg>(),
+                g::send::<0, 1, FdWriteRetMsg>(),
+            )
+        };
+        let fd_close = || {
+            g::seq(
+                g::send::<1, 0, FdCloseReqMsg>(),
+                g::send::<0, 1, FdCloseRetMsg>(),
+            )
+        };
+
+        let startup = g::seq(
+            fd_prestat_get(),
+            g::seq(
+                fd_prestat_dir_name(),
+                g::seq(fd_prestat_get(), g::seq(fd_fdstat_get(), path_open())),
             ),
-        )
+        );
+        let body = g::seq(fd_write(), fd_close());
+
+        g::seq(startup, body)
     }
 
     fn observe(tap: &mut hibana::runtime::tap::TapPort<'_>) {
         baker_firmware::poll_epf_diagnostic(tap);
     }
-
-    #[cfg(feature = "wasm-engine-core")]
-    const WASI_GUEST_DRIVE: appkit::WasiGuestDrive = appkit::WasiGuestDrive::Localside;
 }
 
 impl BakerCapsuleFacts for SessionMismatch {
@@ -67,21 +106,20 @@ impl BakerCapsuleFacts for SessionMismatch {
     const SIO_ROLE0_TX_SESSION_XOR: u32 = 0x1111_0000;
 
     fn run_engine_image() {
-        baker_firmware::run_engine_wasi::<Self>(appkit::WasiImage::from_static(
+        baker_firmware::run_engine_wasi::<Self>(appkit::WasiImage::from_bytes(
             WASM_SESSION_MISMATCH,
         ));
     }
 
-    fn driver_facts() -> appkit::DriverFacts<'static> {
-        OBJECT_FACTS.driver_facts()
+    fn choreofs() -> choreofs::ChoreoFs<'static> {
+        OBJECT_FACTS.choreofs()
     }
 }
 
 #[derive(Debug)]
 enum SessionMismatchError {
     Endpoint,
-    #[cfg(feature = "wasm-engine-core")]
-    Wasi,
+    RuntimeViolation,
 }
 
 impl From<hibana::EndpointError> for SessionMismatchError {
@@ -90,121 +128,170 @@ impl From<hibana::EndpointError> for SessionMismatchError {
     }
 }
 
-#[cfg(feature = "wasm-engine-core")]
-impl From<appkit::WasiGuestError> for SessionMismatchError {
-    fn from(_: appkit::WasiGuestError) -> Self {
-        Self::Wasi
-    }
-}
-
 impl appkit::Localside<SessionMismatch> for SessionMismatchLocal {
     type Error = SessionMismatchError;
 
-    fn engine<'endpoint, 'guest, const ROLE: u8>(
-        ctx: appkit::EngineCtx<'endpoint, 'guest, SessionMismatch, ROLE>,
+    fn engine<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
+    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
+        appkit::pending(ctx)
+    }
+
+    fn driver<'endpoint, const ROLE: u8>(
+        mut ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
-            #[cfg(feature = "wasm-engine-core")]
-            let mut ctx = ctx;
-            if ROLE == 1 {
-                #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
-                {
-                    let mut attempts = 0usize;
-                    while attempts < 8 {
-                        let status = ctx
-                            .drive_wasi_guest_once(BudgetRun::new(1, 0, 2048))
-                            .await?;
-                        if !matches!(status, appkit::WasiGuestStatus::BudgetExpired(_)) {
-                            break;
-                        }
-                        attempts += 1;
-                    }
-                }
-                #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
-                {
-                    let mut attempts = 0usize;
-                    while attempts < 8 {
-                        let status =
-                            match ctx.drive_wasi_guest_once_blocking(BudgetRun::new(1, 0, 2048)) {
-                                Ok(status) => status,
-                                Err(error) => {
-                                    baker_firmware::record_choreofs_engine_error_code(0x4550_0001);
-                                    core::hint::black_box(&error);
-                                    break;
-                                }
-                            };
-                        if !matches!(status, appkit::WasiGuestStatus::BudgetExpired(_)) {
-                            break;
-                        }
-                        attempts += 1;
-                    }
+            let choreofs = OBJECT_FACTS.choreofs();
+            if ROLE == 0 && !choreofs.facts().entries().is_empty() {
+                match drive_session_mismatch_probe(&mut ctx, choreofs).await {
+                    Ok(()) | Err(SessionMismatchError::Endpoint) => {}
+                    Err(error) => return Err(error),
                 }
             }
-            ctx.pending().await
+            appkit::pending(ctx).await
         }
     }
 
-    fn driver<'a, const ROLE: u8>(
-        mut ctx: appkit::DriverCtx<'a, SessionMismatch, ROLE>,
+    fn boundary<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        async move {
-            if ROLE == 0 {
-                let open = ctx
-                    .endpoint()
-                    .recv::<g::Msg<LABEL_WASI_PATH_OPEN, EngineReq>>()
-                    .await?;
-                let EngineReq::PathOpen(open) = open else {
-                    core::hint::black_box(open);
-                    return ctx.pending().await;
-                };
-                driver_path_open(&mut ctx, open).await?;
-            }
-            ctx.pending().await
-        }
+        appkit::pending(ctx)
     }
+}
 
-    fn boundary<'a, const ROLE: u8>(
-        ctx: appkit::BoundaryCtx<'a, SessionMismatch, ROLE>,
-    ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
+async fn drive_session_mismatch_probe<const ROLE: u8>(
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
+    choreofs: choreofs::ChoreoFs<'static>,
+) -> Result<(), SessionMismatchError> {
+    drive_wasi_startup(ctx, choreofs).await?;
+    let request = ctx.recv::<FdWriteReqMsg>().await?.0;
+    driver_fd_write(ctx, choreofs, request).await?;
+    handle_fd_close(ctx, choreofs).await
+}
+
+async fn drive_wasi_startup<const ROLE: u8>(
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
+    choreofs: choreofs::ChoreoFs<'static>,
+) -> Result<(), SessionMismatchError> {
+    handle_fd_prestat_get(ctx).await?;
+    handle_fd_prestat_dir_name(ctx).await?;
+    handle_fd_prestat_get(ctx).await?;
+    handle_fd_fdstat_get(ctx, choreofs).await?;
+    let request = ctx.recv::<PathOpenReqMsg>().await?.0;
+    driver_path_open(ctx, choreofs, request).await?;
+    Ok(())
+}
+
+async fn handle_fd_prestat_get<const ROLE: u8>(
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
+) -> Result<(), SessionMismatchError> {
+    let request = ctx.recv::<FdPrestatGetReqMsg>().await?.0;
+    let response = if request.fd() == ROOT_PREOPEN_FD {
+        FdPrestat::new(request.fd(), ROOT_PREOPEN_NAME.len() as u8)
+    } else {
+        FdPrestat::new_with_errno(request.fd(), 0, ERRNO_BADF)
+    };
+    ctx.send::<FdPrestatGetRetMsg>(&hibana_wasip1_runtime::protocol::FdPrestatRet(response))
+        .await?;
+    Ok(())
+}
+
+async fn handle_fd_prestat_dir_name<const ROLE: u8>(
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
+) -> Result<(), SessionMismatchError> {
+    let request = ctx.recv::<FdPrestatDirNameReqMsg>().await?.0;
+    let response = if request.fd() == ROOT_PREOPEN_FD {
+        FdPrestatDirNameDone::new(request.fd(), ROOT_PREOPEN_NAME, 0)
+    } else {
+        FdPrestatDirNameDone::new(request.fd(), b"", ERRNO_BADF)
+    }
+    .map_err(|_| SessionMismatchError::RuntimeViolation)?;
+    ctx.send::<FdPrestatDirNameRetMsg>(&hibana_wasip1_runtime::protocol::FdPrestatDirNameRet(
+        response,
+    ))
+    .await?;
+    Ok(())
+}
+
+async fn handle_fd_fdstat_get<const ROLE: u8>(
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
+    choreofs: choreofs::ChoreoFs<'static>,
+) -> Result<(), SessionMismatchError> {
+    let request = ctx.recv::<FdFdstatGetReqMsg>().await?.0;
+    ctx.send::<FdFdstatGetRetMsg>(&fd_stat_response(choreofs, request)?)
+        .await?;
+    Ok(())
+}
+
+async fn handle_fd_close<const ROLE: u8>(
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
+    choreofs: choreofs::ChoreoFs<'static>,
+) -> Result<(), SessionMismatchError> {
+    let request = ctx.recv::<FdCloseReqMsg>().await?.0;
+    ctx.send::<FdCloseRetMsg>(&choreofs.fd_close(request))
+        .await?;
+    Ok(())
+}
+
+fn fd_stat_response(
+    choreofs: choreofs::ChoreoFs<'static>,
+    request: hibana_wasip1_runtime::protocol::FdRequest,
+) -> Result<FdStatRet, SessionMismatchError> {
+    match request.fd() {
+        0 | ROOT_PREOPEN_FD => Ok(FdStatRet(FdStat::new(request.fd(), MemRights::Read))),
+        1 | 2 => Ok(FdStatRet(FdStat::new(request.fd(), MemRights::Write))),
+        SESSION_MISMATCH_FD => Ok(choreofs.fd_fdstat_get(request)),
+        _ => Err(SessionMismatchError::RuntimeViolation),
     }
 }
 
 async fn driver_path_open<const ROLE: u8>(
-    ctx: &mut appkit::DriverCtx<'_, SessionMismatch, ROLE>,
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
+    choreofs: choreofs::ChoreoFs<'static>,
     request: PathOpen,
 ) -> Result<(), SessionMismatchError> {
-    if request.preopen_fd() != DEVICE_PREOPEN_FD || request.rights_base() != FD_WRITE_RIGHT {
+    if request.preopen_fd() != ROOT_PREOPEN_FD {
         core::hint::black_box(request);
-        return Ok(());
+        return Err(SessionMismatchError::RuntimeViolation);
     }
-    let object = match ctx.choreofs().resolve(request.path()) {
-        Some(object) => object,
-        None => {
-            core::hint::black_box(request);
-            return Ok(());
-        }
-    };
-    if object != SESSION_MISMATCH_OBJECT {
-        core::hint::black_box(object);
-        return Ok(());
+    let normalized = PathOpen::new(
+        request.preopen_fd(),
+        request.rights_base(),
+        normalize_path(request.path()),
+    )
+    .map_err(|_| SessionMismatchError::RuntimeViolation)?;
+    let open = choreofs.path_open(normalized);
+    if open.fd() != Some(SESSION_MISMATCH_FD) || open.object() != Some(SESSION_MISMATCH_OBJECT) {
+        core::hint::black_box(open);
+        return Err(SessionMismatchError::RuntimeViolation);
     }
-    let fact = match ctx.ledger().fd(SESSION_MISMATCH_FD as u32) {
-        Some(fact) if fact.object() == object && fact.rights() == FD_WRITE_RIGHT => fact,
-        Some(fact) => {
-            core::hint::black_box(fact);
-            return Ok(());
-        }
-        None => {
-            core::hint::black_box(request);
-            return Ok(());
-        }
-    };
-    let reply = EngineRet::PathOpened(PathOpened::new(fact.fd() as u8, 0));
-    ctx.endpoint()
-        .send::<g::Msg<LABEL_WASI_PATH_OPEN_RET, EngineRet>>(&reply)
-        .await?;
+    ctx.send::<PathOpenRetMsg>(&open.opened_ret()).await?;
     Ok(())
+}
+
+async fn driver_fd_write<const ROLE: u8>(
+    ctx: &mut hibana::Endpoint<'_, ROLE>,
+    choreofs: choreofs::ChoreoFs<'static>,
+    request: FdWrite,
+) -> Result<(), SessionMismatchError> {
+    if request.fd() != SESSION_MISMATCH_FD || request.as_bytes() != SESSION_MISMATCH_PAYLOAD {
+        core::hint::black_box(request);
+        return Err(SessionMismatchError::RuntimeViolation);
+    }
+    let write = choreofs.fd_write(request);
+    if !write.is_writable() || write.object() != Some(SESSION_MISMATCH_OBJECT) {
+        core::hint::black_box(write);
+        return Err(SessionMismatchError::RuntimeViolation);
+    }
+    ctx.send::<FdWriteRetMsg>(&write.written()).await?;
+    Ok(())
+}
+
+fn normalize_path(path: &[u8]) -> &[u8] {
+    match path {
+        [b'/', rest @ ..] => rest,
+        _ => path,
+    }
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]
@@ -221,7 +308,7 @@ pub extern "C" fn baker_selected_run() -> ! {
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
 fn main() {
-    baker_firmware::run::<SessionMismatch>()
+    panic!("baker-firmware examples are RP2040 hardware artifacts; build for thumbv6m-none-eabi")
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]

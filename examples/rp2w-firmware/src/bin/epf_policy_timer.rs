@@ -93,7 +93,7 @@ fn try_load_uart_policy_image(policy_image: &mut [u8; EPF_POLICY_IMAGE_BYTES]) -
 
 impl appkit::Capsule for Rp2wEpfPolicyTimer {
     type Placement = Rp2wPlacement;
-    type Local = Rp2wEpfPolicyTimerLocal;
+    type Localside = Rp2wEpfPolicyTimerLocal;
 
     fn choreography() -> impl hibana::runtime::program::Projectable {
         g::seq(
@@ -116,18 +116,16 @@ impl appkit::Capsule for Rp2wEpfPolicyTimer {
         )
     }
 
-    fn register_resolvers<'cfg, R>(registry: &mut R)
+    fn register_resolvers<'cfg, R, const ROLE: u8>(registry: &mut R)
     where
-        R: appkit::ResolverRegistry<'cfg, Self>,
+        R: appkit::ResolverRegistry<'cfg, Self, ROLE>,
     {
         rp2w_firmware::record_choreofs_engine_status(0x4550_0200);
         let resolver = ResolverRef::decision_state(&EPF_RESOLVER_STATE, timer_epf_policy_resolver);
         let image_resolver =
             ResolverRef::decision_state(&EPF_RESOLVER_STATE, epf_image_ready_resolver);
-        registry.resolver::<EPF_IMAGE_LOAD_POLICY, 0>(image_resolver);
-        registry.resolver::<EPF_IMAGE_LOAD_POLICY, 1>(image_resolver);
-        registry.resolver::<EPF_TIMER_ROUTE_POLICY, 0>(resolver);
-        registry.resolver::<EPF_TIMER_ROUTE_POLICY, 1>(resolver);
+        registry.resolver::<EPF_IMAGE_LOAD_POLICY>(image_resolver);
+        registry.resolver::<EPF_TIMER_ROUTE_POLICY>(resolver);
         rp2w_firmware::record_choreofs_engine_status(0x4550_0201);
     }
 
@@ -147,18 +145,13 @@ impl Rp2wCapsuleFacts for Rp2wEpfPolicyTimer {
 impl appkit::Localside<Rp2wEpfPolicyTimer> for Rp2wEpfPolicyTimerLocal {
     type Error = Rp2wEpfPolicyTimerError;
 
-    fn engine<'endpoint, 'guest, const ROLE: u8>(
-        mut ctx: appkit::EngineCtx<'endpoint, 'guest, Rp2wEpfPolicyTimer, ROLE>,
+    fn engine<'endpoint, const ROLE: u8>(
+        mut ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 1 {
                 rp2w_firmware::record_choreofs_engine_status(0x4550_010f);
-                let branch = ctx.endpoint().offer().await?;
-                if branch.label() != LABEL_EPF_POLICY_IMAGE {
-                    let _ = branch.recv::<EpfNoImageNotice>().await?;
-                    return Err(Rp2wEpfPolicyTimerError::RuntimeViolation);
-                }
-                let image = branch.recv::<EpfPolicyImage>().await?;
+                let image = ctx.recv::<EpfPolicyImage>().await?;
                 if !rp2w_firmware::load_epf_choreography_image(&image) {
                     return Err(Rp2wEpfPolicyTimerError::RuntimeViolation);
                 }
@@ -170,7 +163,7 @@ impl appkit::Localside<Rp2wEpfPolicyTimer> for Rp2wEpfPolicyTimerLocal {
                 rp2w_firmware::record_choreofs_engine_status(0x4550_0110);
 
                 while !rp2w_firmware::rp2w_timer_route_resolver_ready(500) {
-                    rp2w_firmware::rp2w_poll_delay(1);
+                    core::hint::spin_loop();
                 }
                 if !rp2w_firmware::rp2w_timer_route_irq_observed() {
                     return Err(Rp2wEpfPolicyTimerError::RuntimeViolation);
@@ -180,27 +173,27 @@ impl appkit::Localside<Rp2wEpfPolicyTimer> for Rp2wEpfPolicyTimerLocal {
                 }
                 rp2w_firmware::record_choreofs_engine_status(0x4550_0111);
 
-                ctx.endpoint().send::<ResponseReady>(&7).await?;
+                ctx.send::<ResponseReady>(&7).await?;
                 rp2w_firmware::record_choreofs_engine_status(0x4550_0112);
 
-                let done = ctx.endpoint().recv::<TimerRouteDone>().await?;
+                let done = ctx.recv::<TimerRouteDone>().await?;
                 if done != 7 {
                     return Err(Rp2wEpfPolicyTimerError::RuntimeViolation);
                 }
                 rp2w_firmware::record_choreofs_engine_status(0x4550_0113);
 
-                ctx.endpoint().send::<TimerRouteAck>(&7).await?;
+                ctx.send::<TimerRouteAck>(&7).await?;
                 rp2w_firmware::record_choreofs_engine_status(0x4550_0114);
 
                 rp2w_firmware::mark_runtime_ready();
-                return ctx.pending().await;
+                return appkit::pending(ctx).await;
             }
-            ctx.pending().await
+            appkit::pending(ctx).await
         }
     }
 
-    fn driver<'a, const ROLE: u8>(
-        mut ctx: appkit::DriverCtx<'a, Rp2wEpfPolicyTimer, ROLE>,
+    fn driver<'endpoint, const ROLE: u8>(
+        mut ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 0 {
@@ -215,7 +208,7 @@ impl appkit::Localside<Rp2wEpfPolicyTimer> for Rp2wEpfPolicyTimerLocal {
                         break;
                     }
                     if waits >= 5_000 {
-                        ctx.endpoint().send::<EpfNoImageNotice>(&0).await?;
+                        ctx.send::<EpfNoImageNotice>(&0).await?;
                         return Err(Rp2wEpfPolicyTimerError::RuntimeViolation);
                     }
                     rp2w_firmware::rp2w_poll_delay(1);
@@ -224,11 +217,11 @@ impl appkit::Localside<Rp2wEpfPolicyTimer> for Rp2wEpfPolicyTimerLocal {
 
                 if !policy_image_loaded && !rp2w_firmware::read_epf_policy_image(&mut policy_image)
                 {
-                    ctx.endpoint().send::<EpfNoImageNotice>(&0).await?;
+                    ctx.send::<EpfNoImageNotice>(&0).await?;
                     return Err(Rp2wEpfPolicyTimerError::RuntimeViolation);
                 }
 
-                ctx.endpoint().send::<EpfPolicyImage>(&policy_image).await?;
+                ctx.send::<EpfPolicyImage>(&policy_image).await?;
                 if !policy_image_loaded
                     && !rp2w_firmware::load_epf_choreography_image(&policy_image)
                 {
@@ -243,20 +236,16 @@ impl appkit::Localside<Rp2wEpfPolicyTimer> for Rp2wEpfPolicyTimerLocal {
                 }
                 rp2w_firmware::record_choreofs_driver_trace(0x4550_0011);
 
-                let branch = ctx.endpoint().offer().await?;
-                rp2w_firmware::record_choreofs_driver_trace(
-                    0x4550_1000 | u32::from(branch.label()),
-                );
-                let response = branch.recv::<ResponseReady>().await?;
+                let response = ctx.recv::<ResponseReady>().await?;
                 if response != 7 {
                     return Err(Rp2wEpfPolicyTimerError::RuntimeViolation);
                 }
                 rp2w_firmware::record_choreofs_driver_trace(0x4550_0012);
 
-                ctx.endpoint().send::<TimerRouteDone>(&7).await?;
+                ctx.send::<TimerRouteDone>(&7).await?;
                 rp2w_firmware::record_choreofs_driver_trace(0x4550_0013);
 
-                let ack = ctx.endpoint().recv::<TimerRouteAck>().await?;
+                let ack = ctx.recv::<TimerRouteAck>().await?;
                 if ack != 7 {
                     return Err(Rp2wEpfPolicyTimerError::RuntimeViolation);
                 }
@@ -266,16 +255,16 @@ impl appkit::Localside<Rp2wEpfPolicyTimer> for Rp2wEpfPolicyTimerLocal {
                 rp2w_firmware::mark_success(
                     <Rp2wEpfPolicyTimer as Rp2wCapsuleFacts>::SUCCESS_RESULT,
                 );
-                return ctx.pending().await;
+                return appkit::pending(ctx).await;
             }
-            ctx.pending().await
+            appkit::pending(ctx).await
         }
     }
 
-    fn boundary<'a, const ROLE: u8>(
-        ctx: appkit::BoundaryCtx<'a, Rp2wEpfPolicyTimer, ROLE>,
+    fn boundary<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
+        appkit::pending(ctx)
     }
 }
 
@@ -293,7 +282,9 @@ pub extern "C" fn rp2w_selected_run() -> ! {
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
 fn main() {
-    rp2w_firmware::run::<Rp2wEpfPolicyTimer>()
+    panic!(
+        "rp2w-firmware examples are RP2350 hardware artifacts; build for thumbv8m.main-none-eabi"
+    )
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]

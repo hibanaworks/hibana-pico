@@ -4,8 +4,9 @@
 //! site images. It does not define a choreography DSL, expose engine internals,
 //! or complete WASI P1 imports outside projected endpoint/carrier progress.
 //!
-//! The public path is deliberately flat: application, site, and firmware code
-//! import curated `appkit::*` items only. Implementation layout stays private.
+//! The public path is deliberately flat for capsule assembly. Hibana choreography
+//! and WASI/ChoreoFS facts stay owned by their own crates; implementation
+//! layout under this module stays private.
 
 mod internal;
 
@@ -13,15 +14,10 @@ mod internal;
 pub use internal::{EmbeddedAttachStorage, EmbeddedAttachStorageRef};
 #[cfg(feature = "wasm-engine-core")]
 pub use internal::{
-    WasiGuestArena, WasiGuestDrive, WasiGuestError, WasiGuestImage, WasiGuestLease, WasiGuestStatus,
-};
-
-pub use hibana_wasip1_runtime::choreofs::{
-    ChoreoFsFacts, ChoreoFsObject, ChoreoFsObjectSet, DriverFacts, FdSpec, LedgerFacts,
-    LedgerFdFact, ObjectId,
+    WasiGuestArena, WasiGuestError, WasiGuestImage, WasiGuestLease, WasiGuestStatus,
 };
 
 pub use internal::{
-    BoundaryCtx, Capsule, DriverCtx, EngineCtx, Local, Localside, LogicalImage, NoWasi, Placement,
-    ResolverRegistry, RoleKind, RoleResult, RoleSet, WasiImage, run,
+    Capsule, Localside, LogicalImage, NoWasi, Placement, ResolverRegistry, RoleKind, RoleResult,
+    RoleSet, WasiImage, pending, run,
 };

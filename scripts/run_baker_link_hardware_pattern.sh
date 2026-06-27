@@ -12,6 +12,7 @@ features="${HIBANA_PICO_FEATURES:-wasm-engine-core embed-wasip1-artifacts}"
 expected_result="48494f4b"
 expected_core1_stage="48490004"
 allow_core1_ready="1"
+runtime_ready_core="core0"
 expect_panic_marker="0"
 expect_panic_hex_contains=""
 expect_endpoint_error_prefix=""
@@ -19,6 +20,7 @@ skip_result_check="0"
 bin_name="baker-traffic"
 timeout_seconds="${HIBANA_BAKER_TIMEOUT_SECONDS:-45}"
 poll_seconds="${HIBANA_BAKER_POLL_SECONDS:-1}"
+initial_poll_delay_seconds="${HIBANA_BAKER_INITIAL_POLL_DELAY_SECONDS:-0}"
 
 case "$pattern" in
   traffic) ;;
@@ -28,13 +30,16 @@ case "$pattern" in
     allow_core1_ready="0"
     timeout_seconds="${HIBANA_BAKER_TIMEOUT_SECONDS:-120}"
     poll_seconds="${HIBANA_BAKER_POLL_SECONDS:-5}"
+    initial_poll_delay_seconds="${HIBANA_BAKER_INITIAL_POLL_DELAY_SECONDS:-3}"
     ;;
   choreofs-traffic-loop)
     bin_name="baker-choreofs-traffic-loop"
     expected_core1_stage="48490004"
     allow_core1_ready="0"
+    runtime_ready_core="core0"
     timeout_seconds="${HIBANA_BAKER_TIMEOUT_SECONDS:-120}"
     poll_seconds="${HIBANA_BAKER_POLL_SECONDS:-5}"
+    initial_poll_delay_seconds="${HIBANA_BAKER_INITIAL_POLL_DELAY_SECONDS:-3}"
     ;;
   fail-safe)
     bin_name="baker-fail-safe"
@@ -160,6 +165,17 @@ symbol_addr() {
   printf '0x%s\n' "$value"
 }
 
+symbol_addr_or_empty() {
+  local symbol="$1"
+  local value
+  value="$("$llvm_nm" -n "$elf" | awk -v sym="$symbol" '$NF == sym { print $1; exit }')"
+  if [[ -z "$value" ]]; then
+    printf '\n'
+    return 0
+  fi
+  printf '0x%s\n' "$value"
+}
+
 probe_read() {
   local width="$1"
   local addr="$2"
@@ -183,6 +199,15 @@ probe_read() {
 read_word() {
   local addr="$1"
   probe_read b32 "$addr" 1 | awk 'NF { value=$NF } END { print tolower(value) }'
+}
+
+read_word_or_zero() {
+  local addr="$1"
+  if [[ -z "$addr" ]]; then
+    printf '00000000\n'
+    return 0
+  fi
+  read_word "$addr"
 }
 
 probe_write() {
@@ -250,6 +275,39 @@ choreofs_last_poll_ticks_hi_addr="$(symbol_addr HIBANA_CHOREOFS_LAST_POLL_TICKS_
 choreofs_last_object_addr="$(symbol_addr HIBANA_CHOREOFS_LAST_OBJECT)"
 choreofs_led_mask_addr="$(symbol_addr HIBANA_CHOREOFS_LED_MASK)"
 choreofs_seen_led_mask_addr="$(symbol_addr HIBANA_CHOREOFS_SEEN_LED_MASK)"
+choreofs_engine_gap_count_addr="$(symbol_addr HIBANA_CHOREOFS_ENGINE_GAP_COUNT)"
+choreofs_engine_gap_last_us_addr="$(symbol_addr HIBANA_CHOREOFS_ENGINE_GAP_LAST_US)"
+choreofs_engine_gap_total_us_addr="$(symbol_addr HIBANA_CHOREOFS_ENGINE_GAP_TOTAL_US)"
+choreofs_engine_gap_max_us_addr="$(symbol_addr HIBANA_CHOREOFS_ENGINE_GAP_MAX_US)"
+choreofs_driver_import_count_addr="$(symbol_addr HIBANA_CHOREOFS_DRIVER_IMPORT_COUNT)"
+choreofs_driver_import_last_us_addr="$(symbol_addr HIBANA_CHOREOFS_DRIVER_IMPORT_LAST_US)"
+choreofs_driver_import_total_us_addr="$(symbol_addr HIBANA_CHOREOFS_DRIVER_IMPORT_TOTAL_US)"
+choreofs_driver_import_max_us_addr="$(symbol_addr HIBANA_CHOREOFS_DRIVER_IMPORT_MAX_US)"
+choreofs_poll_delay_count_addr="$(symbol_addr HIBANA_CHOREOFS_POLL_DELAY_COUNT)"
+choreofs_poll_delay_last_us_addr="$(symbol_addr HIBANA_CHOREOFS_POLL_DELAY_LAST_US)"
+choreofs_poll_delay_total_us_addr="$(symbol_addr HIBANA_CHOREOFS_POLL_DELAY_TOTAL_US)"
+choreofs_poll_delay_max_us_addr="$(symbol_addr HIBANA_CHOREOFS_POLL_DELAY_MAX_US)"
+choreofs_request_recv_count_addr="$(symbol_addr HIBANA_CHOREOFS_REQUEST_RECV_COUNT)"
+choreofs_request_recv_last_us_addr="$(symbol_addr HIBANA_CHOREOFS_REQUEST_RECV_LAST_US)"
+choreofs_request_recv_total_us_addr="$(symbol_addr HIBANA_CHOREOFS_REQUEST_RECV_TOTAL_US)"
+choreofs_request_recv_max_us_addr="$(symbol_addr HIBANA_CHOREOFS_REQUEST_RECV_MAX_US)"
+choreofs_reply_send_count_addr="$(symbol_addr HIBANA_CHOREOFS_REPLY_SEND_COUNT)"
+choreofs_reply_send_last_us_addr="$(symbol_addr HIBANA_CHOREOFS_REPLY_SEND_LAST_US)"
+choreofs_reply_send_total_us_addr="$(symbol_addr HIBANA_CHOREOFS_REPLY_SEND_TOTAL_US)"
+choreofs_reply_send_max_us_addr="$(symbol_addr HIBANA_CHOREOFS_REPLY_SEND_MAX_US)"
+choreofs_reply_send_fd_write_object_count_addr="$(symbol_addr HIBANA_CHOREOFS_REPLY_SEND_FD_WRITE_OBJECT_COUNT)"
+choreofs_reply_send_fd_write_object_total_us_addr="$(symbol_addr HIBANA_CHOREOFS_REPLY_SEND_FD_WRITE_OBJECT_TOTAL_US)"
+choreofs_reply_send_poll_oneoff_count_addr="$(symbol_addr HIBANA_CHOREOFS_REPLY_SEND_POLL_ONEOFF_COUNT)"
+choreofs_reply_send_poll_oneoff_total_us_addr="$(symbol_addr HIBANA_CHOREOFS_REPLY_SEND_POLL_ONEOFF_TOTAL_US)"
+choreofs_reply_send_future_poll_count_addr="$(symbol_addr_or_empty HIBANA_CHOREOFS_REPLY_SEND_FUTURE_POLL_COUNT)"
+choreofs_reply_send_future_poll_last_us_addr="$(symbol_addr_or_empty HIBANA_CHOREOFS_REPLY_SEND_FUTURE_POLL_LAST_US)"
+choreofs_reply_send_future_poll_total_us_addr="$(symbol_addr_or_empty HIBANA_CHOREOFS_REPLY_SEND_FUTURE_POLL_TOTAL_US)"
+choreofs_reply_send_future_poll_max_us_addr="$(symbol_addr_or_empty HIBANA_CHOREOFS_REPLY_SEND_FUTURE_POLL_MAX_US)"
+choreofs_reply_encode_count_addr="$(symbol_addr_or_empty HIBANA_CHOREOFS_REPLY_ENCODE_COUNT)"
+choreofs_reply_encode_last_us_addr="$(symbol_addr_or_empty HIBANA_CHOREOFS_REPLY_ENCODE_LAST_US)"
+choreofs_reply_encode_total_us_addr="$(symbol_addr_or_empty HIBANA_CHOREOFS_REPLY_ENCODE_TOTAL_US)"
+choreofs_reply_encode_max_us_addr="$(symbol_addr_or_empty HIBANA_CHOREOFS_REPLY_ENCODE_MAX_US)"
+choreofs_measurements_frozen_addr="$(symbol_addr HIBANA_CHOREOFS_MEASUREMENTS_FROZEN)"
 choreofs_driver_trace_addr="$(symbol_addr HIBANA_CHOREOFS_DRIVER_TRACE)"
 choreofs_sio_trace_core0_count_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TRACE_CORE0_COUNT)"
 choreofs_sio_trace_core0_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TRACE_CORE0)"
@@ -262,6 +320,53 @@ choreofs_sio_core1_to_core0_rx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_CORE1_TO_
 choreofs_sio_role1_pending_seen_core0_tx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_ROLE1_PENDING_SEEN_CORE0_TX)"
 choreofs_sio_role1_poll_seen_core0_tx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_ROLE1_POLL_SEEN_CORE0_TX)"
 choreofs_sio_role1_ready_seen_core0_tx_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_ROLE1_READY_SEEN_CORE0_TX)"
+choreofs_sio_rx_wait_count_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_RX_WAIT_COUNT)"
+choreofs_sio_rx_wait_last_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_RX_WAIT_LAST_US)"
+choreofs_sio_rx_wait_total_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_RX_WAIT_TOTAL_US)"
+choreofs_sio_rx_wait_max_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_RX_WAIT_MAX_US)"
+choreofs_sio_rx_wait_role0_count_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE0_COUNT)"
+choreofs_sio_rx_wait_role0_last_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE0_LAST_US)"
+choreofs_sio_rx_wait_role0_total_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE0_TOTAL_US)"
+choreofs_sio_rx_wait_role0_max_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE0_MAX_US)"
+choreofs_sio_rx_wait_role1_count_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE1_COUNT)"
+choreofs_sio_rx_wait_role1_last_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE1_LAST_US)"
+choreofs_sio_rx_wait_role1_total_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE1_TOTAL_US)"
+choreofs_sio_rx_wait_role1_max_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_RX_WAIT_ROLE1_MAX_US)"
+choreofs_sio_tx_wait_count_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_WAIT_COUNT)"
+choreofs_sio_tx_wait_last_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_WAIT_LAST_US)"
+choreofs_sio_tx_wait_total_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_WAIT_TOTAL_US)"
+choreofs_sio_tx_wait_max_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_WAIT_MAX_US)"
+choreofs_sio_tx_wait_role0_count_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE0_COUNT)"
+choreofs_sio_tx_wait_role0_last_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE0_LAST_US)"
+choreofs_sio_tx_wait_role0_total_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE0_TOTAL_US)"
+choreofs_sio_tx_wait_role0_max_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE0_MAX_US)"
+choreofs_sio_tx_wait_role1_count_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE1_COUNT)"
+choreofs_sio_tx_wait_role1_last_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE1_LAST_US)"
+choreofs_sio_tx_wait_role1_total_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE1_TOTAL_US)"
+choreofs_sio_tx_wait_role1_max_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_WAIT_ROLE1_MAX_US)"
+choreofs_sio_tx_poll_count_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_POLL_COUNT)"
+choreofs_sio_tx_poll_total_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_POLL_TOTAL_US)"
+choreofs_sio_tx_poll_max_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_POLL_MAX_US)"
+choreofs_sio_tx_poll_role0_count_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_POLL_ROLE0_COUNT)"
+choreofs_sio_tx_poll_role0_total_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_POLL_ROLE0_TOTAL_US)"
+choreofs_sio_tx_poll_role1_count_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_POLL_ROLE1_COUNT)"
+choreofs_sio_tx_poll_role1_total_us_addr="$(symbol_addr HIBANA_CHOREOFS_SIO_TX_POLL_ROLE1_TOTAL_US)"
+appkit_wasi_resume_count_addr="$(symbol_addr_or_empty HIBANA_APPKIT_WASI_RESUME_COUNT)"
+appkit_wasi_resume_last_us_addr="$(symbol_addr_or_empty HIBANA_APPKIT_WASI_RESUME_LAST_US)"
+appkit_wasi_resume_total_us_addr="$(symbol_addr_or_empty HIBANA_APPKIT_WASI_RESUME_TOTAL_US)"
+appkit_wasi_resume_max_us_addr="$(symbol_addr_or_empty HIBANA_APPKIT_WASI_RESUME_MAX_US)"
+appkit_wasi_request_send_count_addr="$(symbol_addr_or_empty HIBANA_APPKIT_WASI_REQUEST_SEND_COUNT)"
+appkit_wasi_request_send_last_us_addr="$(symbol_addr_or_empty HIBANA_APPKIT_WASI_REQUEST_SEND_LAST_US)"
+appkit_wasi_request_send_total_us_addr="$(symbol_addr_or_empty HIBANA_APPKIT_WASI_REQUEST_SEND_TOTAL_US)"
+appkit_wasi_request_send_max_us_addr="$(symbol_addr_or_empty HIBANA_APPKIT_WASI_REQUEST_SEND_MAX_US)"
+appkit_wasi_completion_recv_count_addr="$(symbol_addr_or_empty HIBANA_APPKIT_WASI_COMPLETION_RECV_COUNT)"
+appkit_wasi_completion_recv_last_us_addr="$(symbol_addr_or_empty HIBANA_APPKIT_WASI_COMPLETION_RECV_LAST_US)"
+appkit_wasi_completion_recv_total_us_addr="$(symbol_addr_or_empty HIBANA_APPKIT_WASI_COMPLETION_RECV_TOTAL_US)"
+appkit_wasi_completion_recv_max_us_addr="$(symbol_addr_or_empty HIBANA_APPKIT_WASI_COMPLETION_RECV_MAX_US)"
+appkit_wasi_complete_count_addr="$(symbol_addr_or_empty HIBANA_APPKIT_WASI_COMPLETE_COUNT)"
+appkit_wasi_complete_last_us_addr="$(symbol_addr_or_empty HIBANA_APPKIT_WASI_COMPLETE_LAST_US)"
+appkit_wasi_complete_total_us_addr="$(symbol_addr_or_empty HIBANA_APPKIT_WASI_COMPLETE_TOTAL_US)"
+appkit_wasi_complete_max_us_addr="$(symbol_addr_or_empty HIBANA_APPKIT_WASI_COMPLETE_MAX_US)"
 epf_core0_epoch_addr="$(symbol_addr HIBANA_EPF_CORE0_EPOCH)"
 epf_core0_kind_addr="$(symbol_addr HIBANA_EPF_CORE0_KIND)"
 epf_core0_reason_addr="$(symbol_addr HIBANA_EPF_CORE0_REASON)"
@@ -335,6 +440,10 @@ if [[ "$pattern" == "epf-policy-timer" ]]; then
   write_epf_policy_timer_mailbox_image
 fi
 
+if (( initial_poll_delay_seconds > 0 )); then
+  sleep "$initial_poll_delay_seconds"
+fi
+
 result=""
 stage=""
 deadline=$((SECONDS + timeout_seconds))
@@ -346,7 +455,10 @@ while :; do
   if [[ "$expect_panic_marker" == "1" && "$result" == "$expected_result" ]]; then
     break
   fi
-  if [[ "$result" == "$expected_result" && "$core0_stage" == "4849000a" && ( "$core1_stage" == "$expected_core1_stage" || ( "$allow_core1_ready" == "1" && "$core1_stage" == "4849000a" ) ) ]]; then
+  if [[ "$runtime_ready_core" == "core0" && "$result" == "$expected_result" && "$core0_stage" == "4849000a" && ( "$core1_stage" == "$expected_core1_stage" || ( "$allow_core1_ready" == "1" && "$core1_stage" == "4849000a" ) ) ]]; then
+    break
+  fi
+  if [[ "$runtime_ready_core" == "core1" && "$result" == "$expected_result" && "$core1_stage" == "4849000a" && ( "$core0_stage" == "48490004" || "$core0_stage" == "4849000a" ) ]]; then
     break
   fi
   if [[ "$result" == "48494641" ]]; then
@@ -556,6 +668,39 @@ choreofs_last_poll_ticks_hi="$(read_word "$choreofs_last_poll_ticks_hi_addr")"
 choreofs_last_object="$(read_word "$choreofs_last_object_addr")"
 choreofs_led_mask="$(read_word "$choreofs_led_mask_addr")"
 choreofs_seen_led_mask="$(read_word "$choreofs_seen_led_mask_addr")"
+choreofs_engine_gap_count="$(read_word "$choreofs_engine_gap_count_addr")"
+choreofs_engine_gap_last_us="$(read_word "$choreofs_engine_gap_last_us_addr")"
+choreofs_engine_gap_total_us="$(read_word "$choreofs_engine_gap_total_us_addr")"
+choreofs_engine_gap_max_us="$(read_word "$choreofs_engine_gap_max_us_addr")"
+choreofs_driver_import_count="$(read_word "$choreofs_driver_import_count_addr")"
+choreofs_driver_import_last_us="$(read_word "$choreofs_driver_import_last_us_addr")"
+choreofs_driver_import_total_us="$(read_word "$choreofs_driver_import_total_us_addr")"
+choreofs_driver_import_max_us="$(read_word "$choreofs_driver_import_max_us_addr")"
+choreofs_poll_delay_count="$(read_word "$choreofs_poll_delay_count_addr")"
+choreofs_poll_delay_last_us="$(read_word "$choreofs_poll_delay_last_us_addr")"
+choreofs_poll_delay_total_us="$(read_word "$choreofs_poll_delay_total_us_addr")"
+choreofs_poll_delay_max_us="$(read_word "$choreofs_poll_delay_max_us_addr")"
+choreofs_request_recv_count="$(read_word "$choreofs_request_recv_count_addr")"
+choreofs_request_recv_last_us="$(read_word "$choreofs_request_recv_last_us_addr")"
+choreofs_request_recv_total_us="$(read_word "$choreofs_request_recv_total_us_addr")"
+choreofs_request_recv_max_us="$(read_word "$choreofs_request_recv_max_us_addr")"
+choreofs_reply_send_count="$(read_word "$choreofs_reply_send_count_addr")"
+choreofs_reply_send_last_us="$(read_word "$choreofs_reply_send_last_us_addr")"
+choreofs_reply_send_total_us="$(read_word "$choreofs_reply_send_total_us_addr")"
+choreofs_reply_send_max_us="$(read_word "$choreofs_reply_send_max_us_addr")"
+choreofs_reply_send_fd_write_object_count="$(read_word "$choreofs_reply_send_fd_write_object_count_addr")"
+choreofs_reply_send_fd_write_object_total_us="$(read_word "$choreofs_reply_send_fd_write_object_total_us_addr")"
+choreofs_reply_send_poll_oneoff_count="$(read_word "$choreofs_reply_send_poll_oneoff_count_addr")"
+choreofs_reply_send_poll_oneoff_total_us="$(read_word "$choreofs_reply_send_poll_oneoff_total_us_addr")"
+choreofs_reply_send_future_poll_count="$(read_word_or_zero "$choreofs_reply_send_future_poll_count_addr")"
+choreofs_reply_send_future_poll_last_us="$(read_word_or_zero "$choreofs_reply_send_future_poll_last_us_addr")"
+choreofs_reply_send_future_poll_total_us="$(read_word_or_zero "$choreofs_reply_send_future_poll_total_us_addr")"
+choreofs_reply_send_future_poll_max_us="$(read_word_or_zero "$choreofs_reply_send_future_poll_max_us_addr")"
+choreofs_reply_encode_count="$(read_word_or_zero "$choreofs_reply_encode_count_addr")"
+choreofs_reply_encode_last_us="$(read_word_or_zero "$choreofs_reply_encode_last_us_addr")"
+choreofs_reply_encode_total_us="$(read_word_or_zero "$choreofs_reply_encode_total_us_addr")"
+choreofs_reply_encode_max_us="$(read_word_or_zero "$choreofs_reply_encode_max_us_addr")"
+choreofs_measurements_frozen="$(read_word "$choreofs_measurements_frozen_addr")"
 choreofs_driver_trace="$(read_word "$choreofs_driver_trace_addr")"
 choreofs_sio_trace_core0_count="$(read_word "$choreofs_sio_trace_core0_count_addr")"
 choreofs_sio_trace_core1_count="$(read_word "$choreofs_sio_trace_core1_count_addr")"
@@ -566,6 +711,53 @@ choreofs_sio_core1_to_core0_rx="$(read_word "$choreofs_sio_core1_to_core0_rx_add
 choreofs_sio_role1_pending_seen_core0_tx="$(read_word "$choreofs_sio_role1_pending_seen_core0_tx_addr")"
 choreofs_sio_role1_poll_seen_core0_tx="$(read_word "$choreofs_sio_role1_poll_seen_core0_tx_addr")"
 choreofs_sio_role1_ready_seen_core0_tx="$(read_word "$choreofs_sio_role1_ready_seen_core0_tx_addr")"
+choreofs_sio_rx_wait_count="$(read_word "$choreofs_sio_rx_wait_count_addr")"
+choreofs_sio_rx_wait_last_us="$(read_word "$choreofs_sio_rx_wait_last_us_addr")"
+choreofs_sio_rx_wait_total_us="$(read_word "$choreofs_sio_rx_wait_total_us_addr")"
+choreofs_sio_rx_wait_max_us="$(read_word "$choreofs_sio_rx_wait_max_us_addr")"
+choreofs_sio_rx_wait_role0_count="$(read_word "$choreofs_sio_rx_wait_role0_count_addr")"
+choreofs_sio_rx_wait_role0_last_us="$(read_word "$choreofs_sio_rx_wait_role0_last_us_addr")"
+choreofs_sio_rx_wait_role0_total_us="$(read_word "$choreofs_sio_rx_wait_role0_total_us_addr")"
+choreofs_sio_rx_wait_role0_max_us="$(read_word "$choreofs_sio_rx_wait_role0_max_us_addr")"
+choreofs_sio_rx_wait_role1_count="$(read_word "$choreofs_sio_rx_wait_role1_count_addr")"
+choreofs_sio_rx_wait_role1_last_us="$(read_word "$choreofs_sio_rx_wait_role1_last_us_addr")"
+choreofs_sio_rx_wait_role1_total_us="$(read_word "$choreofs_sio_rx_wait_role1_total_us_addr")"
+choreofs_sio_rx_wait_role1_max_us="$(read_word "$choreofs_sio_rx_wait_role1_max_us_addr")"
+choreofs_sio_tx_wait_count="$(read_word "$choreofs_sio_tx_wait_count_addr")"
+choreofs_sio_tx_wait_last_us="$(read_word "$choreofs_sio_tx_wait_last_us_addr")"
+choreofs_sio_tx_wait_total_us="$(read_word "$choreofs_sio_tx_wait_total_us_addr")"
+choreofs_sio_tx_wait_max_us="$(read_word "$choreofs_sio_tx_wait_max_us_addr")"
+choreofs_sio_tx_wait_role0_count="$(read_word "$choreofs_sio_tx_wait_role0_count_addr")"
+choreofs_sio_tx_wait_role0_last_us="$(read_word "$choreofs_sio_tx_wait_role0_last_us_addr")"
+choreofs_sio_tx_wait_role0_total_us="$(read_word "$choreofs_sio_tx_wait_role0_total_us_addr")"
+choreofs_sio_tx_wait_role0_max_us="$(read_word "$choreofs_sio_tx_wait_role0_max_us_addr")"
+choreofs_sio_tx_wait_role1_count="$(read_word "$choreofs_sio_tx_wait_role1_count_addr")"
+choreofs_sio_tx_wait_role1_last_us="$(read_word "$choreofs_sio_tx_wait_role1_last_us_addr")"
+choreofs_sio_tx_wait_role1_total_us="$(read_word "$choreofs_sio_tx_wait_role1_total_us_addr")"
+choreofs_sio_tx_wait_role1_max_us="$(read_word "$choreofs_sio_tx_wait_role1_max_us_addr")"
+choreofs_sio_tx_poll_count="$(read_word "$choreofs_sio_tx_poll_count_addr")"
+choreofs_sio_tx_poll_total_us="$(read_word "$choreofs_sio_tx_poll_total_us_addr")"
+choreofs_sio_tx_poll_max_us="$(read_word "$choreofs_sio_tx_poll_max_us_addr")"
+choreofs_sio_tx_poll_role0_count="$(read_word "$choreofs_sio_tx_poll_role0_count_addr")"
+choreofs_sio_tx_poll_role0_total_us="$(read_word "$choreofs_sio_tx_poll_role0_total_us_addr")"
+choreofs_sio_tx_poll_role1_count="$(read_word "$choreofs_sio_tx_poll_role1_count_addr")"
+choreofs_sio_tx_poll_role1_total_us="$(read_word "$choreofs_sio_tx_poll_role1_total_us_addr")"
+appkit_wasi_resume_count="$(read_word_or_zero "$appkit_wasi_resume_count_addr")"
+appkit_wasi_resume_last_us="$(read_word_or_zero "$appkit_wasi_resume_last_us_addr")"
+appkit_wasi_resume_total_us="$(read_word_or_zero "$appkit_wasi_resume_total_us_addr")"
+appkit_wasi_resume_max_us="$(read_word_or_zero "$appkit_wasi_resume_max_us_addr")"
+appkit_wasi_request_send_count="$(read_word_or_zero "$appkit_wasi_request_send_count_addr")"
+appkit_wasi_request_send_last_us="$(read_word_or_zero "$appkit_wasi_request_send_last_us_addr")"
+appkit_wasi_request_send_total_us="$(read_word_or_zero "$appkit_wasi_request_send_total_us_addr")"
+appkit_wasi_request_send_max_us="$(read_word_or_zero "$appkit_wasi_request_send_max_us_addr")"
+appkit_wasi_completion_recv_count="$(read_word_or_zero "$appkit_wasi_completion_recv_count_addr")"
+appkit_wasi_completion_recv_last_us="$(read_word_or_zero "$appkit_wasi_completion_recv_last_us_addr")"
+appkit_wasi_completion_recv_total_us="$(read_word_or_zero "$appkit_wasi_completion_recv_total_us_addr")"
+appkit_wasi_completion_recv_max_us="$(read_word_or_zero "$appkit_wasi_completion_recv_max_us_addr")"
+appkit_wasi_complete_count="$(read_word_or_zero "$appkit_wasi_complete_count_addr")"
+appkit_wasi_complete_last_us="$(read_word_or_zero "$appkit_wasi_complete_last_us_addr")"
+appkit_wasi_complete_total_us="$(read_word_or_zero "$appkit_wasi_complete_total_us_addr")"
+appkit_wasi_complete_max_us="$(read_word_or_zero "$appkit_wasi_complete_max_us_addr")"
 epf_core0_epoch="$(read_word "$epf_core0_epoch_addr")"
 epf_core0_kind="$(read_word "$epf_core0_kind_addr")"
 epf_core0_reason="$(read_word "$epf_core0_reason_addr")"
@@ -620,6 +812,54 @@ if [[ "$pattern" != "session-mismatch" && "$print_choreofs_markers" == "1" ]]; t
   printf 'choreofs_last_object_addr=%s object=0x%s\n' "$choreofs_last_object_addr" "$choreofs_last_object"
   printf 'choreofs_led_mask_addr=%s mask=0x%s\n' "$choreofs_led_mask_addr" "$choreofs_led_mask"
   printf 'choreofs_seen_led_mask_addr=%s mask=0x%s\n' "$choreofs_seen_led_mask_addr" "$choreofs_seen_led_mask"
+  printf 'choreofs_engine_gap_count_addr=%s count=0x%s\n' "$choreofs_engine_gap_count_addr" "$choreofs_engine_gap_count"
+  printf 'choreofs_engine_gap_last_us_addr=%s us=0x%s\n' "$choreofs_engine_gap_last_us_addr" "$choreofs_engine_gap_last_us"
+  printf 'choreofs_engine_gap_total_us_addr=%s us=0x%s\n' "$choreofs_engine_gap_total_us_addr" "$choreofs_engine_gap_total_us"
+  printf 'choreofs_engine_gap_max_us_addr=%s us=0x%s\n' "$choreofs_engine_gap_max_us_addr" "$choreofs_engine_gap_max_us"
+  printf 'choreofs_driver_import_count_addr=%s count=0x%s\n' "$choreofs_driver_import_count_addr" "$choreofs_driver_import_count"
+  printf 'choreofs_driver_import_last_us_addr=%s us=0x%s\n' "$choreofs_driver_import_last_us_addr" "$choreofs_driver_import_last_us"
+  printf 'choreofs_driver_import_total_us_addr=%s us=0x%s\n' "$choreofs_driver_import_total_us_addr" "$choreofs_driver_import_total_us"
+  printf 'choreofs_driver_import_max_us_addr=%s us=0x%s\n' "$choreofs_driver_import_max_us_addr" "$choreofs_driver_import_max_us"
+  printf 'choreofs_poll_delay_count_addr=%s count=0x%s\n' "$choreofs_poll_delay_count_addr" "$choreofs_poll_delay_count"
+  printf 'choreofs_poll_delay_last_us_addr=%s us=0x%s\n' "$choreofs_poll_delay_last_us_addr" "$choreofs_poll_delay_last_us"
+  printf 'choreofs_poll_delay_total_us_addr=%s us=0x%s\n' "$choreofs_poll_delay_total_us_addr" "$choreofs_poll_delay_total_us"
+  printf 'choreofs_poll_delay_max_us_addr=%s us=0x%s\n' "$choreofs_poll_delay_max_us_addr" "$choreofs_poll_delay_max_us"
+  printf 'choreofs_request_recv_count_addr=%s count=0x%s\n' "$choreofs_request_recv_count_addr" "$choreofs_request_recv_count"
+  printf 'choreofs_request_recv_last_us_addr=%s us=0x%s\n' "$choreofs_request_recv_last_us_addr" "$choreofs_request_recv_last_us"
+  printf 'choreofs_request_recv_total_us_addr=%s us=0x%s\n' "$choreofs_request_recv_total_us_addr" "$choreofs_request_recv_total_us"
+  printf 'choreofs_request_recv_max_us_addr=%s us=0x%s\n' "$choreofs_request_recv_max_us_addr" "$choreofs_request_recv_max_us"
+  printf 'choreofs_reply_send_count_addr=%s count=0x%s\n' "$choreofs_reply_send_count_addr" "$choreofs_reply_send_count"
+  printf 'choreofs_reply_send_last_us_addr=%s us=0x%s\n' "$choreofs_reply_send_last_us_addr" "$choreofs_reply_send_last_us"
+  printf 'choreofs_reply_send_total_us_addr=%s us=0x%s\n' "$choreofs_reply_send_total_us_addr" "$choreofs_reply_send_total_us"
+  printf 'choreofs_reply_send_max_us_addr=%s us=0x%s\n' "$choreofs_reply_send_max_us_addr" "$choreofs_reply_send_max_us"
+  printf 'choreofs_reply_send_fd_write_object_count_addr=%s count=0x%s\n' "$choreofs_reply_send_fd_write_object_count_addr" "$choreofs_reply_send_fd_write_object_count"
+  printf 'choreofs_reply_send_fd_write_object_total_us_addr=%s us=0x%s\n' "$choreofs_reply_send_fd_write_object_total_us_addr" "$choreofs_reply_send_fd_write_object_total_us"
+  printf 'choreofs_reply_send_poll_oneoff_count_addr=%s count=0x%s\n' "$choreofs_reply_send_poll_oneoff_count_addr" "$choreofs_reply_send_poll_oneoff_count"
+  printf 'choreofs_reply_send_poll_oneoff_total_us_addr=%s us=0x%s\n' "$choreofs_reply_send_poll_oneoff_total_us_addr" "$choreofs_reply_send_poll_oneoff_total_us"
+  if [[ -n "$choreofs_reply_send_future_poll_count_addr" ]]; then
+    printf 'choreofs_reply_send_future_poll_count_addr=%s count=0x%s\n' "$choreofs_reply_send_future_poll_count_addr" "$choreofs_reply_send_future_poll_count"
+    printf 'choreofs_reply_send_future_poll_last_us_addr=%s us=0x%s\n' "$choreofs_reply_send_future_poll_last_us_addr" "$choreofs_reply_send_future_poll_last_us"
+    printf 'choreofs_reply_send_future_poll_total_us_addr=%s us=0x%s\n' "$choreofs_reply_send_future_poll_total_us_addr" "$choreofs_reply_send_future_poll_total_us"
+    printf 'choreofs_reply_send_future_poll_max_us_addr=%s us=0x%s\n' "$choreofs_reply_send_future_poll_max_us_addr" "$choreofs_reply_send_future_poll_max_us"
+  fi
+  if [[ -n "$choreofs_reply_encode_count_addr" ]]; then
+    printf 'choreofs_reply_encode_count_addr=%s count=0x%s\n' "$choreofs_reply_encode_count_addr" "$choreofs_reply_encode_count"
+    printf 'choreofs_reply_encode_last_us_addr=%s us=0x%s\n' "$choreofs_reply_encode_last_us_addr" "$choreofs_reply_encode_last_us"
+    printf 'choreofs_reply_encode_total_us_addr=%s us=0x%s\n' "$choreofs_reply_encode_total_us_addr" "$choreofs_reply_encode_total_us"
+    printf 'choreofs_reply_encode_max_us_addr=%s us=0x%s\n' "$choreofs_reply_encode_max_us_addr" "$choreofs_reply_encode_max_us"
+  fi
+  if [[ -n "$choreofs_reply_send_future_poll_total_us_addr" && -n "$choreofs_reply_encode_total_us_addr" ]]; then
+    reply_future_poll_dec="$((16#$choreofs_reply_send_future_poll_total_us))"
+    reply_encode_dec="$((16#$choreofs_reply_encode_total_us))"
+    reply_transport_dec="$((16#$choreofs_sio_tx_poll_role0_total_us))"
+    if (( reply_future_poll_dec > reply_encode_dec + reply_transport_dec )); then
+      reply_endpoint_residual_dec="$((reply_future_poll_dec - reply_encode_dec - reply_transport_dec))"
+    else
+      reply_endpoint_residual_dec=0
+    fi
+    printf 'choreofs_reply_send_endpoint_residual_us=0x%08x\n' "$reply_endpoint_residual_dec"
+  fi
+  printf 'choreofs_measurements_frozen_addr=%s frozen=0x%s\n' "$choreofs_measurements_frozen_addr" "$choreofs_measurements_frozen"
   printf 'choreofs_driver_trace_addr=%s trace=0x%s\n' "$choreofs_driver_trace_addr" "$choreofs_driver_trace"
   printf 'choreofs_sio_trace_core0_count_addr=%s count=0x%s\n' "$choreofs_sio_trace_core0_count_addr" "$choreofs_sio_trace_core0_count"
   printf 'choreofs_sio_trace_core1_count_addr=%s count=0x%s\n' "$choreofs_sio_trace_core1_count_addr" "$choreofs_sio_trace_core1_count"
@@ -630,6 +870,55 @@ if [[ "$pattern" != "session-mismatch" && "$print_choreofs_markers" == "1" ]]; t
   printf 'choreofs_sio_role1_pending_seen_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_role1_pending_seen_core0_tx_addr" "$choreofs_sio_role1_pending_seen_core0_tx"
   printf 'choreofs_sio_role1_poll_seen_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_role1_poll_seen_core0_tx_addr" "$choreofs_sio_role1_poll_seen_core0_tx"
   printf 'choreofs_sio_role1_ready_seen_core0_tx_addr=%s count=0x%s\n' "$choreofs_sio_role1_ready_seen_core0_tx_addr" "$choreofs_sio_role1_ready_seen_core0_tx"
+  printf 'choreofs_sio_rx_wait_count_addr=%s count=0x%s\n' "$choreofs_sio_rx_wait_count_addr" "$choreofs_sio_rx_wait_count"
+  printf 'choreofs_sio_rx_wait_last_us_addr=%s us=0x%s\n' "$choreofs_sio_rx_wait_last_us_addr" "$choreofs_sio_rx_wait_last_us"
+  printf 'choreofs_sio_rx_wait_total_us_addr=%s us=0x%s\n' "$choreofs_sio_rx_wait_total_us_addr" "$choreofs_sio_rx_wait_total_us"
+  printf 'choreofs_sio_rx_wait_max_us_addr=%s us=0x%s\n' "$choreofs_sio_rx_wait_max_us_addr" "$choreofs_sio_rx_wait_max_us"
+  printf 'choreofs_sio_rx_wait_role0_count_addr=%s count=0x%s\n' "$choreofs_sio_rx_wait_role0_count_addr" "$choreofs_sio_rx_wait_role0_count"
+  printf 'choreofs_sio_rx_wait_role0_last_us_addr=%s us=0x%s\n' "$choreofs_sio_rx_wait_role0_last_us_addr" "$choreofs_sio_rx_wait_role0_last_us"
+  printf 'choreofs_sio_rx_wait_role0_total_us_addr=%s us=0x%s\n' "$choreofs_sio_rx_wait_role0_total_us_addr" "$choreofs_sio_rx_wait_role0_total_us"
+  printf 'choreofs_sio_rx_wait_role0_max_us_addr=%s us=0x%s\n' "$choreofs_sio_rx_wait_role0_max_us_addr" "$choreofs_sio_rx_wait_role0_max_us"
+  printf 'choreofs_sio_rx_wait_role1_count_addr=%s count=0x%s\n' "$choreofs_sio_rx_wait_role1_count_addr" "$choreofs_sio_rx_wait_role1_count"
+  printf 'choreofs_sio_rx_wait_role1_last_us_addr=%s us=0x%s\n' "$choreofs_sio_rx_wait_role1_last_us_addr" "$choreofs_sio_rx_wait_role1_last_us"
+  printf 'choreofs_sio_rx_wait_role1_total_us_addr=%s us=0x%s\n' "$choreofs_sio_rx_wait_role1_total_us_addr" "$choreofs_sio_rx_wait_role1_total_us"
+  printf 'choreofs_sio_rx_wait_role1_max_us_addr=%s us=0x%s\n' "$choreofs_sio_rx_wait_role1_max_us_addr" "$choreofs_sio_rx_wait_role1_max_us"
+  printf 'choreofs_sio_tx_wait_count_addr=%s count=0x%s\n' "$choreofs_sio_tx_wait_count_addr" "$choreofs_sio_tx_wait_count"
+  printf 'choreofs_sio_tx_wait_last_us_addr=%s us=0x%s\n' "$choreofs_sio_tx_wait_last_us_addr" "$choreofs_sio_tx_wait_last_us"
+  printf 'choreofs_sio_tx_wait_total_us_addr=%s us=0x%s\n' "$choreofs_sio_tx_wait_total_us_addr" "$choreofs_sio_tx_wait_total_us"
+  printf 'choreofs_sio_tx_wait_max_us_addr=%s us=0x%s\n' "$choreofs_sio_tx_wait_max_us_addr" "$choreofs_sio_tx_wait_max_us"
+  printf 'choreofs_sio_tx_wait_role0_count_addr=%s count=0x%s\n' "$choreofs_sio_tx_wait_role0_count_addr" "$choreofs_sio_tx_wait_role0_count"
+  printf 'choreofs_sio_tx_wait_role0_last_us_addr=%s us=0x%s\n' "$choreofs_sio_tx_wait_role0_last_us_addr" "$choreofs_sio_tx_wait_role0_last_us"
+  printf 'choreofs_sio_tx_wait_role0_total_us_addr=%s us=0x%s\n' "$choreofs_sio_tx_wait_role0_total_us_addr" "$choreofs_sio_tx_wait_role0_total_us"
+  printf 'choreofs_sio_tx_wait_role0_max_us_addr=%s us=0x%s\n' "$choreofs_sio_tx_wait_role0_max_us_addr" "$choreofs_sio_tx_wait_role0_max_us"
+  printf 'choreofs_sio_tx_wait_role1_count_addr=%s count=0x%s\n' "$choreofs_sio_tx_wait_role1_count_addr" "$choreofs_sio_tx_wait_role1_count"
+  printf 'choreofs_sio_tx_wait_role1_last_us_addr=%s us=0x%s\n' "$choreofs_sio_tx_wait_role1_last_us_addr" "$choreofs_sio_tx_wait_role1_last_us"
+  printf 'choreofs_sio_tx_wait_role1_total_us_addr=%s us=0x%s\n' "$choreofs_sio_tx_wait_role1_total_us_addr" "$choreofs_sio_tx_wait_role1_total_us"
+  printf 'choreofs_sio_tx_wait_role1_max_us_addr=%s us=0x%s\n' "$choreofs_sio_tx_wait_role1_max_us_addr" "$choreofs_sio_tx_wait_role1_max_us"
+  printf 'choreofs_sio_tx_poll_count_addr=%s count=0x%s\n' "$choreofs_sio_tx_poll_count_addr" "$choreofs_sio_tx_poll_count"
+  printf 'choreofs_sio_tx_poll_total_us_addr=%s us=0x%s\n' "$choreofs_sio_tx_poll_total_us_addr" "$choreofs_sio_tx_poll_total_us"
+  printf 'choreofs_sio_tx_poll_max_us_addr=%s us=0x%s\n' "$choreofs_sio_tx_poll_max_us_addr" "$choreofs_sio_tx_poll_max_us"
+  printf 'choreofs_sio_tx_poll_role0_count_addr=%s count=0x%s\n' "$choreofs_sio_tx_poll_role0_count_addr" "$choreofs_sio_tx_poll_role0_count"
+  printf 'choreofs_sio_tx_poll_role0_total_us_addr=%s us=0x%s\n' "$choreofs_sio_tx_poll_role0_total_us_addr" "$choreofs_sio_tx_poll_role0_total_us"
+  printf 'choreofs_sio_tx_poll_role1_count_addr=%s count=0x%s\n' "$choreofs_sio_tx_poll_role1_count_addr" "$choreofs_sio_tx_poll_role1_count"
+  printf 'choreofs_sio_tx_poll_role1_total_us_addr=%s us=0x%s\n' "$choreofs_sio_tx_poll_role1_total_us_addr" "$choreofs_sio_tx_poll_role1_total_us"
+  if [[ -n "$appkit_wasi_resume_count_addr" ]]; then
+    printf 'appkit_wasi_resume_count_addr=%s count=0x%s\n' "$appkit_wasi_resume_count_addr" "$appkit_wasi_resume_count"
+    printf 'appkit_wasi_resume_last_us_addr=%s us=0x%s\n' "$appkit_wasi_resume_last_us_addr" "$appkit_wasi_resume_last_us"
+    printf 'appkit_wasi_resume_total_us_addr=%s us=0x%s\n' "$appkit_wasi_resume_total_us_addr" "$appkit_wasi_resume_total_us"
+    printf 'appkit_wasi_resume_max_us_addr=%s us=0x%s\n' "$appkit_wasi_resume_max_us_addr" "$appkit_wasi_resume_max_us"
+    printf 'appkit_wasi_request_send_count_addr=%s count=0x%s\n' "$appkit_wasi_request_send_count_addr" "$appkit_wasi_request_send_count"
+    printf 'appkit_wasi_request_send_last_us_addr=%s us=0x%s\n' "$appkit_wasi_request_send_last_us_addr" "$appkit_wasi_request_send_last_us"
+    printf 'appkit_wasi_request_send_total_us_addr=%s us=0x%s\n' "$appkit_wasi_request_send_total_us_addr" "$appkit_wasi_request_send_total_us"
+    printf 'appkit_wasi_request_send_max_us_addr=%s us=0x%s\n' "$appkit_wasi_request_send_max_us_addr" "$appkit_wasi_request_send_max_us"
+    printf 'appkit_wasi_completion_recv_count_addr=%s count=0x%s\n' "$appkit_wasi_completion_recv_count_addr" "$appkit_wasi_completion_recv_count"
+    printf 'appkit_wasi_completion_recv_last_us_addr=%s us=0x%s\n' "$appkit_wasi_completion_recv_last_us_addr" "$appkit_wasi_completion_recv_last_us"
+    printf 'appkit_wasi_completion_recv_total_us_addr=%s us=0x%s\n' "$appkit_wasi_completion_recv_total_us_addr" "$appkit_wasi_completion_recv_total_us"
+    printf 'appkit_wasi_completion_recv_max_us_addr=%s us=0x%s\n' "$appkit_wasi_completion_recv_max_us_addr" "$appkit_wasi_completion_recv_max_us"
+    printf 'appkit_wasi_complete_count_addr=%s count=0x%s\n' "$appkit_wasi_complete_count_addr" "$appkit_wasi_complete_count"
+    printf 'appkit_wasi_complete_last_us_addr=%s us=0x%s\n' "$appkit_wasi_complete_last_us_addr" "$appkit_wasi_complete_last_us"
+    printf 'appkit_wasi_complete_total_us_addr=%s us=0x%s\n' "$appkit_wasi_complete_total_us_addr" "$appkit_wasi_complete_total_us"
+    printf 'appkit_wasi_complete_max_us_addr=%s us=0x%s\n' "$appkit_wasi_complete_max_us_addr" "$appkit_wasi_complete_max_us"
+  fi
 fi
 printf 'epf_core0_epoch_addr=%s epoch=0x%s\n' "$epf_core0_epoch_addr" "$epf_core0_epoch"
 printf 'epf_core0_kind_addr=%s kind=0x%s\n' "$epf_core0_kind_addr" "$epf_core0_kind"
@@ -748,9 +1037,18 @@ if [[ "$pattern" == "session-mismatch" || "$pattern" == "capacity-fault" ]]; the
     echo "Baker hardware pattern $pattern failed: core0 did not stay in a running scheduler stage" >&2
     exit 1
     fi
-  else
+  elif [[ "$runtime_ready_core" == "core0" ]]; then
     if [[ "$core0_stage" != "4849000a" ]]; then
       echo "Baker hardware pattern $pattern failed: core0 did not reach runtime-ready marker" >&2
+      exit 1
+    fi
+  else
+    if [[ "$core0_stage" != "48490004" && "$core0_stage" != "4849000a" ]]; then
+      echo "Baker hardware pattern $pattern failed: core0 did not stay in a running scheduler stage" >&2
+      exit 1
+    fi
+    if [[ "$core1_stage" != "4849000a" ]]; then
+      echo "Baker hardware pattern $pattern failed: core1 did not reach runtime-ready marker" >&2
       exit 1
     fi
   fi
@@ -938,24 +1236,69 @@ if (( core1_stack_dec == 0 || core1_stack_dec > stack_budget_dec )); then
   exit 1
 fi
 
+require_nonzero_counter() {
+  local name="$1"
+  local value="$2"
+  if (( 16#$value == 0 )); then
+    echo "Baker hardware pattern $pattern failed: $name stayed zero" >&2
+    exit 1
+  fi
+}
+
+require_choreofs_sio_cross_core() {
+  require_nonzero_counter choreofs_sio_core0_to_core1_tx "$choreofs_sio_core0_to_core1_tx"
+  require_nonzero_counter choreofs_sio_core0_to_core1_rx "$choreofs_sio_core0_to_core1_rx"
+  require_nonzero_counter choreofs_sio_core1_to_core0_tx "$choreofs_sio_core1_to_core0_tx"
+  require_nonzero_counter choreofs_sio_core1_to_core0_rx "$choreofs_sio_core1_to_core0_rx"
+  require_nonzero_counter choreofs_sio_tx_poll "$choreofs_sio_tx_poll_count"
+  require_nonzero_counter choreofs_reply_send_fd_write_object "$choreofs_reply_send_fd_write_object_count"
+  require_nonzero_counter choreofs_reply_send_poll_oneoff "$choreofs_reply_send_poll_oneoff_count"
+}
+
+require_appkit_wasi_metrics() {
+  if [[ -z "$appkit_wasi_resume_count_addr" ]]; then
+    echo "Baker hardware pattern $pattern failed: appkit WASI timing symbols are missing" >&2
+    exit 1
+  fi
+  require_nonzero_counter appkit_wasi_resume "$appkit_wasi_resume_count"
+  require_nonzero_counter appkit_wasi_request_send "$appkit_wasi_request_send_count"
+  require_nonzero_counter appkit_wasi_completion_recv "$appkit_wasi_completion_recv_count"
+  require_nonzero_counter appkit_wasi_complete "$appkit_wasi_complete_count"
+}
+
+require_choreofs_reply_future_poll_metrics() {
+  if [[ -z "$choreofs_reply_send_future_poll_count_addr" ]]; then
+    echo "Baker hardware pattern $pattern failed: reply-send future poll symbols are missing" >&2
+    exit 1
+  fi
+  if [[ -z "$choreofs_reply_encode_count_addr" ]]; then
+    echo "Baker hardware pattern $pattern failed: reply encode symbols are missing" >&2
+    exit 1
+  fi
+  require_nonzero_counter choreofs_reply_send_future_poll "$choreofs_reply_send_future_poll_count"
+  require_nonzero_counter choreofs_reply_encode "$choreofs_reply_encode_count"
+}
+
 if [[ "$pattern" == "choreofs-traffic" ]]; then
+  require_choreofs_sio_cross_core
+  require_appkit_wasi_metrics
   if [[ "$choreofs_engine_error_code" != "00000000" ]]; then
     echo "Baker hardware pattern $pattern failed: ChoreoFS error marker was set" >&2
     exit 1
   fi
-  if [[ "$choreofs_path_open_count" != "00000003" ]]; then
+  if [[ "$choreofs_path_open_count" != "00000001" ]]; then
     echo "Baker hardware pattern $pattern failed: path_open count mismatch" >&2
     exit 1
   fi
-  if [[ "$choreofs_fd_write_count" != "0000000d" ]]; then
+  if [[ "$choreofs_fd_write_count" != "00000007" ]]; then
     echo "Baker hardware pattern $pattern failed: fd_write count mismatch" >&2
     exit 1
   fi
-  if [[ "$choreofs_poll_count" != "0000000d" ]]; then
+  if [[ "$choreofs_poll_count" != "00000007" ]]; then
     echo "Baker hardware pattern $pattern failed: poll_oneoff count mismatch" >&2
     exit 1
   fi
-  if [[ "$choreofs_last_object" != "00000003" ]]; then
+  if [[ "$choreofs_last_object" != "00000001" ]]; then
     echo "Baker hardware pattern $pattern failed: final ChoreoFS object mismatch" >&2
     exit 1
   fi
@@ -970,21 +1313,24 @@ if [[ "$pattern" == "choreofs-traffic" ]]; then
 fi
 
 if [[ "$pattern" == "choreofs-traffic-loop" ]]; then
+  require_choreofs_sio_cross_core
+  require_appkit_wasi_metrics
+  require_choreofs_reply_future_poll_metrics
   if [[ "$choreofs_engine_error_code" != "00000000" ]]; then
     echo "Baker hardware pattern $pattern failed: ChoreoFS error marker was set" >&2
     exit 1
   fi
-  if [[ "$choreofs_path_open_count" != "00000003" ]]; then
+  if [[ "$choreofs_path_open_count" != "00000001" ]]; then
     echo "Baker hardware pattern $pattern failed: path_open count mismatch" >&2
     exit 1
   fi
   choreofs_fd_write_count_dec="$((16#$choreofs_fd_write_count))"
   choreofs_poll_count_dec="$((16#$choreofs_poll_count))"
-  if (( choreofs_fd_write_count_dec < 13 )); then
+  if (( choreofs_fd_write_count_dec < 7 )); then
     echo "Baker hardware pattern $pattern failed: fd_write count did not reach one visual cycle" >&2
     exit 1
   fi
-  if (( choreofs_poll_count_dec < 13 )); then
+  if (( choreofs_poll_count_dec < 7 )); then
     echo "Baker hardware pattern $pattern failed: poll_oneoff count did not reach one visual cycle" >&2
     exit 1
   fi

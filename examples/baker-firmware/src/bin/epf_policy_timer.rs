@@ -79,7 +79,7 @@ fn timer_epf_policy_resolver(_: &()) -> Result<DecisionArm, ResolverError> {
 
 impl appkit::Capsule for EpfPolicyTimer {
     type Placement = BakerPlacement;
-    type Local = EpfPolicyTimerLocal;
+    type Localside = EpfPolicyTimerLocal;
 
     fn choreography() -> impl hibana::runtime::program::Projectable {
         g::seq(
@@ -102,18 +102,16 @@ impl appkit::Capsule for EpfPolicyTimer {
         )
     }
 
-    fn register_resolvers<'cfg, R>(registry: &mut R)
+    fn register_resolvers<'cfg, R, const ROLE: u8>(registry: &mut R)
     where
-        R: appkit::ResolverRegistry<'cfg, Self>,
+        R: appkit::ResolverRegistry<'cfg, Self, ROLE>,
     {
         baker_firmware::record_choreofs_engine_status(0x4550_0200);
         let resolver = ResolverRef::decision_state(&EPF_RESOLVER_STATE, timer_epf_policy_resolver);
         let image_resolver =
             ResolverRef::decision_state(&EPF_RESOLVER_STATE, epf_image_ready_resolver);
-        registry.resolver::<EPF_IMAGE_LOAD_POLICY, 0>(image_resolver);
-        registry.resolver::<EPF_IMAGE_LOAD_POLICY, 1>(image_resolver);
-        registry.resolver::<EPF_TIMER_ROUTE_POLICY, 0>(resolver);
-        registry.resolver::<EPF_TIMER_ROUTE_POLICY, 1>(resolver);
+        registry.resolver::<EPF_IMAGE_LOAD_POLICY>(image_resolver);
+        registry.resolver::<EPF_TIMER_ROUTE_POLICY>(resolver);
         baker_firmware::record_choreofs_engine_status(0x4550_0201);
     }
 
@@ -133,18 +131,13 @@ impl BakerCapsuleFacts for EpfPolicyTimer {
 impl appkit::Localside<EpfPolicyTimer> for EpfPolicyTimerLocal {
     type Error = EpfPolicyTimerError;
 
-    fn engine<'endpoint, 'guest, const ROLE: u8>(
-        mut ctx: appkit::EngineCtx<'endpoint, 'guest, EpfPolicyTimer, ROLE>,
+    fn engine<'endpoint, const ROLE: u8>(
+        mut ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 1 {
                 baker_firmware::record_choreofs_engine_status(0x4550_010f);
-                let branch = ctx.endpoint().offer().await?;
-                if branch.label() != LABEL_EPF_POLICY_IMAGE {
-                    let _ = branch.recv::<EpfNoImageNotice>().await?;
-                    return Err(EpfPolicyTimerError::RuntimeViolation);
-                }
-                let image = branch.recv::<EpfPolicyImage>().await?;
+                let image = ctx.recv::<EpfPolicyImage>().await?;
                 if !baker_firmware::load_epf_choreography_image(&image) {
                     return Err(EpfPolicyTimerError::RuntimeViolation);
                 }
@@ -156,7 +149,7 @@ impl appkit::Localside<EpfPolicyTimer> for EpfPolicyTimerLocal {
                 baker_firmware::record_choreofs_engine_status(0x4550_0110);
 
                 while !baker_firmware::baker_timer_route_resolver_ready(500) {
-                    baker_firmware::baker_poll_delay(1);
+                    core::hint::spin_loop();
                 }
                 if !baker_firmware::baker_timer_route_irq_observed() {
                     return Err(EpfPolicyTimerError::RuntimeViolation);
@@ -166,27 +159,27 @@ impl appkit::Localside<EpfPolicyTimer> for EpfPolicyTimerLocal {
                 }
                 baker_firmware::record_choreofs_engine_status(0x4550_0111);
 
-                ctx.endpoint().send::<ResponseReady>(&7).await?;
+                ctx.send::<ResponseReady>(&7).await?;
                 baker_firmware::record_choreofs_engine_status(0x4550_0112);
 
-                let done = ctx.endpoint().recv::<TimerRouteDone>().await?;
+                let done = ctx.recv::<TimerRouteDone>().await?;
                 if done != 7 {
                     return Err(EpfPolicyTimerError::RuntimeViolation);
                 }
                 baker_firmware::record_choreofs_engine_status(0x4550_0113);
 
-                ctx.endpoint().send::<TimerRouteAck>(&7).await?;
+                ctx.send::<TimerRouteAck>(&7).await?;
                 baker_firmware::record_choreofs_engine_status(0x4550_0114);
 
                 baker_firmware::mark_runtime_ready();
-                return ctx.pending().await;
+                return appkit::pending(ctx).await;
             }
-            ctx.pending().await
+            appkit::pending(ctx).await
         }
     }
 
-    fn driver<'a, const ROLE: u8>(
-        mut ctx: appkit::DriverCtx<'a, EpfPolicyTimer, ROLE>,
+    fn driver<'endpoint, const ROLE: u8>(
+        mut ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 0 {
@@ -194,7 +187,7 @@ impl appkit::Localside<EpfPolicyTimer> for EpfPolicyTimerLocal {
                 let mut waits = 0usize;
                 while !baker_firmware::baker_epf_policy_image_ready() {
                     if waits >= 5_000 {
-                        ctx.endpoint().send::<EpfNoImageNotice>(&0).await?;
+                        ctx.send::<EpfNoImageNotice>(&0).await?;
                         return Err(EpfPolicyTimerError::RuntimeViolation);
                     }
                     baker_firmware::baker_poll_delay(1);
@@ -203,11 +196,11 @@ impl appkit::Localside<EpfPolicyTimer> for EpfPolicyTimerLocal {
 
                 let mut policy_image = [0u8; EPF_POLICY_IMAGE_BYTES];
                 if !baker_firmware::read_epf_policy_image(&mut policy_image) {
-                    ctx.endpoint().send::<EpfNoImageNotice>(&0).await?;
+                    ctx.send::<EpfNoImageNotice>(&0).await?;
                     return Err(EpfPolicyTimerError::RuntimeViolation);
                 }
 
-                ctx.endpoint().send::<EpfPolicyImage>(&policy_image).await?;
+                ctx.send::<EpfPolicyImage>(&policy_image).await?;
                 if !baker_firmware::load_epf_choreography_image(&policy_image) {
                     return Err(EpfPolicyTimerError::RuntimeViolation);
                 }
@@ -220,20 +213,16 @@ impl appkit::Localside<EpfPolicyTimer> for EpfPolicyTimerLocal {
                 }
                 baker_firmware::record_choreofs_driver_trace(0x4550_0011);
 
-                let branch = ctx.endpoint().offer().await?;
-                baker_firmware::record_choreofs_driver_trace(
-                    0x4550_1000 | u32::from(branch.label()),
-                );
-                let response = branch.recv::<ResponseReady>().await?;
+                let response = ctx.recv::<ResponseReady>().await?;
                 if response != 7 {
                     return Err(EpfPolicyTimerError::RuntimeViolation);
                 }
                 baker_firmware::record_choreofs_driver_trace(0x4550_0012);
 
-                ctx.endpoint().send::<TimerRouteDone>(&7).await?;
+                ctx.send::<TimerRouteDone>(&7).await?;
                 baker_firmware::record_choreofs_driver_trace(0x4550_0013);
 
-                let ack = ctx.endpoint().recv::<TimerRouteAck>().await?;
+                let ack = ctx.recv::<TimerRouteAck>().await?;
                 if ack != 7 {
                     return Err(EpfPolicyTimerError::RuntimeViolation);
                 }
@@ -241,16 +230,16 @@ impl appkit::Localside<EpfPolicyTimer> for EpfPolicyTimerLocal {
 
                 baker_firmware::mark_runtime_ready();
                 baker_firmware::mark_success(<EpfPolicyTimer as BakerCapsuleFacts>::SUCCESS_RESULT);
-                return ctx.pending().await;
+                return appkit::pending(ctx).await;
             }
-            ctx.pending().await
+            appkit::pending(ctx).await
         }
     }
 
-    fn boundary<'a, const ROLE: u8>(
-        ctx: appkit::BoundaryCtx<'a, EpfPolicyTimer, ROLE>,
+    fn boundary<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
+        appkit::pending(ctx)
     }
 }
 
@@ -268,7 +257,7 @@ pub extern "C" fn baker_selected_run() -> ! {
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
 fn main() {
-    baker_firmware::run::<EpfPolicyTimer>()
+    panic!("baker-firmware examples are RP2040 hardware artifacts; build for thumbv6m-none-eabi")
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]

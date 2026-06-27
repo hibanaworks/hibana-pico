@@ -61,7 +61,7 @@ fn run_hardware_split_proof(serial: &str, mode: ProofMode) {
 
 fn assert_hardware_split_image<I>(serial: &str)
 where
-    I: appkit::LogicalImage<UnoQCapsule>,
+    I: appkit::LogicalImage<Capsule = UnoQCapsule>,
 {
     assert_eq!(I::REQUESTED_ROLES, appkit::RoleSet::from_bits(0x1e));
     assert_eq!(
@@ -72,16 +72,16 @@ where
 }
 
 fn run_hardware_split_proof_once(serial: &str) {
-    type Proof = appkit::Local<image::HardwarePeerProof>;
+    type Proof = image::HardwarePeerProof;
 
-    appkit::run::<Proof, UnoQCapsule>(image::HardwarePeerProof::wasi_image());
+    appkit::run::<Proof>(image::HardwarePeerProof::wasi_image());
     assert_hardware_split_image::<Proof>(serial);
 }
 
 fn run_hardware_split_proof_loop(serial: &str) {
-    type Proof = appkit::Local<image::HardwarePeerLoopProof>;
+    type Proof = image::HardwarePeerLoopProof;
 
-    appkit::run::<Proof, UnoQCapsule>(image::HardwarePeerLoopProof::wasi_image());
+    appkit::run::<Proof>(image::HardwarePeerLoopProof::wasi_image());
     assert_hardware_split_image::<Proof>(serial);
 }
 

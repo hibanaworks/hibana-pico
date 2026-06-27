@@ -5,10 +5,3 @@ version = 4
 [[package]]
 name = "baker-wasip1-guest"
 version = "0.1.0"
-dependencies = [
- "hibana-wasip1-guest",
-]
-
-[[package]]
-name = "hibana-wasip1-guest"
-version = "0.1.0"

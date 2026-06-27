@@ -144,8 +144,7 @@ echo h > /face/frame
 `ls` and `find ChoreoFS -type f` are equivalent discovery commands in this
 small shell. The shell catalog advertises `w /face/frame FaceFrame`. The prompt
 documents the compact face codes: `h`, `a`, `s`, `u`, `mc`, `ms`, `mw`, and
-`mr`; the shell also accepts `v` as a surprised alias because the local model
-occasionally emits it for that face.
+`mr`; undeclared face codes stay invalid.
 
 The scripted source, when explicitly enabled for host-only checks, returns
 commands for this cycle:

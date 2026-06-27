@@ -2,7 +2,7 @@
 //!
 //! `appkit` validates projectable raw hibana choreographies against logical
 //! site images. It does not define a choreography DSL, expose engine internals,
-//! or complete WASI P1 imports outside projected endpoint/carrier progress.
+//! or finish WASI P1 imports outside projected endpoint/carrier progress.
 
 use core::{
     convert::Infallible,
@@ -25,31 +25,10 @@ use core::mem::ManuallyDrop;
 use core::cell::UnsafeCell;
 
 #[cfg(feature = "wasm-engine-core")]
-use hibana_wasip1_runtime::protocol::{
-    LABEL_WASI_ARGS_GET, LABEL_WASI_ARGS_GET_RET, LABEL_WASI_ARGS_SIZES_GET,
-    LABEL_WASI_ARGS_SIZES_GET_RET, LABEL_WASI_CLOCK_RES_GET, LABEL_WASI_CLOCK_RES_GET_RET,
-    LABEL_WASI_CLOCK_TIME_GET, LABEL_WASI_CLOCK_TIME_GET_RET, LABEL_WASI_ENVIRON_GET,
-    LABEL_WASI_ENVIRON_GET_RET, LABEL_WASI_ENVIRON_SIZES_GET, LABEL_WASI_ENVIRON_SIZES_GET_RET,
-    LABEL_WASI_FD_CLOSE, LABEL_WASI_FD_CLOSE_RET, LABEL_WASI_FD_FDSTAT_GET,
-    LABEL_WASI_FD_FDSTAT_GET_RET, LABEL_WASI_FD_READ, LABEL_WASI_FD_READ_RET,
-    LABEL_WASI_FD_READDIR, LABEL_WASI_FD_READDIR_RET, LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET,
-    LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET, LABEL_WASI_POLL_ONEOFF,
-    LABEL_WASI_POLL_ONEOFF_RET, LABEL_WASI_PROC_EXIT, LABEL_WASI_RANDOM_GET,
-    LABEL_WASI_RANDOM_GET_RET,
+use hibana_wasip1_runtime::{
+    WasiImport, WasiImportCompletion, WasiImportRequest,
+    protocol::{self, BudgetRun},
 };
-
-#[cfg(feature = "wasm-engine-core")]
-use hibana_wasip1_runtime::protocol::{EngineReq, EngineRet};
-
-#[cfg(feature = "wasm-engine-core")]
-use hibana_wasip1_runtime::protocol::{
-    ArgsGet, ArgsSizesGet, BudgetExpired, BudgetRun, ClockResGet, ClockTimeGet, EnvironGet,
-    EnvironSizesGet, FdRead, FdReaddir, FdRequest, FdWrite, LABEL_MEM_FENCE, MemFence,
-    MemFenceReason, MemRights, PathOpen, PollOneoff, ProcExitStatus, RandomGet,
-    WASIP1_IO_CHUNK_CAPACITY,
-};
-
-use hibana_wasip1_runtime::choreofs::{ChoreoFsFacts, DriverFacts, LedgerFacts};
 
 #[cfg(any(test, not(target_os = "none")))]
 const APPKIT_ATTACH_SLAB_BYTES: usize = 262_144;
@@ -69,12 +48,12 @@ const APPKIT_EMBEDDED_FUTURE_BYTES: usize =
 #[cfg(feature = "wasm-engine-core")]
 const APPKIT_WASI_GUEST_ARENA_ALIGN: usize = 16;
 #[cfg(feature = "wasm-engine-core")]
-const APPKIT_WASI_GUEST_BYTES: usize =
-    size_of::<hibana_wasip1_runtime::engine::wasm::Guest<'static>>();
+const APPKIT_WASI_GUEST_STORAGE_BYTES: usize =
+    size_of::<hibana_wasip1_runtime::HibanaWasiGuestStorage<'static>>();
+#[cfg(feature = "wasm-engine-core")]
+const APPKIT_WASI_GUEST_MEMORY_BYTES: usize = hibana_wasip1_runtime::DEFAULT_GUEST_MEMORY_BYTES;
 #[cfg(feature = "wasm-engine-core")]
 const APPKIT_DEFAULT_WASI_FUEL_PER_ACTIVATION: u32 = 1_000_000;
-#[cfg(feature = "wasm-engine-core")]
-const APPKIT_PROC_EXIT_FANOUT_CAP: u8 = HIBANA_TYPED_ROLE_DOMAIN_SIZE;
 
 const APPKIT_DEFAULT_SESSION_ID: NonZeroU32 = nonzero_session_id(1);
 
@@ -83,10 +62,6 @@ const fn nonzero_session_id(raw: u32) -> NonZeroU32 {
         Some(session) => session,
         None => panic!("appkit session id must be nonzero"),
     }
-}
-
-fn driver_facts_without_objects() -> DriverFacts<'static> {
-    DriverFacts::new(ChoreoFsFacts::new(&[]), LedgerFacts::new(&[]))
 }
 
 /// Current typed hibana role domain: `Role<0>` through `Role<15>`.
@@ -134,7 +109,7 @@ impl<T, E> core::future::Future for PendingRole<T, E> {
 
 #[derive(Clone, Copy)]
 enum RoleTaskError<E> {
-    Local(E),
+    Localside(E),
     #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
     Wasi(WasiGuestError),
 }
@@ -145,19 +120,19 @@ where
 {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Local(error) => formatter.debug_tuple("Local").field(error).finish(),
+            Self::Localside(error) => formatter.debug_tuple("Localside").field(error).finish(),
             #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
             Self::Wasi(error) => formatter.debug_tuple("Wasi").field(error).finish(),
         }
     }
 }
 
-struct LocalRoleTask<F, E> {
+struct LocalsideRoleTask<F, E> {
     future: F,
     marker: PhantomData<fn() -> E>,
 }
 
-impl<F, E> LocalRoleTask<F, E> {
+impl<F, E> LocalsideRoleTask<F, E> {
     const fn new(future: F) -> Self {
         Self {
             future,
@@ -166,7 +141,7 @@ impl<F, E> LocalRoleTask<F, E> {
     }
 }
 
-impl<F, E> Future for LocalRoleTask<F, E>
+impl<F, E> Future for LocalsideRoleTask<F, E>
 where
     F: core::future::Future<Output = RoleResult<E>>,
 {
@@ -178,7 +153,7 @@ where
         match future.poll(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(done)) => match done {},
-            Poll::Ready(Err(error)) => Poll::Ready(Err(RoleTaskError::Local(error))),
+            Poll::Ready(Err(error)) => Poll::Ready(Err(RoleTaskError::Localside(error))),
         }
     }
 }
@@ -217,11 +192,11 @@ where
     }
 }
 
-fn local_role_task<F, E>(future: F) -> LocalRoleTask<F, E>
+fn localside_role_task<F, E>(future: F) -> LocalsideRoleTask<F, E>
 where
     F: core::future::Future<Output = RoleResult<E>>,
 {
-    LocalRoleTask::new(future)
+    LocalsideRoleTask::new(future)
 }
 
 #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
@@ -292,7 +267,8 @@ unsafe impl<const SLAB_BYTES: usize> Sync for EmbeddedAttachStorage<SLAB_BYTES> 
 #[repr(C, align(16))]
 #[cfg(feature = "wasm-engine-core")]
 pub struct WasiGuestArena {
-    bytes: UnsafeCell<[u8; APPKIT_WASI_GUEST_BYTES]>,
+    storage: UnsafeCell<[u8; APPKIT_WASI_GUEST_STORAGE_BYTES]>,
+    memory: UnsafeCell<[u8; APPKIT_WASI_GUEST_MEMORY_BYTES]>,
     occupied: UnsafeCell<bool>,
     owner: PhantomData<*mut ()>,
 }
@@ -300,7 +276,8 @@ pub struct WasiGuestArena {
 #[cfg(feature = "wasm-engine-core")]
 impl WasiGuestArena {
     const EMPTY: Self = Self {
-        bytes: UnsafeCell::new([0; APPKIT_WASI_GUEST_BYTES]),
+        storage: UnsafeCell::new([0; APPKIT_WASI_GUEST_STORAGE_BYTES]),
+        memory: UnsafeCell::new([0; APPKIT_WASI_GUEST_MEMORY_BYTES]),
         occupied: UnsafeCell::new(false),
         owner: PhantomData,
     };
@@ -311,7 +288,7 @@ impl WasiGuestArena {
 
     fn assert_guest_alignment() {
         assert!(
-            align_of::<hibana_wasip1_runtime::engine::wasm::Guest<'static>>()
+            align_of::<hibana_wasip1_runtime::HibanaWasiGuestStorage<'static>>()
                 <= APPKIT_WASI_GUEST_ARENA_ALIGN,
             "WASI guest arena alignment is too small"
         );
@@ -330,7 +307,8 @@ impl WasiGuestArena {
         }
         WasiGuestLease {
             occupied: self.occupied.get(),
-            ptr: unsafe { (*self.bytes.get()).as_mut_ptr().cast() },
+            storage: unsafe { (*self.storage.get()).as_mut_ptr().cast() },
+            memory: self.memory.get(),
         }
     }
 }
@@ -341,13 +319,18 @@ unsafe impl<const N: usize> Sync for EmbeddedFutureArena<N> {}
 #[cfg(feature = "wasm-engine-core")]
 pub struct WasiGuestLease<'guest> {
     occupied: *mut bool,
-    ptr: *mut hibana_wasip1_runtime::engine::wasm::Guest<'guest>,
+    storage: *mut hibana_wasip1_runtime::HibanaWasiGuestStorage<'guest>,
+    memory: *mut [u8; APPKIT_WASI_GUEST_MEMORY_BYTES],
 }
 
 #[cfg(feature = "wasm-engine-core")]
 impl<'guest> WasiGuestLease<'guest> {
-    fn guest_ptr(&mut self) -> *mut hibana_wasip1_runtime::engine::wasm::Guest<'guest> {
-        self.ptr
+    fn storage_ptr(&mut self) -> *mut hibana_wasip1_runtime::HibanaWasiGuestStorage<'guest> {
+        self.storage
+    }
+
+    fn memory_ptr(&mut self) -> *mut [u8; APPKIT_WASI_GUEST_MEMORY_BYTES] {
+        self.memory
     }
 }
 
@@ -363,82 +346,261 @@ impl Drop for WasiGuestLease<'_> {
 #[cfg(all(not(test), target_os = "none"))]
 #[inline(always)]
 fn embedded_wait_for_event() {
+    #[cfg(target_arch = "arm")]
+    unsafe {
+        core::arch::asm!("wfe", options(nomem, nostack, preserves_flags));
+    }
+    #[cfg(not(target_arch = "arm"))]
     core::hint::spin_loop();
 }
 
 #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
-#[inline(always)]
-fn embedded_task_waker() -> &'static Waker {
-    Waker::noop()
+type AppkitWasiMetricClock = extern "C" fn() -> u32;
+
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_METRIC_CLOCK: usize = 0;
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_METRIC_ENABLED: u32 = 0;
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_RESUME_COUNT: u32 = 0;
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_RESUME_LAST_US: u32 = 0;
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_RESUME_TOTAL_US: u32 = 0;
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_RESUME_MAX_US: u32 = 0;
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_REQUEST_SEND_COUNT: u32 = 0;
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_REQUEST_SEND_LAST_US: u32 = 0;
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_REQUEST_SEND_TOTAL_US: u32 = 0;
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_REQUEST_SEND_MAX_US: u32 = 0;
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_COMPLETION_RECV_COUNT: u32 = 0;
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_COMPLETION_RECV_LAST_US: u32 = 0;
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_COMPLETION_RECV_TOTAL_US: u32 = 0;
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_COMPLETION_RECV_MAX_US: u32 = 0;
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_COMPLETE_COUNT: u32 = 0;
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_COMPLETE_LAST_US: u32 = 0;
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_COMPLETE_TOTAL_US: u32 = 0;
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[used]
+#[unsafe(no_mangle)]
+static mut HIBANA_APPKIT_WASI_COMPLETE_MAX_US: u32 = 0;
+
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+fn appkit_wasi_metric_start() -> Option<u32> {
+    unsafe {
+        if core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_APPKIT_WASI_METRIC_ENABLED)) == 0 {
+            return None;
+        }
+        let raw_clock =
+            core::ptr::read_volatile(core::ptr::addr_of!(HIBANA_APPKIT_WASI_METRIC_CLOCK));
+        if raw_clock == 0 {
+            return None;
+        }
+        let clock: AppkitWasiMetricClock = core::mem::transmute(raw_clock);
+        Some(clock())
+    }
 }
 
 #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
-fn poll_embedded_endpoint_unit<F>(mut future: F) -> Result<(), hibana::EndpointError>
-where
-    F: core::future::Future<Output = Result<(), hibana::EndpointError>>,
-{
-    let task_waker = embedded_task_waker();
-    let mut pinned = unsafe {
-        // SAFETY: The future is stored in this stack frame and is never moved
-        // while the pinned handle is used.
-        Pin::new_unchecked(&mut future)
+fn record_appkit_wasi_metric(
+    count: *mut u32,
+    last: *mut u32,
+    total: *mut u32,
+    max: *mut u32,
+    start: Option<u32>,
+) {
+    let Some(start) = start else {
+        return;
     };
-    loop {
-        let mut task_context = Context::from_waker(task_waker);
-        match pinned.as_mut().poll(&mut task_context) {
-            Poll::Ready(result) => return result,
-            Poll::Pending => embedded_wait_for_event(),
+    let Some(end) = appkit_wasi_metric_start() else {
+        return;
+    };
+    let elapsed = end.wrapping_sub(start);
+    unsafe {
+        let next_count = core::ptr::read_volatile(count).saturating_add(1);
+        core::ptr::write_volatile(count, next_count);
+        core::ptr::write_volatile(last, elapsed);
+        let next_total = core::ptr::read_volatile(total).saturating_add(elapsed);
+        core::ptr::write_volatile(total, next_total);
+        if elapsed > core::ptr::read_volatile(max) {
+            core::ptr::write_volatile(max, elapsed);
         }
     }
 }
 
 #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
-fn poll_embedded_endpoint_value<T, F>(
+fn record_appkit_wasi_resume(start: Option<u32>) {
+    record_appkit_wasi_metric(
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_RESUME_COUNT),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_RESUME_LAST_US),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_RESUME_TOTAL_US),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_RESUME_MAX_US),
+        start,
+    );
+}
+
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+fn record_appkit_wasi_request_send(start: Option<u32>) {
+    record_appkit_wasi_metric(
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_REQUEST_SEND_COUNT),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_REQUEST_SEND_LAST_US),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_REQUEST_SEND_TOTAL_US),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_REQUEST_SEND_MAX_US),
+        start,
+    );
+}
+
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+fn record_appkit_wasi_completion_recv(start: Option<u32>) {
+    record_appkit_wasi_metric(
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_COMPLETION_RECV_COUNT),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_COMPLETION_RECV_LAST_US),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_COMPLETION_RECV_TOTAL_US),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_COMPLETION_RECV_MAX_US),
+        start,
+    );
+}
+
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+fn record_appkit_wasi_complete(start: Option<u32>) {
+    record_appkit_wasi_metric(
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_COMPLETE_COUNT),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_COMPLETE_LAST_US),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_COMPLETE_TOTAL_US),
+        core::ptr::addr_of_mut!(HIBANA_APPKIT_WASI_COMPLETE_MAX_US),
+        start,
+    );
+}
+
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[inline(always)]
+fn embedded_task_waker(woke: &mut bool) -> Waker {
+    let raw_waker = RawWaker::new(
+        core::ptr::addr_of_mut!(*woke).cast::<()>(),
+        &WAKE_FLAG_WAKER_VTABLE,
+    );
+    unsafe {
+        // SAFETY: The raw waker points to `woke`, which lives for one poll
+        // pass. The vtable only writes `true` to that flag.
+        Waker::from_raw(raw_waker)
+    }
+}
+
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+fn poll_embedded_wasi_unit<F, E>(
     mut future: F,
-    output: &mut MaybeUninit<T>,
+    tasks: &mut EmbeddedScheduledTasks<'_, E>,
 ) -> Result<(), hibana::EndpointError>
 where
-    F: core::future::Future<Output = Result<T, hibana::EndpointError>>,
+    F: core::future::Future<Output = Result<(), hibana::EndpointError>>,
+    E: Debug,
 {
-    let task_waker = embedded_task_waker();
     let mut pinned = unsafe {
         // SAFETY: The future is stored in this stack frame and is never moved
         // while the pinned handle is used.
         Pin::new_unchecked(&mut future)
     };
     loop {
-        let mut task_context = Context::from_waker(task_waker);
+        let mut woke = false;
+        let task_waker = embedded_task_waker(&mut woke);
+        let mut task_context = Context::from_waker(&task_waker);
+        match pinned.as_mut().poll(&mut task_context) {
+            Poll::Ready(result) => return result,
+            Poll::Pending => {
+                if tasks.has_tasks() {
+                    tasks.poll_once(&mut task_context);
+                }
+                if !woke {
+                    embedded_wait_for_event();
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+fn poll_embedded_wasi_value<T, F, E>(
+    mut future: F,
+    output: &mut MaybeUninit<T>,
+    tasks: &mut EmbeddedScheduledTasks<'_, E>,
+) -> Result<(), hibana::EndpointError>
+where
+    F: core::future::Future<Output = Result<T, hibana::EndpointError>>,
+    E: Debug,
+{
+    let mut pinned = unsafe {
+        // SAFETY: The future is stored in this stack frame and is never moved
+        // while the pinned handle is used.
+        Pin::new_unchecked(&mut future)
+    };
+    loop {
+        let mut woke = false;
+        let task_waker = embedded_task_waker(&mut woke);
+        let mut task_context = Context::from_waker(&task_waker);
         match pinned.as_mut().poll(&mut task_context) {
             Poll::Ready(Ok(value)) => {
                 output.write(value);
                 return Ok(());
             }
             Poll::Ready(Err(error)) => return Err(error),
-            Poll::Pending => embedded_wait_for_event(),
+            Poll::Pending => {
+                if tasks.has_tasks() {
+                    tasks.poll_once(&mut task_context);
+                }
+                if !woke {
+                    embedded_wait_for_event();
+                }
+            }
         }
     }
 }
 
-#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
-fn embedded_pending_forever<T>(context: T) -> ! {
-    let context = context;
-    loop {
-        core::hint::black_box(&context);
-        embedded_wait_for_event();
-    }
-}
-
-/// Generic logical-site marker.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Local<Image>(PhantomData<Image>);
-
-impl<Image> Local<Image> {
-    pub const fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-/// Localside context family assigned to one projected role.
+/// Localside execution class assigned to one projected role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoleKind {
     Engine,
@@ -448,7 +610,7 @@ pub enum RoleKind {
 
 /// Requested projection slice for a logical image.
 ///
-/// This is not protocol authority. The requested roles must match capsule
+/// This is not protocol admission. The requested roles must match capsule
 /// placement and the concrete hibana `RoleProgram` witnesses materialized for
 /// the logical image before it is attached.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -473,7 +635,7 @@ impl RoleSet {
         self.bits.count_ones() as u8
     }
 
-    pub const fn contains(self, role: u8) -> bool {
+    const fn contains(self, role: u8) -> bool {
         role < HIBANA_TYPED_ROLE_DOMAIN_SIZE && (self.bits & (1u16 << role)) != 0
     }
 
@@ -498,7 +660,7 @@ pub struct WasiImage<'a> {
 }
 
 impl<'a> WasiImage<'a> {
-    pub const fn from_static(bytes: &'a [u8]) -> Self {
+    pub const fn from_bytes(bytes: &'a [u8]) -> Self {
         Self { bytes }
     }
 }
@@ -511,12 +673,12 @@ pub struct NoWasi;
 ///
 /// Placement decides location, not protocol legality.
 pub trait Placement<C: Capsule> {
-    fn role_kind(role: u8) -> RoleKind;
+    fn role_kind<const ROLE: u8>() -> RoleKind;
 }
 
 /// Resolver registration surface for Capsule-local hibana policy points.
-pub trait ResolverRegistry<'cfg, C: Capsule> {
-    fn resolver<const POLICY: u16, const ROLE: u8>(
+pub trait ResolverRegistry<'cfg, C: Capsule, const ROLE: u8> {
+    fn resolver<const POLICY: u16>(
         &mut self,
         resolver: hibana::runtime::resolver::ResolverRef<'cfg, POLICY>,
     );
@@ -525,32 +687,19 @@ pub trait ResolverRegistry<'cfg, C: Capsule> {
 /// A projectable raw hibana choreography plus its placement and localside code.
 pub trait Capsule: Sized {
     type Placement: Placement<Self>;
-    type Local: Localside<Self>;
+    type Localside: Localside<Self>;
 
     const SESSION_ID: NonZeroU32 = APPKIT_DEFAULT_SESSION_ID;
 
     fn choreography() -> impl hibana::runtime::program::Projectable;
 
-    fn register_resolvers<'cfg, R>(_: &mut R)
+    fn register_resolvers<'cfg, R, const ROLE: u8>(_: &mut R)
     where
-        R: ResolverRegistry<'cfg, Self>,
+        R: ResolverRegistry<'cfg, Self, ROLE>,
     {
     }
 
     fn observe(_: &mut hibana::runtime::tap::TapPort<'_>) {}
-
-    #[cfg(feature = "wasm-engine-core")]
-    const WASI_GUEST_DRIVE: WasiGuestDrive = WasiGuestDrive::Canonical;
-}
-
-/// Driver ownership for a selected WASI P1 guest image.
-#[cfg(feature = "wasm-engine-core")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WasiGuestDrive {
-    /// Appkit owns the canonical endpoint/carrier WASI P1 import loop.
-    Canonical,
-    /// The capsule localside owns explicit WASI guest stepping.
-    Localside,
 }
 
 /// Private artifact boundary consumed by [`run`].
@@ -560,7 +709,8 @@ pub enum WasiGuestDrive {
 /// choreography admission authority.
 /// `NoWasi` never leases storage. `WasiImage` requires the selected logical
 /// image to implement [`WasiGuestImage`].
-trait ArtifactInput<C: Capsule, I> {
+trait ArtifactInput<I: LogicalImage> {
+    #[cfg(feature = "wasm-engine-core")]
     fn wasi_bytes(&self) -> Option<&[u8]>;
 
     #[cfg(feature = "wasm-engine-core")]
@@ -568,17 +718,18 @@ trait ArtifactInput<C: Capsule, I> {
 
     #[cfg(feature = "wasm-engine-core")]
     fn wasi_budget<const ROLE: u8>() -> BudgetRun {
-        core::hint::black_box(ROLE);
         BudgetRun::new(1, 0, APPKIT_DEFAULT_WASI_FUEL_PER_ACTIVATION)
     }
 }
 
 /// One projection-derived logical site image.
-pub trait LogicalImage<C: Capsule>: Sized {
+pub trait LogicalImage: Sized {
+    type Capsule: Capsule;
+
     type Carrier<'a>: hibana::runtime::transport::Transport + 'a
     where
         Self: 'a,
-        C: 'a;
+        Self::Capsule: 'a;
 
     const REQUESTED_ROLES: RoleSet;
 
@@ -586,21 +737,17 @@ pub trait LogicalImage<C: Capsule>: Sized {
     fn safe_state(&mut self);
     fn carrier<'a>() -> Self::Carrier<'a>
     where
-        C: 'a;
+        Self::Capsule: 'a;
     #[cfg(all(not(test), target_os = "none"))]
     fn attach_storage() -> EmbeddedAttachStorageRef<'static>;
-    fn driver_facts() -> DriverFacts<'static> {
-        driver_facts_without_objects()
-    }
 }
 
 /// Site-local storage facts required only by logical images that actually run a WASI guest.
 #[cfg(feature = "wasm-engine-core")]
-pub trait WasiGuestImage<C: Capsule>: LogicalImage<C> {
+pub trait WasiGuestImage: LogicalImage {
     fn wasi_guest_lease<'guest, const ROLE: u8>() -> WasiGuestLease<'guest>;
 
     fn wasi_budget<const ROLE: u8>() -> BudgetRun {
-        core::hint::black_box(ROLE);
         BudgetRun::new(1, 0, APPKIT_DEFAULT_WASI_FUEL_PER_ACTIVATION)
     }
 }
@@ -719,58 +866,248 @@ fn visit_requested_projected_roles<C, V>(
         visit_projected_role::<C, V, 15>(program, visitor);
     }
 }
-fn collect_projected_roles<C, I>(
+fn collect_projected_roles<I>(
     program: &impl hibana::runtime::program::Projectable,
 ) -> ProjectedRoles
 where
-    C: Capsule,
-    I: LogicalImage<C>,
+    I: LogicalImage,
 {
     let mut projected = ProjectedRoles::new();
-    visit_requested_projected_roles::<C, _>(program, I::REQUESTED_ROLES, &mut projected);
+    visit_requested_projected_roles::<I::Capsule, _>(program, I::REQUESTED_ROLES, &mut projected);
     projected
 }
 
 #[cfg(feature = "wasm-engine-core")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WasiGuestStatus {
-    Exit(ProcExitStatus),
-    BudgetExpired(BudgetExpired),
+    Exit,
+    BudgetExpired,
+}
+
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EmbeddedWasiGuestStatus {
+    Exit,
+    BudgetExpired,
+    TerminalEndpoint,
 }
 
 #[cfg(feature = "wasm-engine-core")]
-#[derive(Clone, Copy, Debug)]
-pub enum WasiGuestError {
-    NoWasiArtifact,
-    GuestRejected(hibana_wasip1_runtime::engine::wasm::Error),
-    EndpointRejected(u32),
-    Endpoint {
-        code: u32,
-        source: hibana::EndpointError,
-    },
-    ProtocolRejected(hibana::runtime::wire::CodecError),
-    UnexpectedReply,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WasiGuestError {
+    _private: (),
 }
 
 #[cfg(feature = "wasm-engine-core")]
 impl WasiGuestError {
-    fn endpoint(code: u32, source: hibana::EndpointError) -> Self {
-        Self::Endpoint { code, source }
+    const fn rejected() -> Self {
+        Self { _private: () }
     }
 }
 
 #[cfg(feature = "wasm-engine-core")]
-impl From<hibana_wasip1_runtime::engine::wasm::Error> for WasiGuestError {
-    fn from(error: hibana_wasip1_runtime::engine::wasm::Error) -> Self {
-        Self::GuestRejected(error)
+fn wasi_runtime_result<T>(
+    result: Result<T, hibana_wasip1_runtime::exchange::ExchangeError>,
+) -> Result<T, WasiGuestError> {
+    result.map_err(|_| WasiGuestError::rejected())
+}
+
+#[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
+fn wasi_endpoint_result<T>(result: Result<T, hibana::EndpointError>) -> Result<T, WasiGuestError> {
+    result.map_err(|_| WasiGuestError::rejected())
+}
+
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+fn wasi_endpoint_terminal(_error: &hibana::EndpointError) -> bool {
+    true
+}
+
+#[cfg(feature = "wasm-engine-core")]
+async fn send_wasi_import_request<const ROLE: u8>(
+    endpoint: &mut hibana::Endpoint<'_, ROLE>,
+    request: WasiImportRequest,
+) -> Result<(), hibana::EndpointError> {
+    match request {
+        WasiImportRequest::FdWrite(request) => {
+            endpoint.send::<protocol::FdWriteReqMsg>(&request).await
+        }
+        WasiImportRequest::FdWriteObject(request) => {
+            endpoint
+                .send::<protocol::FdWriteObjectReqMsg>(&request)
+                .await
+        }
+        WasiImportRequest::FdRead(request) => {
+            endpoint.send::<protocol::FdReadReqMsg>(&request).await
+        }
+        WasiImportRequest::FdReaddir(request) => {
+            endpoint.send::<protocol::FdReaddirReqMsg>(&request).await
+        }
+        WasiImportRequest::PathOpen(request) => {
+            endpoint.send::<protocol::PathOpenReqMsg>(&request).await
+        }
+        WasiImportRequest::FdPrestatGet(request) => {
+            endpoint
+                .send::<protocol::FdPrestatGetReqMsg>(&request)
+                .await
+        }
+        WasiImportRequest::FdPrestatDirName(request) => {
+            endpoint
+                .send::<protocol::FdPrestatDirNameReqMsg>(&request)
+                .await
+        }
+        WasiImportRequest::FdFilestatGet(request) => {
+            endpoint
+                .send::<protocol::FdFilestatGetReqMsg>(&request)
+                .await
+        }
+        WasiImportRequest::ArgsSizesGet(request) => {
+            endpoint
+                .send::<protocol::ArgsSizesGetReqMsg>(&request)
+                .await
+        }
+        WasiImportRequest::ArgsGet(request) => {
+            endpoint.send::<protocol::ArgsGetReqMsg>(&request).await
+        }
+        WasiImportRequest::EnvironSizesGet(request) => {
+            endpoint
+                .send::<protocol::EnvironSizesGetReqMsg>(&request)
+                .await
+        }
+        WasiImportRequest::EnvironGet(request) => {
+            endpoint.send::<protocol::EnvironGetReqMsg>(&request).await
+        }
+        WasiImportRequest::FdFdstatGet(request) => {
+            endpoint.send::<protocol::FdFdstatGetReqMsg>(&request).await
+        }
+        WasiImportRequest::PathFilestatGet(request) => {
+            endpoint
+                .send::<protocol::PathFilestatGetReqMsg>(&request)
+                .await
+        }
+        WasiImportRequest::FdClose(request) => {
+            endpoint.send::<protocol::FdCloseReqMsg>(&request).await
+        }
+        WasiImportRequest::ClockResGet(request) => {
+            endpoint.send::<protocol::ClockResGetReqMsg>(&request).await
+        }
+        WasiImportRequest::ClockTimeGet(request) => {
+            endpoint
+                .send::<protocol::ClockTimeGetReqMsg>(&request)
+                .await
+        }
+        WasiImportRequest::PollOneoff(request) => {
+            endpoint.send::<protocol::PollOneoffReqMsg>(&request).await
+        }
+        WasiImportRequest::RandomGet(request) => {
+            endpoint.send::<protocol::RandomGetReqMsg>(&request).await
+        }
     }
 }
 
 #[cfg(feature = "wasm-engine-core")]
-impl From<hibana::runtime::wire::CodecError> for WasiGuestError {
-    fn from(error: hibana::runtime::wire::CodecError) -> Self {
-        Self::ProtocolRejected(error)
+async fn recv_wasi_import_completion<const ROLE: u8>(
+    endpoint: &mut hibana::Endpoint<'_, ROLE>,
+    import: WasiImport,
+) -> Result<WasiImportCompletion, hibana::EndpointError> {
+    match import {
+        WasiImport::FdWrite => endpoint
+            .recv::<protocol::FdWriteRetMsg>()
+            .await
+            .map(WasiImportCompletion::FdWrite),
+        WasiImport::FdWriteObject => endpoint
+            .recv::<protocol::FdWriteObjectRetMsg>()
+            .await
+            .map(WasiImportCompletion::FdWriteObject),
+        WasiImport::FdRead => endpoint
+            .recv::<protocol::FdReadRetMsg>()
+            .await
+            .map(WasiImportCompletion::FdRead),
+        WasiImport::FdReaddir => endpoint
+            .recv::<protocol::FdReaddirRetMsg>()
+            .await
+            .map(WasiImportCompletion::FdReaddir),
+        WasiImport::PathOpen => endpoint
+            .recv::<protocol::PathOpenRetMsg>()
+            .await
+            .map(WasiImportCompletion::PathOpen),
+        WasiImport::FdPrestatGet => endpoint
+            .recv::<protocol::FdPrestatGetRetMsg>()
+            .await
+            .map(WasiImportCompletion::FdPrestatGet),
+        WasiImport::FdPrestatDirName => endpoint
+            .recv::<protocol::FdPrestatDirNameRetMsg>()
+            .await
+            .map(WasiImportCompletion::FdPrestatDirName),
+        WasiImport::FdFilestatGet => endpoint
+            .recv::<protocol::FdFilestatGetRetMsg>()
+            .await
+            .map(WasiImportCompletion::FdFilestatGet),
+        WasiImport::ArgsSizesGet => endpoint
+            .recv::<protocol::ArgsSizesGetRetMsg>()
+            .await
+            .map(WasiImportCompletion::ArgsSizesGet),
+        WasiImport::ArgsGet => endpoint
+            .recv::<protocol::ArgsGetRetMsg>()
+            .await
+            .map(WasiImportCompletion::ArgsGet),
+        WasiImport::EnvironSizesGet => endpoint
+            .recv::<protocol::EnvironSizesGetRetMsg>()
+            .await
+            .map(WasiImportCompletion::EnvironSizesGet),
+        WasiImport::EnvironGet => endpoint
+            .recv::<protocol::EnvironGetRetMsg>()
+            .await
+            .map(WasiImportCompletion::EnvironGet),
+        WasiImport::FdFdstatGet => endpoint
+            .recv::<protocol::FdFdstatGetRetMsg>()
+            .await
+            .map(WasiImportCompletion::FdFdstatGet),
+        WasiImport::PathFilestatGet => endpoint
+            .recv::<protocol::PathFilestatGetRetMsg>()
+            .await
+            .map(WasiImportCompletion::PathFilestatGet),
+        WasiImport::FdClose => endpoint
+            .recv::<protocol::FdCloseRetMsg>()
+            .await
+            .map(WasiImportCompletion::FdClose),
+        WasiImport::ClockResGet => endpoint
+            .recv::<protocol::ClockResGetRetMsg>()
+            .await
+            .map(WasiImportCompletion::ClockResGet),
+        WasiImport::ClockTimeGet => endpoint
+            .recv::<protocol::ClockTimeGetRetMsg>()
+            .await
+            .map(WasiImportCompletion::ClockTimeGet),
+        WasiImport::PollOneoff => endpoint
+            .recv::<protocol::PollOneoffRetMsg>()
+            .await
+            .map(WasiImportCompletion::PollOneoff),
+        WasiImport::RandomGet => endpoint
+            .recv::<protocol::RandomGetRetMsg>()
+            .await
+            .map(WasiImportCompletion::RandomGet),
     }
+}
+
+#[cfg(feature = "wasm-engine-core")]
+async fn send_memory_grow_request<const ROLE: u8>(
+    endpoint: &mut hibana::Endpoint<'_, ROLE>,
+    request: hibana_wasip1_runtime::protocol::MemoryGrowReq,
+) -> Result<(), hibana::EndpointError> {
+    endpoint
+        .send::<hibana_wasip1_runtime::protocol::MemoryGrowReqMsg>(&request)
+        .await?;
+    Ok(())
+}
+
+#[cfg(feature = "wasm-engine-core")]
+async fn recv_memory_grow_decision<const ROLE: u8>(
+    endpoint: &mut hibana::Endpoint<'_, ROLE>,
+) -> Result<hibana_wasip1_runtime::protocol::MemoryGrowRet, hibana::EndpointError> {
+    let decision = endpoint
+        .recv::<hibana_wasip1_runtime::protocol::MemoryGrowRetMsg>()
+        .await?;
+    Ok(decision)
 }
 
 const fn appkit_session(session_id: NonZeroU32) -> hibana::runtime::ids::SessionId {
@@ -778,10 +1115,9 @@ const fn appkit_session(session_id: NonZeroU32) -> hibana::runtime::ids::Session
 }
 
 #[cfg(feature = "wasm-engine-core")]
-impl<'a, C, I> ArtifactInput<C, I> for WasiImage<'a>
+impl<'a, I> ArtifactInput<I> for WasiImage<'a>
 where
-    C: Capsule,
-    I: WasiGuestImage<C>,
+    I: WasiGuestImage,
 {
     fn wasi_bytes(&self) -> Option<&[u8]> {
         Some(self.bytes)
@@ -796,29 +1132,17 @@ where
     }
 }
 
-#[cfg(not(feature = "wasm-engine-core"))]
-impl<'a, C, I> ArtifactInput<C, I> for WasiImage<'a>
+impl<I> ArtifactInput<I> for NoWasi
 where
-    C: Capsule,
-    I: LogicalImage<C>,
+    I: LogicalImage,
 {
-    fn wasi_bytes(&self) -> Option<&[u8]> {
-        Some(self.bytes)
-    }
-}
-
-impl<C, I> ArtifactInput<C, I> for NoWasi
-where
-    C: Capsule,
-    I: LogicalImage<C>,
-{
+    #[cfg(feature = "wasm-engine-core")]
     fn wasi_bytes(&self) -> Option<&[u8]> {
         None
     }
 
     #[cfg(feature = "wasm-engine-core")]
     fn wasi_guest_lease<'guest, const ROLE: u8>() -> Option<WasiGuestLease<'guest>> {
-        core::hint::black_box(ROLE);
         None
     }
 }
@@ -1136,6 +1460,49 @@ where
         self.len += 1;
     }
 
+    #[cfg(feature = "wasm-engine-core")]
+    fn has_tasks(&self) -> bool {
+        self.len != 0
+    }
+
+    #[cfg(feature = "wasm-engine-core")]
+    fn blocking_engine_state<T>(&self) -> *mut T {
+        assert!(
+            self.len < APPKIT_EMBEDDED_ROLE_SLOTS,
+            "appkit embedded WASI engine state needs one scheduler slot"
+        );
+        assert!(
+            size_of::<T>() <= APPKIT_EMBEDDED_ROLE_FUTURE_BYTES,
+            "appkit embedded WASI engine state exceeds one embedded scheduler slot"
+        );
+        assert!(
+            align_of::<T>() <= APPKIT_EMBEDDED_FUTURE_ALIGN,
+            "appkit embedded WASI engine state alignment exceeds embedded scheduler arena"
+        );
+        self.slot_ptr(APPKIT_EMBEDDED_ROLE_SLOTS - 1).cast::<T>()
+    }
+
+    fn poll_once(&mut self, task_context: &mut Context<'_>) {
+        let mut task_idx = 0usize;
+        while task_idx < self.len {
+            let poll = self.polls[task_idx]
+                .expect("appkit embedded scheduler active slot must have a poll function");
+            match unsafe {
+                // SAFETY: `push` initialized this slot with the future type
+                // associated with the stored poll function.
+                poll_embedded_stored_task(poll, self.slot_ptr(task_idx), task_context)
+            } {
+                Poll::Pending => {}
+                Poll::Ready(Ok(done)) => match done {},
+                Poll::Ready(Err(error)) => {
+                    core::hint::black_box(&error);
+                    panic!("appkit embedded role task failed: {error:?}");
+                }
+            }
+            task_idx += 1;
+        }
+    }
+
     fn poll_forever(&mut self, mut observe: impl FnMut()) -> ! {
         assert!(self.len > 0, "appkit embedded scheduler has no role tasks");
         loop {
@@ -1150,30 +1517,10 @@ where
                 Waker::from_raw(raw_waker)
             };
             let mut task_context = Context::from_waker(&task_waker);
-            let mut task_idx = 0usize;
-            while task_idx < self.len {
-                let poll = self.polls[task_idx]
-                    .expect("appkit embedded scheduler active slot must have a poll function");
-                match unsafe {
-                    // SAFETY: `push` initialized this slot with the future type
-                    // associated with the stored poll function.
-                    poll_embedded_stored_task(poll, self.slot_ptr(task_idx), &mut task_context)
-                } {
-                    Poll::Pending => {}
-                    Poll::Ready(Ok(done)) => match done {},
-                    Poll::Ready(Err(error)) => {
-                        core::hint::black_box(&error);
-                        observe();
-                        panic!("appkit embedded role task failed: {error:?}");
-                    }
-                }
-                task_idx += 1;
-            }
+            self.poll_once(&mut task_context);
             observe();
-            if !woke && self.len == 1 {
+            if !woke {
                 embedded_wait_for_event();
-            } else if !woke {
-                core::hint::spin_loop();
             }
         }
     }
@@ -1187,34 +1534,27 @@ fn panic_appkit_resolver_error<const POLICY: u16, const ROLE: u8>(
     panic!("appkit resolver registration failed: policy={POLICY} role={ROLE} error={error:?}")
 }
 
-struct AttachResolverRegistry<'kit, 'prog, 'cfg, C, ProgramTy, TransportTy>
+struct AttachResolverRegistry<'kit, 'cfg, C, TransportTy, const ROLE: u8>
 where
     C: Capsule,
-    ProgramTy: hibana::runtime::program::Projectable + ?Sized,
     TransportTy: hibana::runtime::transport::Transport + 'cfg,
 {
     rendezvous: &'kit hibana::runtime::RendezvousKit<'kit, 'cfg, TransportTy>,
-    program: &'prog ProgramTy,
-    requested_roles: RoleSet,
+    program: hibana::runtime::program::RoleProgram<ROLE>,
     capsule: PhantomData<C>,
 }
 
-impl<'kit, 'prog, 'cfg, C, ProgramTy, TransportTy> ResolverRegistry<'cfg, C>
-    for AttachResolverRegistry<'kit, 'prog, 'cfg, C, ProgramTy, TransportTy>
+impl<'kit, 'cfg, C, TransportTy, const ROLE: u8> ResolverRegistry<'cfg, C, ROLE>
+    for AttachResolverRegistry<'kit, 'cfg, C, TransportTy, ROLE>
 where
     C: Capsule,
-    ProgramTy: hibana::runtime::program::Projectable + ?Sized,
     TransportTy: hibana::runtime::transport::Transport + 'cfg,
 {
-    fn resolver<const POLICY: u16, const ROLE: u8>(
+    fn resolver<const POLICY: u16>(
         &mut self,
         resolver: hibana::runtime::resolver::ResolverRef<'cfg, POLICY>,
     ) {
-        if !self.requested_roles.contains(ROLE) {
-            return;
-        }
-        let role_program = hibana::runtime::program::project::<ROLE, _>(self.program);
-        if let Err(error) = self.rendezvous.set_resolver(&role_program, resolver) {
+        if let Err(error) = self.rendezvous.set_resolver(&self.program, resolver) {
             #[cfg(any(test, not(target_os = "none")))]
             panic!(
                 "appkit resolver registration failed: policy={POLICY} role={ROLE} error={error:?}"
@@ -1225,6 +1565,31 @@ where
     }
 }
 
+struct AttachProjectedResolvers<'kit, 'cfg, C, TransportTy>
+where
+    C: Capsule,
+    TransportTy: hibana::runtime::transport::Transport + 'cfg,
+{
+    rendezvous: &'kit hibana::runtime::RendezvousKit<'kit, 'cfg, TransportTy>,
+    capsule: PhantomData<C>,
+}
+
+impl<'kit, 'cfg, C, TransportTy> ProjectedRoleVisitor<C>
+    for AttachProjectedResolvers<'kit, 'cfg, C, TransportTy>
+where
+    C: Capsule,
+    TransportTy: hibana::runtime::transport::Transport + 'cfg,
+{
+    fn visit<const ROLE: u8>(&mut self, program: hibana::runtime::program::RoleProgram<ROLE>) {
+        let mut resolver_registry = AttachResolverRegistry::<'_, '_, C, TransportTy, ROLE> {
+            rendezvous: self.rendezvous,
+            program,
+            capsule: PhantomData,
+        };
+        C::register_resolvers::<_, ROLE>(&mut resolver_registry);
+    }
+}
+
 struct AttachProjectedRoles<'kit, 'tasks, 'cfg, 'guest, C, ImageTy, ArtifactTy, TransportTy>
 where
     C: Capsule,
@@ -1232,29 +1597,31 @@ where
 {
     rendezvous: &'kit hibana::runtime::RendezvousKit<'kit, 'cfg, TransportTy>,
     session: hibana::runtime::ids::SessionId,
+    #[cfg(feature = "wasm-engine-core")]
     wasi_guest_bytes: Option<&'guest [u8]>,
-    driver_facts: DriverFacts<'static>,
     count: u8,
     tasks_lifetime: PhantomData<&'tasks mut ()>,
     capsule_lifetime: PhantomData<C>,
     image_lifetime: PhantomData<ImageTy>,
     artifact_lifetime: PhantomData<ArtifactTy>,
-    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
-    embedded_storage: EmbeddedAttachStorageRef<'static>,
+    #[cfg(not(feature = "wasm-engine-core"))]
+    guest_lifetime: PhantomData<&'guest ()>,
     #[cfg(all(not(test), target_os = "none"))]
-    embedded_tasks:
-        &'tasks mut EmbeddedScheduledTasks<'kit, RoleTaskError<<C::Local as Localside<C>>::Error>>,
+    embedded_tasks: &'tasks mut EmbeddedScheduledTasks<
+        'kit,
+        RoleTaskError<<C::Localside as Localside<C>>::Error>,
+    >,
     #[cfg(any(test, not(target_os = "none")))]
-    tasks: &'tasks mut ScheduledTasks<'kit, RoleTaskError<<C::Local as Localside<C>>::Error>>,
+    tasks: &'tasks mut ScheduledTasks<'kit, RoleTaskError<<C::Localside as Localside<C>>::Error>>,
 }
 
 impl<'kit, 'tasks, 'cfg, 'guest, C, ImageTy, ArtifactTy, TransportTy> ProjectedRoleVisitor<C>
     for AttachProjectedRoles<'kit, 'tasks, 'cfg, 'guest, C, ImageTy, ArtifactTy, TransportTy>
 where
     C: Capsule + 'kit,
-    C::Local: 'kit,
-    ImageTy: LogicalImage<C> + 'kit,
-    ArtifactTy: ArtifactInput<C, ImageTy>,
+    C::Localside: 'kit,
+    ImageTy: LogicalImage<Capsule = C> + 'kit,
+    ArtifactTy: ArtifactInput<ImageTy> + 'kit,
     TransportTy: hibana::runtime::transport::Transport + 'cfg,
     'cfg: 'kit,
     'guest: 'kit,
@@ -1267,13 +1634,12 @@ where
             #[cfg(all(not(test), target_os = "none"))]
             Err(error) => panic_appkit_attach_role_error::<ROLE>(error),
         };
-        let endpoint_ctx = RoleEndpointCtx::<C, ROLE>::new(endpoint);
-        let role_kind = C::Placement::role_kind(ROLE);
+        let role_kind = C::Placement::role_kind::<ROLE>();
         match role_kind {
             RoleKind::Engine => {
                 #[cfg(feature = "wasm-engine-core")]
                 let guest_storage =
-                    <ArtifactTy as ArtifactInput<C, ImageTy>>::wasi_guest_lease::<ROLE>();
+                    <ArtifactTy as ArtifactInput<ImageTy>>::wasi_guest_lease::<ROLE>();
                 #[cfg(feature = "wasm-engine-core")]
                 let has_wasi_guest = self.wasi_guest_bytes.is_some();
                 #[cfg(feature = "wasm-engine-core")]
@@ -1283,79 +1649,78 @@ where
                     "WASI guest artifact and logical image storage capability must match"
                 );
                 #[cfg(feature = "wasm-engine-core")]
-                let ctx = EngineCtx::new(endpoint_ctx, self.wasi_guest_bytes, guest_storage);
-                #[cfg(not(feature = "wasm-engine-core"))]
-                let ctx = EngineCtx::new(endpoint_ctx, self.wasi_guest_bytes);
-                #[cfg(feature = "wasm-engine-core")]
                 {
-                    if has_wasi_guest && matches!(C::WASI_GUEST_DRIVE, WasiGuestDrive::Canonical) {
+                    if has_wasi_guest {
+                        let engine = CanonicalWasiEngine::new(
+                            endpoint,
+                            self.wasi_guest_bytes,
+                            guest_storage,
+                        );
                         #[cfg(any(test, not(target_os = "none")))]
-                        self.tasks
-                            .push(wasi_role_task::<_, <C::Local as Localside<C>>::Error>(
-                                drive_canonical_wasi_engine::<C, ImageTy, ArtifactTy, ROLE>(ctx),
-                            ));
+                        self.tasks.push(
+                            wasi_role_task::<_, <C::Localside as Localside<C>>::Error>(
+                                drive_canonical_wasi_engine::<C, ImageTy, ArtifactTy, ROLE>(engine),
+                            ),
+                        );
                         #[cfg(all(not(test), target_os = "none"))]
                         {
-                            assert!(
-                                ImageTy::REQUESTED_ROLES.count() == 1,
-                                "bare-metal WASI logical images attach exactly one role; split peer roles into separate logical images"
-                            );
+                            let mut tap = self.rendezvous.tap();
                             run_canonical_wasi_engine_forever::<C, ImageTy, ArtifactTy, ROLE>(
-                                self.embedded_storage,
-                                ctx,
+                                engine,
+                                self.embedded_tasks,
+                                &mut tap,
                             );
                         }
                     } else {
                         #[cfg(any(test, not(target_os = "none")))]
-                        self.tasks.push(local_role_task(
-                            <C::Local as Localside<C>>::engine::<ROLE>(ctx),
+                        self.tasks.push(localside_role_task(
+                            <C::Localside as Localside<C>>::engine::<ROLE>(endpoint),
                         ));
                         #[cfg(all(not(test), target_os = "none"))]
-                        self.embedded_tasks.push(local_role_task(
-                            <C::Local as Localside<C>>::engine::<ROLE>(ctx),
+                        let endpoint = endpoint;
+                        #[cfg(all(not(test), target_os = "none"))]
+                        self.embedded_tasks.push(localside_role_task(
+                            <C::Localside as Localside<C>>::engine::<ROLE>(endpoint),
                         ));
                     }
                 }
                 #[cfg(not(feature = "wasm-engine-core"))]
                 {
-                    assert!(
-                        self.wasi_guest_bytes.is_none(),
-                        "WASI P1 logical image requires wasm-engine-core"
-                    );
                     #[cfg(any(test, not(target_os = "none")))]
-                    self.tasks
-                        .push(local_role_task(<C::Local as Localside<C>>::engine::<ROLE>(
-                            ctx,
-                        )));
+                    self.tasks.push(localside_role_task(
+                        <C::Localside as Localside<C>>::engine::<ROLE>(endpoint),
+                    ));
                     #[cfg(all(not(test), target_os = "none"))]
-                    self.embedded_tasks.push(local_role_task(
-                        <C::Local as Localside<C>>::engine::<ROLE>(ctx),
+                    let endpoint = endpoint;
+                    #[cfg(all(not(test), target_os = "none"))]
+                    self.embedded_tasks.push(localside_role_task(
+                        <C::Localside as Localside<C>>::engine::<ROLE>(endpoint),
                     ));
                 }
             }
             RoleKind::Driver => {
-                let ctx = DriverCtx::new(endpoint_ctx, self.driver_facts);
                 #[cfg(any(test, not(target_os = "none")))]
-                self.tasks
-                    .push(local_role_task(<C::Local as Localside<C>>::driver::<ROLE>(
-                        ctx,
-                    )));
+                self.tasks.push(localside_role_task(
+                    <C::Localside as Localside<C>>::driver::<ROLE>(endpoint),
+                ));
                 #[cfg(all(not(test), target_os = "none"))]
-                self.embedded_tasks.push(local_role_task(
-                    <C::Local as Localside<C>>::driver::<ROLE>(ctx),
+                let endpoint = endpoint;
+                #[cfg(all(not(test), target_os = "none"))]
+                self.embedded_tasks.push(localside_role_task(
+                    <C::Localside as Localside<C>>::driver::<ROLE>(endpoint),
                 ));
             }
             RoleKind::Boundary => {
-                let ctx = BoundaryCtx::new(endpoint_ctx);
                 #[cfg(any(test, not(target_os = "none")))]
-                self.tasks.push(local_role_task(
-                    <C::Local as Localside<C>>::boundary::<ROLE>(ctx),
+                self.tasks.push(localside_role_task(
+                    <C::Localside as Localside<C>>::boundary::<ROLE>(endpoint),
                 ));
                 #[cfg(all(not(test), target_os = "none"))]
-                self.embedded_tasks
-                    .push(local_role_task(
-                        <C::Local as Localside<C>>::boundary::<ROLE>(ctx),
-                    ));
+                let endpoint = endpoint;
+                #[cfg(all(not(test), target_os = "none"))]
+                self.embedded_tasks.push(localside_role_task(
+                    <C::Localside as Localside<C>>::boundary::<ROLE>(endpoint),
+                ));
             }
         }
         self.count = self
@@ -1366,27 +1731,25 @@ where
 }
 
 #[cfg(all(not(test), target_os = "none"))]
-fn embedded_attach_storage<C, I>() -> EmbeddedAttachStorageRef<'static>
+fn embedded_attach_storage<I>() -> EmbeddedAttachStorageRef<'static>
 where
-    C: Capsule,
-    I: LogicalImage<C>,
+    I: LogicalImage,
 {
     I::attach_storage()
 }
 
-fn attach_projected_roles<C, I, A>(
+fn attach_projected_roles<I, A>(
     program: &impl hibana::runtime::program::Projectable,
-    wasi_guest_bytes: Option<&[u8]>,
+    #[cfg(feature = "wasm-engine-core")] wasi_guest_bytes: Option<&[u8]>,
 ) -> AttachSummary
 where
-    C: Capsule,
-    I: LogicalImage<C>,
-    A: ArtifactInput<C, I>,
+    I: LogicalImage,
+    A: ArtifactInput<I>,
 {
     #[cfg(any(test, not(target_os = "none")))]
     let mut slab_storage = [0u8; APPKIT_ATTACH_SLAB_BYTES];
     #[cfg(all(not(test), target_os = "none"))]
-    let embedded_storage = embedded_attach_storage::<C, I>();
+    let embedded_storage = embedded_attach_storage::<I>();
     #[cfg(all(not(test), target_os = "none"))]
     let attach_slab = unsafe { &mut *embedded_storage.slab };
     #[cfg(any(test, not(target_os = "none")))]
@@ -1398,39 +1761,41 @@ where
     let rendezvous = kit
         .rendezvous(rendezvous_slab, carrier)
         .expect("appkit attach carrier must register rendezvous");
-    let session = appkit_session(C::SESSION_ID);
+    let session = appkit_session(<I::Capsule as Capsule>::SESSION_ID);
     #[cfg(any(test, not(target_os = "none")))]
     let mut tasks = ScheduledTasks::new();
     #[cfg(all(not(test), target_os = "none"))]
     let mut embedded_tasks = EmbeddedScheduledTasks::new(embedded_storage);
     {
-        let mut resolver_registry = AttachResolverRegistry::<'_, '_, '_, C, _, I::Carrier<'_>> {
+        let mut resolver_registry = AttachProjectedResolvers::<'_, '_, I::Capsule, I::Carrier<'_>> {
             rendezvous: &rendezvous,
-            program,
-            requested_roles: I::REQUESTED_ROLES,
             capsule: PhantomData,
         };
-        C::register_resolvers(&mut resolver_registry);
+        visit_requested_projected_roles::<I::Capsule, _>(
+            program,
+            I::REQUESTED_ROLES,
+            &mut resolver_registry,
+        );
     }
     let summary = {
         let mut visitor = AttachProjectedRoles {
             rendezvous: &rendezvous,
             session,
+            #[cfg(feature = "wasm-engine-core")]
             wasi_guest_bytes,
-            driver_facts: I::driver_facts(),
             count: 0,
             tasks_lifetime: PhantomData,
-            capsule_lifetime: PhantomData::<C>,
+            capsule_lifetime: PhantomData::<I::Capsule>,
             image_lifetime: PhantomData::<I>,
             artifact_lifetime: PhantomData::<A>,
-            #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
-            embedded_storage,
+            #[cfg(not(feature = "wasm-engine-core"))]
+            guest_lifetime: PhantomData,
             #[cfg(all(not(test), target_os = "none"))]
             embedded_tasks: &mut embedded_tasks,
             #[cfg(any(test, not(target_os = "none")))]
             tasks: &mut tasks,
         };
-        visit_requested_projected_roles::<C, _>(program, I::REQUESTED_ROLES, &mut visitor);
+        visit_requested_projected_roles::<I::Capsule, _>(program, I::REQUESTED_ROLES, &mut visitor);
         AttachSummary {
             endpoint_count: visitor.count,
         }
@@ -1438,43 +1803,21 @@ where
     #[cfg(any(test, not(target_os = "none")))]
     {
         let mut tap = rendezvous.tap();
-        tasks.poll_until_quiescent(|| C::observe(&mut tap));
+        tasks.poll_until_quiescent(|| <I::Capsule as Capsule>::observe(&mut tap));
         summary
     }
     #[cfg(all(not(test), target_os = "none"))]
     {
         core::hint::black_box(&summary);
         let mut tap = rendezvous.tap();
-        embedded_tasks.poll_forever(|| C::observe(&mut tap))
-    }
-}
-
-/// Role-typed wrapper around a hibana endpoint attached by appkit.
-///
-/// This is the context shape that preserves hibana's typed `Endpoint<'_, ROLE>`
-/// progress without exposing raw site or transport authority. It is not a
-/// choreography wrapper and it does not name hibana's internal `steps` types.
-struct RoleEndpointCtx<'a, C: Capsule, const ROLE: u8> {
-    endpoint: hibana::Endpoint<'a, ROLE>,
-    capsule: PhantomData<&'a C>,
-}
-
-impl<'a, C: Capsule, const ROLE: u8> RoleEndpointCtx<'a, C, ROLE> {
-    fn new(endpoint: hibana::Endpoint<'a, ROLE>) -> Self {
-        Self {
-            endpoint,
-            capsule: PhantomData,
-        }
-    }
-
-    fn endpoint(&mut self) -> &mut hibana::Endpoint<'a, ROLE> {
-        &mut self.endpoint
+        embedded_tasks.poll_forever(|| <I::Capsule as Capsule>::observe(&mut tap))
     }
 }
 
 #[cfg(feature = "wasm-engine-core")]
 struct WasiGuestSlot<'guest> {
     storage: ManuallyDrop<WasiGuestLease<'guest>>,
+    guest: *mut hibana_wasip1_runtime::HibanaWasiGuest<'guest>,
     initialized: bool,
 }
 
@@ -1483,27 +1826,39 @@ impl<'guest> WasiGuestSlot<'guest> {
     fn init(
         mut storage: WasiGuestLease<'guest>,
         module: &'guest [u8],
-    ) -> Result<Self, hibana_wasip1_runtime::engine::wasm::Error> {
-        let ptr = storage.guest_ptr();
+    ) -> Result<Self, WasiGuestError> {
         unsafe {
-            hibana_wasip1_runtime::engine::wasm::Guest::init_in_place(ptr, module)?;
+            storage
+                .storage_ptr()
+                .write(hibana_wasip1_runtime::HibanaWasiGuestStorage::uninit());
+            (*storage.memory_ptr()).fill(0);
         }
-        Ok(Self {
+        let mut slot = Self {
             storage: ManuallyDrop::new(storage),
+            guest: core::ptr::null_mut(),
             initialized: true,
-        })
+        };
+        let storage = unsafe { &mut *slot.storage.storage_ptr() };
+        let memory = unsafe { &mut *slot.storage.memory_ptr() };
+        let guest_memory = hibana_wasip1_runtime::GuestMemory::new(&mut memory[..]);
+        let guest = wasi_runtime_result(storage.init(
+            module,
+            guest_memory,
+            hibana_wasip1_runtime::FdBindingTable::empty(),
+        ))?;
+        slot.guest = guest as *mut _;
+        Ok(slot)
     }
 
-    fn guest(&mut self) -> &mut hibana_wasip1_runtime::engine::wasm::Guest<'guest> {
+    fn guest(&mut self) -> &mut hibana_wasip1_runtime::HibanaWasiGuest<'guest> {
         debug_assert!(self.initialized);
-        let ptr = self.storage.guest_ptr();
-        unsafe { &mut *ptr }
+        unsafe { &mut *self.guest }
     }
 
     fn finish(mut self) -> WasiGuestLease<'guest> {
         if self.initialized {
             unsafe {
-                let ptr = self.storage.guest_ptr();
+                let ptr = self.storage.storage_ptr();
                 core::ptr::drop_in_place(ptr);
             }
             self.initialized = false;
@@ -1517,7 +1872,7 @@ impl Drop for WasiGuestSlot<'_> {
     fn drop(&mut self) {
         if self.initialized {
             unsafe {
-                let ptr = self.storage.guest_ptr();
+                let ptr = self.storage.storage_ptr();
                 core::ptr::drop_in_place(ptr);
                 ManuallyDrop::drop(&mut self.storage);
             }
@@ -1525,310 +1880,147 @@ impl Drop for WasiGuestSlot<'_> {
     }
 }
 
-/// Engine-side localside context.
-pub struct EngineCtx<'endpoint, 'guest, C: Capsule, const ROLE: u8> {
-    endpoint: RoleEndpointCtx<'endpoint, C, ROLE>,
-    #[cfg(feature = "wasm-engine-core")]
+#[cfg(feature = "wasm-engine-core")]
+struct CanonicalWasiEngine<'endpoint, 'guest, C: Capsule, const ROLE: u8> {
+    endpoint: hibana::Endpoint<'endpoint, ROLE>,
     wasi_guest_bytes: Option<&'guest [u8]>,
-    #[cfg(feature = "wasm-engine-core")]
     guest_storage: Option<WasiGuestLease<'guest>>,
-    #[cfg(feature = "wasm-engine-core")]
     guest_slot: Option<WasiGuestSlot<'guest>>,
-    #[cfg(not(feature = "wasm-engine-core"))]
-    guest_lifetime: core::marker::PhantomData<&'guest ()>,
+    capsule: PhantomData<C>,
 }
 
-impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest, C, ROLE> {
+#[cfg(feature = "wasm-engine-core")]
+impl<'endpoint, 'guest, C: Capsule, const ROLE: u8>
+    CanonicalWasiEngine<'endpoint, 'guest, C, ROLE>
+{
     fn new(
-        endpoint: RoleEndpointCtx<'endpoint, C, ROLE>,
+        endpoint: hibana::Endpoint<'endpoint, ROLE>,
         wasi_guest_bytes: Option<&'guest [u8]>,
-        #[cfg(feature = "wasm-engine-core")] guest_storage: Option<WasiGuestLease<'guest>>,
+        guest_storage: Option<WasiGuestLease<'guest>>,
     ) -> Self {
-        #[cfg(not(feature = "wasm-engine-core"))]
-        core::hint::black_box(wasi_guest_bytes);
         Self {
             endpoint,
-            #[cfg(feature = "wasm-engine-core")]
             wasi_guest_bytes,
-            #[cfg(feature = "wasm-engine-core")]
             guest_storage,
-            #[cfg(feature = "wasm-engine-core")]
             guest_slot: None,
-            #[cfg(not(feature = "wasm-engine-core"))]
-            guest_lifetime: core::marker::PhantomData,
+            capsule: PhantomData,
         }
     }
 
-    pub fn endpoint(&mut self) -> &mut hibana::Endpoint<'endpoint, ROLE> {
-        self.endpoint.endpoint()
-    }
-
-    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
-    async fn endpoint_send<const LABEL: u8>(
-        &mut self,
-        request: EngineReq,
-    ) -> Result<(), WasiGuestError> {
-        match self
-            .endpoint()
-            .send::<hibana::g::Msg<LABEL, EngineReq>>(&request)
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(error) => Err(WasiGuestError::endpoint(0x5745_2000 | LABEL as u32, error)),
-        }
-    }
-
-    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
-    async fn endpoint_send_consecutive<const LABEL: u8>(
-        &mut self,
-        request: EngineReq,
-    ) -> Result<(), WasiGuestError> {
-        let mut sent = 0u8;
-        loop {
-            match self
-                .endpoint()
-                .send::<hibana::g::Msg<LABEL, EngineReq>>(&request)
-                .await
-            {
-                Ok(()) => {}
-                Err(error) => {
-                    if sent > 0 {
-                        return Ok(());
-                    }
-                    return Err(WasiGuestError::endpoint(0x5745_2000 | LABEL as u32, error));
-                }
-            }
-            sent = sent.saturating_add(1);
-            if sent == APPKIT_PROC_EXIT_FANOUT_CAP {
-                return Err(WasiGuestError::EndpointRejected(0x5745_64ff));
-            }
-        }
-    }
-
-    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
-    #[inline(never)]
-    fn endpoint_send_blocking<const LABEL: u8>(
-        &mut self,
-        request: EngineReq,
-    ) -> Result<(), WasiGuestError> {
-        match poll_embedded_endpoint_unit(
-            self.endpoint()
-                .send::<hibana::g::Msg<LABEL, EngineReq>>(&request),
-        ) {
-            Ok(()) => Ok(()),
-            Err(error) => Err(WasiGuestError::endpoint(0x5745_2000 | LABEL as u32, error)),
-        }
-    }
-
-    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
-    #[inline(never)]
-    fn endpoint_send_consecutive_blocking<const LABEL: u8>(
-        &mut self,
-        request: EngineReq,
-    ) -> Result<(), WasiGuestError> {
-        let mut sent = 0u8;
-        loop {
-            match poll_embedded_endpoint_unit(
-                self.endpoint()
-                    .send::<hibana::g::Msg<LABEL, EngineReq>>(&request),
-            ) {
-                Ok(()) => {}
-                Err(error) => {
-                    if sent > 0 {
-                        return Ok(());
-                    }
-                    return Err(WasiGuestError::endpoint(0x5745_2000 | LABEL as u32, error));
-                }
-            }
-            sent = sent.saturating_add(1);
-            if sent == APPKIT_PROC_EXIT_FANOUT_CAP {
-                return Err(WasiGuestError::EndpointRejected(0x5745_64ff));
-            }
-        }
-    }
-
-    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
-    async fn endpoint_call<const REQUEST_LABEL: u8, const REPLY_LABEL: u8>(
-        &mut self,
-        request: EngineReq,
-    ) -> Result<EngineRet, WasiGuestError> {
-        self.endpoint_send::<REQUEST_LABEL>(request).await?;
-        match self
-            .endpoint()
-            .recv::<hibana::g::Msg<REPLY_LABEL, EngineRet>>()
-            .await
-        {
-            Ok(reply) => Ok(reply),
-            Err(error) => Err(WasiGuestError::endpoint(
-                0x5745_3000 | REPLY_LABEL as u32,
-                error,
-            )),
-        }
-    }
-
-    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
-    #[inline(never)]
-    fn endpoint_call_blocking<const REQUEST_LABEL: u8, const REPLY_LABEL: u8>(
-        &mut self,
-        request: EngineReq,
-    ) -> Result<EngineRet, WasiGuestError> {
-        self.endpoint_send_blocking::<REQUEST_LABEL>(request)?;
-        let mut reply = MaybeUninit::<EngineRet>::uninit();
-        match poll_embedded_endpoint_value(
-            self.endpoint()
-                .recv::<hibana::g::Msg<REPLY_LABEL, EngineRet>>(),
-            &mut reply,
-        ) {
-            Ok(()) => unsafe { Ok(reply.assume_init()) },
-            Err(error) => Err(WasiGuestError::endpoint(
-                0x5745_3000 | REPLY_LABEL as u32,
-                error,
-            )),
-        }
-    }
-
-    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
-    async fn endpoint_proc_exit(&mut self, status: ProcExitStatus) -> Result<(), WasiGuestError> {
-        self.endpoint_send_consecutive::<LABEL_WASI_PROC_EXIT>(EngineReq::ProcExit(status))
-            .await
-    }
-
-    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
-    #[inline(never)]
-    fn endpoint_proc_exit_blocking(
-        &mut self,
-        status: ProcExitStatus,
-    ) -> Result<(), WasiGuestError> {
-        self.endpoint_send_consecutive_blocking::<LABEL_WASI_PROC_EXIT>(EngineReq::ProcExit(status))
+    fn endpoint(&mut self) -> &mut hibana::Endpoint<'endpoint, ROLE> {
+        &mut self.endpoint
     }
 
     #[cfg(feature = "wasm-engine-core")]
-    fn protocol_fdstat_to_vm(
-        stat: hibana_wasip1_runtime::protocol::FdStat,
-    ) -> hibana_wasip1_runtime::engine::wasm::FdStat {
-        let rights = match stat.rights() {
-            MemRights::Read => 1,
-            MemRights::Write => 2,
+    fn take_wasi_guest_slot(&mut self) -> Result<WasiGuestSlot<'guest>, WasiGuestError> {
+        if let Some(slot) = self.guest_slot.take() {
+            return Ok(slot);
+        }
+        let Some(bytes) = self.wasi_guest_bytes else {
+            return Err(WasiGuestError::rejected());
         };
-        hibana_wasip1_runtime::engine::wasm::FdStat::new(4, 0, rights, 0)
+        let guest_storage = self.guest_storage.take().expect(
+            "WASI engine context must receive in-place guest storage from its logical image",
+        );
+        WasiGuestSlot::init(guest_storage, bytes)
     }
 
-    /// Drive the selected WASI P1 guest until it exits, finishes, or exhausts its budget.
-    ///
-    /// Each emitted WASI P1 import is normalized into an `EngineReq`, sent through
-    /// this role's typed endpoint, and completed only after the corresponding
-    /// `EngineRet` is received through the endpoint/carrier path.
+    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
+    fn store_wasi_guest_slot(
+        &mut self,
+        guest_slot: WasiGuestSlot<'guest>,
+        result: &Result<WasiGuestStatus, WasiGuestError>,
+    ) {
+        match result {
+            Ok(WasiGuestStatus::BudgetExpired) => {
+                self.guest_slot = Some(guest_slot);
+            }
+            Ok(WasiGuestStatus::Exit) | Err(_) => {
+                let guest_storage = guest_slot.finish();
+                self.guest_storage = Some(guest_storage);
+            }
+        }
+    }
+
+    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+    fn store_embedded_wasi_guest_slot(
+        &mut self,
+        guest_slot: WasiGuestSlot<'guest>,
+        result: &Result<EmbeddedWasiGuestStatus, WasiGuestError>,
+    ) {
+        match result {
+            Ok(EmbeddedWasiGuestStatus::BudgetExpired) => {
+                self.guest_slot = Some(guest_slot);
+            }
+            Ok(EmbeddedWasiGuestStatus::Exit)
+            | Ok(EmbeddedWasiGuestStatus::TerminalEndpoint)
+            | Err(_) => {
+                let guest_storage = guest_slot.finish();
+                self.guest_storage = Some(guest_storage);
+            }
+        }
+    }
+
+    /// Drive the selected WASI P1 guest through the hibana-native runtime boundary.
     #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
     async fn drive_wasi_guest(
         &mut self,
         budget: BudgetRun,
     ) -> Result<WasiGuestStatus, WasiGuestError> {
-        let Some(bytes) = self.wasi_guest_bytes else {
-            return Err(WasiGuestError::NoWasiArtifact);
-        };
-        let mut guest_slot = match self.guest_slot.take() {
-            Some(slot) => slot,
-            None => {
-                let guest_storage = self.guest_storage.take().expect(
-                    "WASI engine context must receive in-place guest storage from its logical image",
-                );
-                WasiGuestSlot::init(guest_storage, bytes)?
-            }
-        };
+        let mut guest_slot = self.take_wasi_guest_slot()?;
         let result = loop {
-            match guest_slot.guest().resume(budget) {
-                Ok(hibana_wasip1_runtime::engine::wasm::Event::BudgetExpired(expired)) => {
-                    break Ok(WasiGuestStatus::BudgetExpired(expired));
-                }
-                Ok(hibana_wasip1_runtime::engine::wasm::Event::Exit(exit)) => {
-                    let Some(status) = exit.as_protocol_status() else {
-                        break Err(WasiGuestError::UnexpectedReply);
+            let step = match wasi_runtime_result(guest_slot.guest().resume_wasi_boundary(budget)) {
+                Ok(step) => step,
+                Err(error) => break Err(error),
+            };
+            match step {
+                hibana_wasip1_runtime::WasiBoundaryStep::ImportPending(pending) => {
+                    let request = pending.request();
+                    let import = pending.import();
+                    if let Err(error) = wasi_endpoint_result(
+                        send_wasi_import_request(self.endpoint(), request).await,
+                    ) {
+                        break Err(error);
+                    }
+                    let completion = match wasi_endpoint_result(
+                        recv_wasi_import_completion(self.endpoint(), import).await,
+                    ) {
+                        Ok(completion) => completion,
+                        Err(error) => break Err(error),
                     };
-                    if let Err(error) = self.endpoint_proc_exit(status).await {
-                        break Err(error);
-                    }
-                    break Ok(WasiGuestStatus::Exit(status));
-                }
-                Ok(hibana_wasip1_runtime::engine::wasm::Event::Call(call)) => {
-                    if let Err(error) = self.drive_wasi_call(&mut guest_slot, call).await {
+                    if let Err(error) =
+                        wasi_runtime_result(pending.complete(guest_slot.guest(), completion))
+                    {
                         break Err(error);
                     }
                 }
-                Ok(hibana_wasip1_runtime::engine::wasm::Event::MemoryFence(pending)) => {
-                    if let Err(error) = self.drive_memory_fence(&mut guest_slot, pending).await {
+                hibana_wasip1_runtime::WasiBoundaryStep::MemoryGrowPending(pending) => {
+                    if let Err(error) = wasi_endpoint_result(
+                        send_memory_grow_request(self.endpoint(), pending.request()).await,
+                    ) {
+                        break Err(error);
+                    }
+                    let decision = match wasi_endpoint_result(
+                        recv_memory_grow_decision(self.endpoint()).await,
+                    ) {
+                        Ok(decision) => decision,
+                        Err(error) => break Err(error),
+                    };
+                    if let Err(error) =
+                        wasi_runtime_result(pending.complete(guest_slot.guest(), decision))
+                    {
                         break Err(error);
                     }
                 }
-                Err(error) => break Err(error.into()),
+                hibana_wasip1_runtime::WasiBoundaryStep::BudgetExpired(_) => {
+                    break Ok(WasiGuestStatus::BudgetExpired);
+                }
+                hibana_wasip1_runtime::WasiBoundaryStep::Exit(_) => {
+                    break Ok(WasiGuestStatus::Exit);
+                }
             }
         };
-        match result {
-            Ok(WasiGuestStatus::BudgetExpired(_)) => {
-                self.guest_slot = Some(guest_slot);
-            }
-            Ok(WasiGuestStatus::Exit(_)) | Err(_) => {
-                let guest_storage = guest_slot.finish();
-                self.guest_storage = Some(guest_storage);
-            }
-        }
-        result
-    }
-
-    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
-    /// Drive exactly one pending WASI P1 import after the caller has admitted the
-    /// surrounding choreography step.
-    pub async fn drive_wasi_guest_once(
-        &mut self,
-        budget: BudgetRun,
-    ) -> Result<WasiGuestStatus, WasiGuestError> {
-        let Some(bytes) = self.wasi_guest_bytes else {
-            return Err(WasiGuestError::NoWasiArtifact);
-        };
-        let mut guest_slot = match self.guest_slot.take() {
-            Some(slot) => slot,
-            None => {
-                let guest_storage = self.guest_storage.take().expect(
-                    "WASI engine context must receive in-place guest storage from its logical image",
-                );
-                WasiGuestSlot::init(guest_storage, bytes)?
-            }
-        };
-        let result = match guest_slot.guest().resume(budget) {
-            Ok(hibana_wasip1_runtime::engine::wasm::Event::BudgetExpired(expired)) => {
-                Ok(WasiGuestStatus::BudgetExpired(expired))
-            }
-            Ok(hibana_wasip1_runtime::engine::wasm::Event::Exit(exit)) => {
-                let Some(status) = exit.as_protocol_status() else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                self.endpoint_proc_exit(status).await?;
-                Ok(WasiGuestStatus::Exit(status))
-            }
-            Ok(hibana_wasip1_runtime::engine::wasm::Event::Call(call)) => {
-                self.drive_wasi_call(&mut guest_slot, call).await?;
-                Ok(WasiGuestStatus::BudgetExpired(BudgetExpired::new(
-                    budget.run_id(),
-                    budget.generation(),
-                )))
-            }
-            Ok(hibana_wasip1_runtime::engine::wasm::Event::MemoryFence(pending)) => {
-                self.drive_memory_fence(&mut guest_slot, pending).await?;
-                Ok(WasiGuestStatus::BudgetExpired(BudgetExpired::new(
-                    budget.run_id(),
-                    budget.generation(),
-                )))
-            }
-            Err(error) => Err(error.into()),
-        };
-        match result {
-            Ok(WasiGuestStatus::BudgetExpired(_)) => {
-                self.guest_slot = Some(guest_slot);
-            }
-            Ok(WasiGuestStatus::Exit(_)) | Err(_) => {
-                let guest_storage = guest_slot.finish();
-                self.guest_storage = Some(guest_storage);
-            }
-        }
+        self.store_wasi_guest_slot(guest_slot, &result);
         result
     }
 
@@ -1837,688 +2029,132 @@ impl<'endpoint, 'guest, C: Capsule, const ROLE: u8> EngineCtx<'endpoint, 'guest,
     fn drive_wasi_guest_blocking(
         &mut self,
         budget: BudgetRun,
-    ) -> Result<WasiGuestStatus, WasiGuestError> {
-        let Some(bytes) = self.wasi_guest_bytes else {
-            return Err(WasiGuestError::NoWasiArtifact);
-        };
-        let mut guest_slot = match self.guest_slot.take() {
-            Some(slot) => slot,
-            None => {
-                let guest_storage = self.guest_storage.take().expect(
-                    "WASI engine context must receive in-place guest storage from its logical image",
-                );
-                WasiGuestSlot::init(guest_storage, bytes)?
-            }
-        };
+        embedded_tasks: &mut EmbeddedScheduledTasks<
+            '_,
+            RoleTaskError<<C::Localside as Localside<C>>::Error>,
+        >,
+    ) -> Result<EmbeddedWasiGuestStatus, WasiGuestError> {
+        let mut guest_slot = self.take_wasi_guest_slot()?;
         let result = loop {
-            match guest_slot.guest().resume(budget) {
-                Ok(hibana_wasip1_runtime::engine::wasm::Event::Call(call)) => {
-                    if let Err(error) = self.drive_wasi_call_blocking(&mut guest_slot, call) {
-                        break Err(error);
+            let resume_start = appkit_wasi_metric_start();
+            let step = match guest_slot.guest().resume_wasi_boundary(budget) {
+                Ok(step) => step,
+                Err(_) => {
+                    record_appkit_wasi_resume(resume_start);
+                    break Err(WasiGuestError::rejected());
+                }
+            };
+            record_appkit_wasi_resume(resume_start);
+            match step {
+                hibana_wasip1_runtime::WasiBoundaryStep::ImportPending(pending) => {
+                    let request = pending.request();
+                    let import = pending.import();
+                    let request_send_start = appkit_wasi_metric_start();
+                    let request_send_result = poll_embedded_wasi_unit(
+                        send_wasi_import_request(self.endpoint(), request),
+                        embedded_tasks,
+                    );
+                    record_appkit_wasi_request_send(request_send_start);
+                    if let Err(error) = request_send_result {
+                        if wasi_endpoint_terminal(&error) {
+                            break Ok(EmbeddedWasiGuestStatus::TerminalEndpoint);
+                        }
+                        break Err(WasiGuestError::rejected());
+                    }
+                    let mut completion =
+                        MaybeUninit::<hibana_wasip1_runtime::WasiImportCompletion>::uninit();
+                    let completion_recv_start = appkit_wasi_metric_start();
+                    let completion_recv_result = poll_embedded_wasi_value(
+                        recv_wasi_import_completion(self.endpoint(), import),
+                        &mut completion,
+                        embedded_tasks,
+                    );
+                    record_appkit_wasi_completion_recv(completion_recv_start);
+                    if let Err(error) = completion_recv_result {
+                        if wasi_endpoint_terminal(&error) {
+                            break Ok(EmbeddedWasiGuestStatus::TerminalEndpoint);
+                        }
+                        break Err(WasiGuestError::rejected());
+                    }
+                    let complete_start = appkit_wasi_metric_start();
+                    let complete_result =
+                        pending.complete(guest_slot.guest(), unsafe { completion.assume_init() });
+                    record_appkit_wasi_complete(complete_start);
+                    if wasi_runtime_result(complete_result).is_err() {
+                        break Err(WasiGuestError::rejected());
                     }
                 }
-                Ok(hibana_wasip1_runtime::engine::wasm::Event::BudgetExpired(expired)) => {
-                    break Ok(WasiGuestStatus::BudgetExpired(expired));
-                }
-                Ok(hibana_wasip1_runtime::engine::wasm::Event::Exit(exit)) => {
-                    let Some(status) = exit.as_protocol_status() else {
-                        break Err(WasiGuestError::UnexpectedReply);
-                    };
-                    if let Err(error) = self.endpoint_proc_exit_blocking(status) {
-                        break Err(error);
+                hibana_wasip1_runtime::WasiBoundaryStep::MemoryGrowPending(pending) => {
+                    if let Err(error) = poll_embedded_wasi_unit(
+                        send_memory_grow_request(self.endpoint(), pending.request()),
+                        embedded_tasks,
+                    ) {
+                        if wasi_endpoint_terminal(&error) {
+                            break Ok(EmbeddedWasiGuestStatus::TerminalEndpoint);
+                        }
+                        break Err(WasiGuestError::rejected());
                     }
-                    break Ok(WasiGuestStatus::Exit(status));
-                }
-                Ok(hibana_wasip1_runtime::engine::wasm::Event::MemoryFence(pending)) => {
-                    if let Err(error) = self.drive_memory_fence_blocking(&mut guest_slot, pending) {
-                        break Err(error);
+                    let mut decision =
+                        MaybeUninit::<hibana_wasip1_runtime::protocol::MemoryGrowRet>::uninit();
+                    if let Err(error) = poll_embedded_wasi_value(
+                        recv_memory_grow_decision(self.endpoint()),
+                        &mut decision,
+                        embedded_tasks,
+                    ) {
+                        if wasi_endpoint_terminal(&error) {
+                            break Ok(EmbeddedWasiGuestStatus::TerminalEndpoint);
+                        }
+                        break Err(WasiGuestError::rejected());
+                    }
+                    if wasi_runtime_result(
+                        pending.complete(guest_slot.guest(), unsafe { decision.assume_init() }),
+                    )
+                    .is_err()
+                    {
+                        break Err(WasiGuestError::rejected());
                     }
                 }
-                Err(error) => {
-                    break Err(error.into());
+                hibana_wasip1_runtime::WasiBoundaryStep::BudgetExpired(_) => {
+                    break Ok(EmbeddedWasiGuestStatus::BudgetExpired);
+                }
+                hibana_wasip1_runtime::WasiBoundaryStep::Exit(_) => {
+                    break Ok(EmbeddedWasiGuestStatus::Exit);
                 }
             }
         };
-        match result {
-            Ok(WasiGuestStatus::BudgetExpired(_)) => {
-                self.guest_slot = Some(guest_slot);
-            }
-            Ok(WasiGuestStatus::Exit(_)) | Err(_) => {
-                let guest_storage = guest_slot.finish();
-                self.guest_storage = Some(guest_storage);
-            }
-        }
+        self.store_embedded_wasi_guest_slot(guest_slot, &result);
         result
     }
 
-    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
-    #[inline(never)]
-    /// Drive exactly one pending WASI P1 import after the caller has admitted the
-    /// surrounding choreography step.
-    pub fn drive_wasi_guest_once_blocking(
-        &mut self,
-        budget: BudgetRun,
-    ) -> Result<WasiGuestStatus, WasiGuestError> {
-        let Some(bytes) = self.wasi_guest_bytes else {
-            return Err(WasiGuestError::NoWasiArtifact);
-        };
-        let mut guest_slot = match self.guest_slot.take() {
-            Some(slot) => slot,
-            None => {
-                let guest_storage = self.guest_storage.take().expect(
-                    "WASI engine context must receive in-place guest storage from its logical image",
-                );
-                WasiGuestSlot::init(guest_storage, bytes)?
-            }
-        };
-        let result = match guest_slot.guest().resume(budget) {
-            Ok(hibana_wasip1_runtime::engine::wasm::Event::Call(call)) => {
-                self.drive_wasi_call_blocking(&mut guest_slot, call)?;
-                Ok(WasiGuestStatus::BudgetExpired(BudgetExpired::new(
-                    budget.run_id(),
-                    budget.generation(),
-                )))
-            }
-            Ok(hibana_wasip1_runtime::engine::wasm::Event::BudgetExpired(expired)) => {
-                Ok(WasiGuestStatus::BudgetExpired(expired))
-            }
-            Ok(hibana_wasip1_runtime::engine::wasm::Event::Exit(exit)) => {
-                let Some(status) = exit.as_protocol_status() else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                self.endpoint_proc_exit_blocking(status)?;
-                Ok(WasiGuestStatus::Exit(status))
-            }
-            Ok(hibana_wasip1_runtime::engine::wasm::Event::MemoryFence(pending)) => {
-                self.drive_memory_fence_blocking(&mut guest_slot, pending)?;
-                Ok(WasiGuestStatus::BudgetExpired(BudgetExpired::new(
-                    budget.run_id(),
-                    budget.generation(),
-                )))
-            }
-            Err(error) => Err(error.into()),
-        };
-        match result {
-            Ok(WasiGuestStatus::BudgetExpired(_)) => {
-                self.guest_slot = Some(guest_slot);
-            }
-            Ok(WasiGuestStatus::Exit(_)) | Err(_) => {
-                let guest_storage = guest_slot.finish();
-                self.guest_storage = Some(guest_storage);
-            }
-        }
-        result
-    }
-
-    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
-    async fn drive_wasi_call(
-        &mut self,
-        guest_slot: &mut WasiGuestSlot<'guest>,
-        call: hibana_wasip1_runtime::engine::wasm::Call,
-    ) -> Result<(), WasiGuestError> {
-        match call {
-            hibana_wasip1_runtime::engine::wasm::Call::FdWrite(pending) => {
-                self.drive_fd_write_call(guest_slot, pending).await
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::FdRead(pending) => {
-                let fd = pending.fd();
-                let max_len = pending.max_len(guest_slot.guest())?;
-                if max_len > u8::MAX as usize {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                let request = EngineReq::FdRead(FdRead::new(fd, max_len as u8)?);
-                let reply = self
-                    .endpoint_call::<LABEL_WASI_FD_READ, LABEL_WASI_FD_READ_RET>(request)
-                    .await?;
-                let EngineRet::FdReadDone(done) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                if done.fd() != fd {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                pending.complete(guest_slot.guest(), done.as_bytes(), 0)?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::FdFdstatGet(pending) => {
-                let fd = pending.fd();
-                let reply = self
-                    .endpoint_call::<LABEL_WASI_FD_FDSTAT_GET, LABEL_WASI_FD_FDSTAT_GET_RET>(
-                        EngineReq::FdFdstatGet(FdRequest::new(fd)),
-                    )
-                    .await?;
-                let EngineRet::FdStat(stat) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                if stat.fd() != fd {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                pending.complete(guest_slot.guest(), Self::protocol_fdstat_to_vm(stat), 0)?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::FdClose(pending) => {
-                let fd = pending.fd();
-                let reply = self
-                    .endpoint_call::<LABEL_WASI_FD_CLOSE, LABEL_WASI_FD_CLOSE_RET>(
-                        EngineReq::FdClose(FdRequest::new(fd)),
-                    )
-                    .await?;
-                let EngineRet::FdClosed(closed) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                if closed.fd() != fd {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                pending.complete(guest_slot.guest(), 0)?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::ClockResGet(pending) => {
-                let clock_id = pending.clock_id();
-                if clock_id > u8::MAX as u32 {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                let reply = self
-                    .endpoint_call::<LABEL_WASI_CLOCK_RES_GET, LABEL_WASI_CLOCK_RES_GET_RET>(
-                        EngineReq::ClockResGet(ClockResGet::new(clock_id as u8)),
-                    )
-                    .await?;
-                let EngineRet::ClockResolution(resolution) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                pending.complete(guest_slot.guest(), resolution.nanos(), 0)?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::ClockTimeGet(pending) => {
-                let clock_id = pending.clock_id();
-                if clock_id > u8::MAX as u32 {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                let request =
-                    EngineReq::ClockTimeGet(ClockTimeGet::new(clock_id as u8, pending.precision()));
-                let reply = self
-                    .endpoint_call::<LABEL_WASI_CLOCK_TIME_GET, LABEL_WASI_CLOCK_TIME_GET_RET>(
-                        request,
-                    )
-                    .await?;
-                let EngineRet::ClockTime(now) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                pending.complete(guest_slot.guest(), now.nanos(), 0)?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::PollOneoff(pending) => {
-                self.drive_poll_oneoff_call(guest_slot, pending).await
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::RandomGet(pending) => {
-                let len = pending.buf_len();
-                if len > u8::MAX as u32 {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                let request = EngineReq::RandomGet(RandomGet::new(len as u8)?);
-                let reply = self
-                    .endpoint_call::<LABEL_WASI_RANDOM_GET, LABEL_WASI_RANDOM_GET_RET>(request)
-                    .await?;
-                let EngineRet::RandomDone(done) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                pending.complete(guest_slot.guest(), done.as_bytes(), 0)?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::FdReaddir(pending) => {
-                let fd = pending.fd();
-                let cookie = pending.cookie();
-                let max_len = pending.max_len();
-                if max_len > u8::MAX as usize {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                let request = EngineReq::FdReaddir(FdReaddir::new(fd, cookie, max_len as u8)?);
-                let reply = self
-                    .endpoint_call::<LABEL_WASI_FD_READDIR, LABEL_WASI_FD_READDIR_RET>(request)
-                    .await?;
-                let EngineRet::FdReaddirDone(done) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                if done.fd() != fd {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                pending.complete(guest_slot.guest(), done.as_bytes(), done.errno() as u32)?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::PathOpen(pending) => {
-                let fd = pending.fd();
-                let rights = pending.rights_base();
-                let path = pending.path_bytes(guest_slot.guest())?;
-                let request = EngineReq::PathOpen(PathOpen::new(fd, rights, path.as_bytes())?);
-                let reply = self
-                    .endpoint_call::<LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET>(request)
-                    .await?;
-                let EngineRet::PathOpened(opened) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                pending.complete(
-                    guest_slot.guest(),
-                    opened.fd() as u32,
-                    opened.errno() as u32,
-                )?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::ArgsSizesGet(pending) => {
-                let reply = self
-                    .endpoint_call::<LABEL_WASI_ARGS_SIZES_GET, LABEL_WASI_ARGS_SIZES_GET_RET>(
-                        EngineReq::ArgsSizesGet(ArgsSizesGet),
-                    )
-                    .await?;
-                let EngineRet::ArgsSizes(sizes) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                pending.complete(
-                    guest_slot.guest(),
-                    sizes.count() as u32,
-                    sizes.buf_size() as u32,
-                    0,
-                )?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::ArgsGet(pending) => {
-                let request = EngineReq::ArgsGet(ArgsGet::new(WASIP1_IO_CHUNK_CAPACITY as u8)?);
-                let reply = self
-                    .endpoint_call::<LABEL_WASI_ARGS_GET, LABEL_WASI_ARGS_GET_RET>(request)
-                    .await?;
-                let EngineRet::ArgsDone(done) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                pending.complete(guest_slot.guest(), &[done.as_bytes()], 0)?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::EnvironSizesGet(pending) => {
-                let reply = self
-                    .endpoint_call::<LABEL_WASI_ENVIRON_SIZES_GET, LABEL_WASI_ENVIRON_SIZES_GET_RET>(
-                        EngineReq::EnvironSizesGet(EnvironSizesGet),
-                    )
-                    .await?;
-                let EngineRet::EnvironSizes(sizes) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                pending.complete(
-                    guest_slot.guest(),
-                    sizes.count() as u32,
-                    sizes.buf_size() as u32,
-                    0,
-                )?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::EnvironGet(pending) => {
-                let request =
-                    EngineReq::EnvironGet(EnvironGet::new(WASIP1_IO_CHUNK_CAPACITY as u8)?);
-                let reply = self
-                    .endpoint_call::<LABEL_WASI_ENVIRON_GET, LABEL_WASI_ENVIRON_GET_RET>(request)
-                    .await?;
-                let EngineRet::EnvironDone(done) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                pending.complete(guest_slot.guest(), &[(done.as_bytes(), &[][..])], 0)?;
-                Ok(())
-            }
-        }
-    }
-
-    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
-    #[inline(never)]
-    fn drive_wasi_call_blocking(
-        &mut self,
-        guest_slot: &mut WasiGuestSlot<'guest>,
-        call: hibana_wasip1_runtime::engine::wasm::Call,
-    ) -> Result<(), WasiGuestError> {
-        match call {
-            hibana_wasip1_runtime::engine::wasm::Call::FdWrite(pending) => {
-                self.drive_fd_write_call_blocking(guest_slot, pending)
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::FdRead(pending) => {
-                let fd = pending.fd();
-                let max_len = pending.max_len(guest_slot.guest())?;
-                if max_len > u8::MAX as usize {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                let request = EngineReq::FdRead(FdRead::new(fd, max_len as u8)?);
-                let reply = self
-                    .endpoint_call_blocking::<LABEL_WASI_FD_READ, LABEL_WASI_FD_READ_RET>(
-                        request,
-                    )?;
-                let EngineRet::FdReadDone(done) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                if done.fd() != fd {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                pending.complete(guest_slot.guest(), done.as_bytes(), 0)?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::FdFdstatGet(pending) => {
-                let fd = pending.fd();
-                let reply = self.endpoint_call_blocking::<
-                    LABEL_WASI_FD_FDSTAT_GET,
-                    LABEL_WASI_FD_FDSTAT_GET_RET,
-                >(EngineReq::FdFdstatGet(FdRequest::new(fd)))?;
-                let EngineRet::FdStat(stat) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                if stat.fd() != fd {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                pending.complete(guest_slot.guest(), Self::protocol_fdstat_to_vm(stat), 0)?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::FdClose(pending) => {
-                let fd = pending.fd();
-                let reply = self
-                    .endpoint_call_blocking::<LABEL_WASI_FD_CLOSE, LABEL_WASI_FD_CLOSE_RET>(
-                        EngineReq::FdClose(FdRequest::new(fd)),
-                    )?;
-                let EngineRet::FdClosed(closed) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                if closed.fd() != fd {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                pending.complete(guest_slot.guest(), 0)?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::ClockResGet(pending) => {
-                let clock_id = pending.clock_id();
-                if clock_id > u8::MAX as u32 {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                let reply = self.endpoint_call_blocking::<
-                    LABEL_WASI_CLOCK_RES_GET,
-                    LABEL_WASI_CLOCK_RES_GET_RET,
-                >(EngineReq::ClockResGet(ClockResGet::new(clock_id as u8)))?;
-                let EngineRet::ClockResolution(resolution) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                pending.complete(guest_slot.guest(), resolution.nanos(), 0)?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::ClockTimeGet(pending) => {
-                let clock_id = pending.clock_id();
-                if clock_id > u8::MAX as u32 {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                let request =
-                    EngineReq::ClockTimeGet(ClockTimeGet::new(clock_id as u8, pending.precision()));
-                let reply = self.endpoint_call_blocking::<
-                    LABEL_WASI_CLOCK_TIME_GET,
-                    LABEL_WASI_CLOCK_TIME_GET_RET,
-                >(request)?;
-                let EngineRet::ClockTime(now) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                pending.complete(guest_slot.guest(), now.nanos(), 0)?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::PollOneoff(pending) => {
-                self.drive_poll_oneoff_call_blocking(guest_slot, pending)
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::RandomGet(pending) => {
-                let len = pending.buf_len();
-                if len > u8::MAX as u32 {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                let request = EngineReq::RandomGet(RandomGet::new(len as u8)?);
-                let reply = self
-                    .endpoint_call_blocking::<LABEL_WASI_RANDOM_GET, LABEL_WASI_RANDOM_GET_RET>(
-                        request,
-                    )?;
-                let EngineRet::RandomDone(done) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                pending.complete(guest_slot.guest(), done.as_bytes(), 0)?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::FdReaddir(pending) => {
-                let fd = pending.fd();
-                let cookie = pending.cookie();
-                let max_len = pending.max_len();
-                if max_len > u8::MAX as usize {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                let request = EngineReq::FdReaddir(FdReaddir::new(fd, cookie, max_len as u8)?);
-                let reply = self
-                    .endpoint_call_blocking::<LABEL_WASI_FD_READDIR, LABEL_WASI_FD_READDIR_RET>(
-                        request,
-                    )?;
-                let EngineRet::FdReaddirDone(done) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                if done.fd() != fd {
-                    return Err(WasiGuestError::UnexpectedReply);
-                }
-                pending.complete(guest_slot.guest(), done.as_bytes(), done.errno() as u32)?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::PathOpen(pending) => {
-                let fd = pending.fd();
-                let rights = pending.rights_base();
-                let path = pending.path_bytes(guest_slot.guest())?;
-                let request = EngineReq::PathOpen(PathOpen::new(fd, rights, path.as_bytes())?);
-                let reply = self
-                    .endpoint_call_blocking::<LABEL_WASI_PATH_OPEN, LABEL_WASI_PATH_OPEN_RET>(
-                        request,
-                    )?;
-                let EngineRet::PathOpened(opened) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                pending.complete(
-                    guest_slot.guest(),
-                    opened.fd() as u32,
-                    opened.errno() as u32,
-                )?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::ArgsSizesGet(pending) => {
-                let reply = self.endpoint_call_blocking::<
-                    LABEL_WASI_ARGS_SIZES_GET,
-                    LABEL_WASI_ARGS_SIZES_GET_RET,
-                >(EngineReq::ArgsSizesGet(ArgsSizesGet))?;
-                let EngineRet::ArgsSizes(sizes) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                pending.complete(
-                    guest_slot.guest(),
-                    sizes.count() as u32,
-                    sizes.buf_size() as u32,
-                    0,
-                )?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::ArgsGet(pending) => {
-                let request = EngineReq::ArgsGet(ArgsGet::new(WASIP1_IO_CHUNK_CAPACITY as u8)?);
-                let reply = self
-                    .endpoint_call_blocking::<LABEL_WASI_ARGS_GET, LABEL_WASI_ARGS_GET_RET>(
-                        request,
-                    )?;
-                let EngineRet::ArgsDone(done) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                pending.complete(guest_slot.guest(), &[done.as_bytes()], 0)?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::EnvironSizesGet(pending) => {
-                let reply = self.endpoint_call_blocking::<
-                    LABEL_WASI_ENVIRON_SIZES_GET,
-                    LABEL_WASI_ENVIRON_SIZES_GET_RET,
-                >(EngineReq::EnvironSizesGet(EnvironSizesGet))?;
-                let EngineRet::EnvironSizes(sizes) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                pending.complete(
-                    guest_slot.guest(),
-                    sizes.count() as u32,
-                    sizes.buf_size() as u32,
-                    0,
-                )?;
-                Ok(())
-            }
-            hibana_wasip1_runtime::engine::wasm::Call::EnvironGet(pending) => {
-                let request =
-                    EngineReq::EnvironGet(EnvironGet::new(WASIP1_IO_CHUNK_CAPACITY as u8)?);
-                let reply = self
-                    .endpoint_call_blocking::<LABEL_WASI_ENVIRON_GET, LABEL_WASI_ENVIRON_GET_RET>(
-                        request,
-                    )?;
-                let EngineRet::EnvironDone(done) = reply else {
-                    return Err(WasiGuestError::UnexpectedReply);
-                };
-                pending.complete(guest_slot.guest(), &[(done.as_bytes(), &[][..])], 0)?;
-                Ok(())
-            }
-        }
-    }
-
-    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
-    async fn drive_fd_write_call(
-        &mut self,
-        guest_slot: &mut WasiGuestSlot<'guest>,
-        pending: hibana_wasip1_runtime::engine::wasm::FdWrite,
-    ) -> Result<(), WasiGuestError> {
-        let fd = pending.fd();
-        let payload = pending.payload(guest_slot.guest())?;
-        let request = EngineReq::FdWrite(FdWrite::new(fd, payload.as_bytes())?);
-        let reply = self
-            .endpoint_call::<LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET>(request)
-            .await?;
-        let EngineRet::FdWriteDone(done) = reply else {
-            return Err(WasiGuestError::UnexpectedReply);
-        };
-        if done.fd() != fd {
-            return Err(WasiGuestError::UnexpectedReply);
-        }
-        pending.complete(guest_slot.guest(), done.errno() as u32)?;
-        Ok(())
-    }
-
-    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
-    #[inline(never)]
-    fn drive_fd_write_call_blocking(
-        &mut self,
-        guest_slot: &mut WasiGuestSlot<'guest>,
-        pending: hibana_wasip1_runtime::engine::wasm::FdWrite,
-    ) -> Result<(), WasiGuestError> {
-        let fd = pending.fd();
-        let payload = pending.payload(guest_slot.guest())?;
-        let request = EngineReq::FdWrite(FdWrite::new(fd, payload.as_bytes())?);
-        let reply =
-            self.endpoint_call_blocking::<LABEL_WASI_FD_WRITE, LABEL_WASI_FD_WRITE_RET>(request)?;
-        let EngineRet::FdWriteDone(done) = reply else {
-            return Err(WasiGuestError::UnexpectedReply);
-        };
-        if done.fd() != fd {
-            return Err(WasiGuestError::UnexpectedReply);
-        }
-        pending.complete(guest_slot.guest(), done.errno() as u32)?;
-        Ok(())
-    }
-
-    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
-    async fn drive_poll_oneoff_call(
-        &mut self,
-        guest_slot: &mut WasiGuestSlot<'guest>,
-        pending: hibana_wasip1_runtime::engine::wasm::PollOneoff,
-    ) -> Result<(), WasiGuestError> {
-        let delay = pending.delay_ticks(guest_slot.guest())?;
-        let reply = self
-            .endpoint_call::<LABEL_WASI_POLL_ONEOFF, LABEL_WASI_POLL_ONEOFF_RET>(
-                EngineReq::PollOneoff(PollOneoff::new(delay)),
-            )
-            .await?;
-        let EngineRet::PollReady(ready) = reply else {
-            return Err(WasiGuestError::UnexpectedReply);
-        };
-        pending.complete(guest_slot.guest(), ready.ready() as u32, 0)?;
-        Ok(())
-    }
-
-    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
-    #[inline(never)]
-    fn drive_poll_oneoff_call_blocking(
-        &mut self,
-        guest_slot: &mut WasiGuestSlot<'guest>,
-        pending: hibana_wasip1_runtime::engine::wasm::PollOneoff,
-    ) -> Result<(), WasiGuestError> {
-        let delay = pending.delay_ticks(guest_slot.guest())?;
-        let reply = self
-            .endpoint_call_blocking::<LABEL_WASI_POLL_ONEOFF, LABEL_WASI_POLL_ONEOFF_RET>(
-                EngineReq::PollOneoff(PollOneoff::new(delay)),
-            )?;
-        let EngineRet::PollReady(ready) = reply else {
-            return Err(WasiGuestError::UnexpectedReply);
-        };
-        pending.complete(guest_slot.guest(), ready.ready() as u32, 0)?;
-        Ok(())
-    }
-
-    #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
-    async fn drive_memory_fence(
-        &mut self,
-        guest_slot: &mut WasiGuestSlot<'guest>,
-        pending: hibana_wasip1_runtime::engine::wasm::MemoryFence,
-    ) -> Result<(), WasiGuestError> {
-        let fence = MemFence::new(MemFenceReason::MemoryGrow, pending.fence_epoch());
-        if let Err(error) = self
-            .endpoint()
-            .send::<hibana::g::Msg<LABEL_MEM_FENCE, MemFence>>(&fence)
-            .await
-        {
-            return Err(WasiGuestError::endpoint(
-                0x5745_2000 | LABEL_MEM_FENCE as u32,
-                error,
-            ));
-        }
-        pending.complete(guest_slot.guest())?;
-        Ok(())
-    }
-
-    #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
-    #[inline(never)]
-    fn drive_memory_fence_blocking(
-        &mut self,
-        guest_slot: &mut WasiGuestSlot<'guest>,
-        pending: hibana_wasip1_runtime::engine::wasm::MemoryFence,
-    ) -> Result<(), WasiGuestError> {
-        let fence = MemFence::new(MemFenceReason::MemoryGrow, pending.fence_epoch());
-        if let Err(error) = poll_embedded_endpoint_unit(
-            self.endpoint()
-                .send::<hibana::g::Msg<LABEL_MEM_FENCE, MemFence>>(&fence),
-        ) {
-            return Err(WasiGuestError::endpoint(
-                0x5745_2000 | LABEL_MEM_FENCE as u32,
-                error,
-            ));
-        }
-        pending.complete(guest_slot.guest())?;
-        Ok(())
-    }
-
-    pub fn pending<E>(self) -> impl core::future::Future<Output = RoleResult<E>> {
+    #[cfg(any(test, not(target_os = "none")))]
+    fn pending<E>(self) -> impl core::future::Future<Output = RoleResult<E>> {
         PendingRole::new(self)
     }
 }
 
+pub fn pending<'endpoint, E: 'endpoint, const ROLE: u8>(
+    endpoint: hibana::Endpoint<'endpoint, ROLE>,
+) -> impl core::future::Future<Output = RoleResult<E>> + 'endpoint {
+    PendingRole::new(endpoint)
+}
+
 #[cfg(all(feature = "wasm-engine-core", any(test, not(target_os = "none"))))]
 async fn drive_canonical_wasi_engine<'endpoint, 'guest, C, I, A, const ROLE: u8>(
-    mut ctx: EngineCtx<'endpoint, 'guest, C, ROLE>,
+    mut engine: CanonicalWasiEngine<'endpoint, 'guest, C, ROLE>,
 ) -> RoleResult<WasiGuestError>
 where
     C: Capsule,
-    I: LogicalImage<C>,
-    A: ArtifactInput<C, I>,
+    I: LogicalImage<Capsule = C>,
+    A: ArtifactInput<I>,
 {
     loop {
-        match ctx
-            .drive_wasi_guest(<A as ArtifactInput<C, I>>::wasi_budget::<ROLE>())
+        match engine
+            .drive_wasi_guest(<A as ArtifactInput<I>>::wasi_budget::<ROLE>())
             .await
         {
-            Ok(WasiGuestStatus::BudgetExpired(_)) => {}
-            Ok(WasiGuestStatus::Exit(_)) => {
-                return ctx.pending().await;
+            Ok(WasiGuestStatus::BudgetExpired) => {}
+            Ok(WasiGuestStatus::Exit) => {
+                return engine.pending().await;
             }
             Err(error) => {
                 return Err(error);
@@ -2528,38 +2164,57 @@ where
 }
 
 #[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
+fn embedded_observe_forever<C, T>(context: T, tap: &mut hibana::runtime::tap::TapPort<'_>) -> !
+where
+    C: Capsule,
+{
+    let context = context;
+    loop {
+        C::observe(tap);
+        core::hint::black_box(&context);
+        embedded_wait_for_event();
+    }
+}
+
+#[cfg(all(feature = "wasm-engine-core", not(test), target_os = "none"))]
 fn run_canonical_wasi_engine_forever<'endpoint, 'guest, C, I, A, const ROLE: u8>(
-    storage: EmbeddedAttachStorageRef<'static>,
-    ctx: EngineCtx<'endpoint, 'guest, C, ROLE>,
+    engine: CanonicalWasiEngine<'endpoint, 'guest, C, ROLE>,
+    embedded_tasks: &mut EmbeddedScheduledTasks<
+        '_,
+        RoleTaskError<<C::Localside as Localside<C>>::Error>,
+    >,
+    tap: &mut hibana::runtime::tap::TapPort<'_>,
 ) -> !
 where
     C: Capsule,
-    I: LogicalImage<C>,
-    A: ArtifactInput<C, I>,
+    I: LogicalImage<Capsule = C>,
+    A: ArtifactInput<I>,
 {
-    assert!(
-        size_of::<EngineCtx<'endpoint, 'guest, C, ROLE>>() <= storage.future_bytes,
-        "appkit embedded WASI engine context exceeds embedded role arena"
-    );
-    assert!(
-        align_of::<EngineCtx<'endpoint, 'guest, C, ROLE>>() <= APPKIT_EMBEDDED_FUTURE_ALIGN,
-        "appkit embedded WASI engine context alignment exceeds embedded role arena"
-    );
-
     unsafe {
-        let ctx_ptr = storage
-            .future
-            .cast::<EngineCtx<'endpoint, 'guest, C, ROLE>>();
-        ctx_ptr.write(ctx);
-        let ctx = &mut *ctx_ptr;
+        let engine_ptr = embedded_tasks
+            .blocking_engine_state::<CanonicalWasiEngine<'endpoint, 'guest, C, ROLE>>();
+        engine_ptr.write(engine);
+        let engine = &mut *engine_ptr;
+        if embedded_tasks.has_tasks() {
+            let mut woke = false;
+            let task_waker = embedded_task_waker(&mut woke);
+            let mut task_context = Context::from_waker(&task_waker);
+            embedded_tasks.poll_once(&mut task_context);
+        }
         loop {
-            match ctx.drive_wasi_guest_blocking(<A as ArtifactInput<C, I>>::wasi_budget::<ROLE>()) {
-                Ok(WasiGuestStatus::BudgetExpired(_)) => {}
-                Ok(WasiGuestStatus::Exit(_)) => {
-                    embedded_pending_forever(ctx);
+            match engine.drive_wasi_guest_blocking(
+                <A as ArtifactInput<I>>::wasi_budget::<ROLE>(),
+                embedded_tasks,
+            ) {
+                Ok(EmbeddedWasiGuestStatus::BudgetExpired) => {
+                    C::observe(tap);
+                }
+                Ok(EmbeddedWasiGuestStatus::Exit | EmbeddedWasiGuestStatus::TerminalEndpoint) => {
+                    embedded_observe_forever::<C, _>(engine, tap);
                 }
                 Err(error) => {
                     core::hint::black_box(&error);
+                    C::observe(tap);
                     panic!("appkit embedded WASI role task failed: {error:?}");
                 }
             }
@@ -2567,67 +2222,20 @@ where
     }
 }
 
-/// Driver-side localside context.
-pub struct DriverCtx<'a, C: Capsule, const ROLE: u8> {
-    endpoint: RoleEndpointCtx<'a, C, ROLE>,
-    facts: DriverFacts<'a>,
-}
-
-impl<'a, C: Capsule, const ROLE: u8> DriverCtx<'a, C, ROLE> {
-    fn new(endpoint: RoleEndpointCtx<'a, C, ROLE>, facts: DriverFacts<'a>) -> Self {
-        Self { endpoint, facts }
-    }
-
-    pub const fn choreofs(&self) -> ChoreoFsFacts<'a> {
-        self.facts.choreofs()
-    }
-
-    pub const fn ledger(&self) -> LedgerFacts<'a> {
-        self.facts.ledger()
-    }
-
-    pub fn endpoint(&mut self) -> &mut hibana::Endpoint<'a, ROLE> {
-        self.endpoint.endpoint()
-    }
-
-    pub fn pending<E>(self) -> impl core::future::Future<Output = RoleResult<E>> {
-        PendingRole::new(self)
-    }
-}
-
-/// Site-local external boundary context.
-pub struct BoundaryCtx<'a, C: Capsule, const ROLE: u8> {
-    endpoint: RoleEndpointCtx<'a, C, ROLE>,
-}
-
-impl<'a, C: Capsule, const ROLE: u8> BoundaryCtx<'a, C, ROLE> {
-    fn new(endpoint: RoleEndpointCtx<'a, C, ROLE>) -> Self {
-        Self { endpoint }
-    }
-
-    pub fn endpoint(&mut self) -> &mut hibana::Endpoint<'a, ROLE> {
-        self.endpoint.endpoint()
-    }
-
-    pub fn pending<E>(self) -> impl core::future::Future<Output = RoleResult<E>> {
-        PendingRole::new(self)
-    }
-}
-
 /// Localside implementation contract for a capsule.
 pub trait Localside<C: Capsule> {
     type Error: Debug;
 
-    fn engine<'endpoint, 'guest, const ROLE: u8>(
-        ctx: EngineCtx<'endpoint, 'guest, C, ROLE>,
+    fn engine<'endpoint, const ROLE: u8>(
+        endpoint: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = RoleResult<Self::Error>>;
 
-    fn driver<'a, const ROLE: u8>(
-        ctx: DriverCtx<'a, C, ROLE>,
+    fn driver<'endpoint, const ROLE: u8>(
+        endpoint: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = RoleResult<Self::Error>>;
 
-    fn boundary<'a, const ROLE: u8>(
-        ctx: BoundaryCtx<'a, C, ROLE>,
+    fn boundary<'endpoint, const ROLE: u8>(
+        endpoint: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = RoleResult<Self::Error>>;
 }
 
@@ -2635,23 +2243,24 @@ pub trait Localside<C: Capsule> {
 // `ArtifactInput` intentionally stays private: callers pass `NoWasi` or
 // `WasiImage`, but never name or implement the artifact boundary trait.
 #[allow(private_bounds)]
-pub fn run<I, C>(artifact: impl ArtifactInput<C, I>)
+pub fn run<I>(artifact: impl ArtifactInput<I>)
 where
-    C: Capsule,
-    I: LogicalImage<C>,
+    I: LogicalImage,
 {
-    run_with_artifact::<I, C, _>(artifact)
+    run_with_artifact::<I, _>(artifact)
 }
 
-fn run_with_artifact<I, C, A>(artifact: A)
+fn run_with_artifact<I, A>(artifact: A)
 where
-    C: Capsule,
-    I: LogicalImage<C>,
-    A: ArtifactInput<C, I>,
+    I: LogicalImage,
+    A: ArtifactInput<I>,
 {
-    let program = C::choreography();
-    let projected_roles = collect_projected_roles::<C, I>(&program);
+    let program = <I::Capsule as Capsule>::choreography();
+    let projected_roles = collect_projected_roles::<I>(&program);
+    #[cfg(feature = "wasm-engine-core")]
     let wasi_guest_bytes = artifact.wasi_bytes();
+    #[cfg(not(feature = "wasm-engine-core"))]
+    let _ = artifact;
     assert!(
         I::REQUESTED_ROLES.is_subset_of(HIBANA_TYPED_ROLE_DOMAIN),
         "logical image requested roles must stay within current hibana typed role domain"
@@ -2664,7 +2273,11 @@ where
         projected_roles.count() == I::REQUESTED_ROLES.count(),
         "logical image projected RoleProgram count must match requested role count"
     );
-    let attach_summary = attach_projected_roles::<C, I, A>(&program, wasi_guest_bytes);
+    let attach_summary = attach_projected_roles::<I, A>(
+        &program,
+        #[cfg(feature = "wasm-engine-core")]
+        wasi_guest_bytes,
+    );
     assert!(
         attach_summary.endpoint_count == projected_roles.count(),
         "logical image projected roles must attach through SessionKit"

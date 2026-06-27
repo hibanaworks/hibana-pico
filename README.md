@@ -18,8 +18,9 @@ choreography DSL, domain runtime, or general Wasm runtime.
 The only runnable Wasm artifact target is `wasm32-wasip1` / WASI Preview 1.
 Wasm execution, WASI P1 import payloads, and ChoreoFS driver facts are owned by
 the sibling `hibana-wasip1-runtime` crate. `hibana-pico` only attaches those
-facts to Hibana Endpoint/carrier progress. There is no Preview 2, WIT, or
-Component Model public path.
+facts to Hibana Endpoint/carrier progress; code that names ChoreoFS object or
+ledger facts imports them from `hibana_wasip1_runtime::choreofs`, not from
+`appkit`. There is no Preview 2, WIT, or Component Model public path.
 
 ## Public Surface
 
@@ -34,45 +35,55 @@ There is no root `choreography`, `kernel`, `machine`, `port`, `projects`,
 under `examples/`. The WASI P1 engine implementation is not an appkit module;
 it is `hibana-wasip1-runtime`.
 
-`appkit` itself is also a curated facade. Its public path stays flat as
-`hibana_pico::appkit::*`; implementation modules under `src/appkit/` remain
-private and are re-exported only through the facade.
+`appkit` itself is also a curated facade for capsule assembly. The public path
+stays flat under `hibana_pico::appkit`; Hibana choreography terms and
+WASI/ChoreoFS fact types remain direct imports from their owning crates.
+Implementation modules under `src/appkit/` stay private.
 
 ## Capsule API
 
 Users define a Capsule from raw `hibana::g` choreography:
 
 ```rust
-pub trait Capsule {
-    type Placement;
-    type Local;
+pub trait Capsule: Sized {
+    type Placement: appkit::Placement<Self>;
+    type Localside: appkit::Localside<Self>;
 
     fn choreography() -> impl hibana::runtime::program::Projectable;
+}
+
+pub trait Placement<C: appkit::Capsule> {
+    fn role_kind<const ROLE: u8>() -> appkit::RoleKind;
 }
 ```
 
 The concrete raw Hibana term is inferred from `hibana::g`; users do not name
-the internal step-list type. It is not an `appkit` wrapper or DSL node.
+the internal step-list type. Placement is also selected by the projected const
+role, not by a caller-provided dynamic role value. It is not an appkit-owned
+DSL node.
 
 The public execution path is one call:
 
 ```rust
-appkit::run::<LogicalImage, Capsule>(artifact)
+appkit::run::<LogicalImage>(artifact)
 ```
 
 The dynamic input is the artifact value, usually a `WasiImage`. Static selection
-is carried by the `LogicalImage` and `Capsule` type parameters.
+is carried by the `LogicalImage` type; the capsule is the image's associated
+protocol owner.
 
 ## Logical Images
 
 A logical image is a requested projection slice:
 
 ```rust
-pub trait LogicalImage<C: appkit::Capsule> {
+pub trait LogicalImage {
+    type Capsule: appkit::Capsule;
+
     type Carrier<'a>: hibana::runtime::transport::Transport + 'a
     where
         Self: 'a,
-        C: 'a;
+        Self::Capsule: 'a;
 
     const REQUESTED_ROLES: appkit::RoleSet;
 
@@ -80,7 +91,7 @@ pub trait LogicalImage<C: appkit::Capsule> {
     fn safe_state(&mut self);
     fn carrier<'a>() -> Self::Carrier<'a>
     where
-        C: 'a;
+        Self::Capsule: 'a;
 }
 ```
 
@@ -88,14 +99,16 @@ pub trait LogicalImage<C: appkit::Capsule> {
 attached; callers do not receive mutable access to the logical image.
 
 If `appkit::run` receives an `appkit::WasiImage<'_>`, the image also implements
-`appkit::WasiGuestImage<C>` to provide its site-local in-place guest storage.
+`appkit::WasiGuestImage` to provide its site-local in-place guest storage.
 If `appkit::run` receives `appkit::NoWasi`, the image does not lease guest
-storage at all.
-With `wasm-engine-core`, `Capsule::WASI_GUEST_DRIVE` defaults to
-`appkit::WasiGuestDrive::Canonical`, meaning appkit owns the endpoint/carrier
-WASI P1 import loop. A capsule that must step the guest from localside evidence
-uses `appkit::WasiGuestDrive::Localside`; this is an explicit ownership choice,
-not a hidden rescue path.
+storage at all. Without `wasm-engine-core`, `WasiImage` is not a valid
+`run` artifact; WASI-bearing bins must opt into that feature instead of
+falling into a runtime panic path.
+With `wasm-engine-core`, appkit runs a selected WASI P1 guest through the
+canonical `hibana-wasip1-runtime` resume loop. A capsule localside never steps a
+guest manually; it answers only the concrete WASI import messages admitted by
+the projected Hibana endpoint. ChoreoFS object and fd facts stay in the driver
+site code as `hibana_wasip1_runtime::choreofs` values.
 
 `REQUESTED_ROLES` is not authority. `appkit::run` validates it against the
 Capsule placement, the linked typed role domain, and the concrete Hibana
@@ -115,11 +128,10 @@ fails at construction time, and `RoleSet::single(role)` is the normal one-role
 case.
 WASI guests are expected to be ordinary Rust `std` programs when that is the
 ergonomic choice. Guest authors do not call Hibana-specific exit helpers. If the
-WASI command returns normally, the VM surfaces the same explicit exit event as
-status 0. If the guest calls `proc_exit`, the VM surfaces that exit code and
-appkit sends the real projected `EngineReq::ProcExit(code)`. A static
-`proc_exit` import is load evidence only, never proof that the guest dynamically
-called it.
+WASI command returns normally or calls `proc_exit`, `hibana-wasip1-runtime`
+surfaces `WasiBoundaryStep::Exit`; appkit does not synthesize a driver-visible
+exit message. A static `proc_exit` import is load evidence only, never proof
+that the guest dynamically called it.
 WASI guests do not emit out-of-band loop messages. If a repeated WASI import
 stream is legal, the choreography must express that repetition with Hibana
 `roll`/reentry over the actual WASI import messages. If the choreography is
@@ -139,7 +151,7 @@ host a Core0 logical image and a Core1 logical image.
 
 Same artifact, firmware, process, or address space never implies direct calls,
 authority merge, or syscall shortcuts. The boundary remains Endpoint/carrier.
-Each `appkit::run::<LogicalImage, Capsule>()` attaches only that logical image's
+Each `appkit::run::<LogicalImage>(artifact)` attaches only that logical image's
 validated `REQUESTED_ROLES`; peer core or peer process roles are not attached as
 a hidden progress path. Bare-metal scheduler storage is owned by the logical image
 storage lease; appkit must not map every nonzero role onto a hidden role1 arena.
@@ -182,29 +194,32 @@ progress by itself.
 
 ## Logical Sites
 
-`appkit` provides one generic logical-site marker, `appkit::Local<Image>`. Carrier
-metadata and transport implementations live in examples or user crates,
-including in-process carriers. A site may host linked engine capacity and typed boundary handles, but
-it must not complete or authorize WASI P1 imports.
+The logical image type itself is the site identity. `appkit` does not wrap it in
+a generic marker or expose a site sublanguage. Carrier metadata and transport
+implementations live in examples or user crates, including in-process carriers.
+A site may host linked engine capacity and typed boundary handles, but it must
+not complete or authorize WASI P1 imports.
 
 Every WASI P1 import emitted by every guest completes only through the projected
 choreography to which that guest is attached:
 
 ```text
 WASI P1 guest
-  -> Hibana WASIP1 runtime engine side
-  -> typed EngineReq
+  -> GuestMemory
+  -> HibanaWasiGuest::resume_wasi_boundary(..., BudgetRun)
+  -> WasiImportRequest
+  -> protocol::*ReqMsg
   -> Endpoint / carrier
   -> Driver side
   -> ledger / ChoreoFS / resolver / boundary facts
-  -> typed EngineRet
+  -> protocol::*RetMsg
   -> Endpoint / carrier
-  -> Hibana WASIP1 runtime engine side
+  -> WasiImportPending::complete(...) / WasiMemoryGrowPending::complete(...)
   -> import completion
 ```
 
 There is no host filesystem authority, raw socket authority, raw MMIO from a
-guest, route inference, timeout rescue, shape heuristic, lane mismatch recovery,
+guest, route inference, timeout bypass, shape heuristic, lane mismatch repair,
 or co-located syscall shortcut.
 
 ## Dynamic Routes And Deadlines
@@ -215,7 +230,7 @@ before the controller's route decision or materializing payload has been
 observed. That is not progress, and it must not repair missing route state.
 `offer()` waits for projected route evidence before producing a continuation.
 Offer progress has only evidence-driven outcomes: evidence arrived, still
-pending, or terminal fault. There are no defer budgets, no force-poll rescue,
+pending, or terminal fault. There are no defer budgets, no force-poll bypass,
 and no liveness heuristic that can mint progress without projected evidence.
 
 Committed Hibana wait semantics are `Progress | Fault`. Rust public APIs expose
@@ -278,9 +293,10 @@ panic-marker:
   firmware panic handler records file/line/column/message RAM evidence
 ```
 
-The private VM boundary is `Guest::new(bytes)` plus
-`Guest::resume(BudgetRun)`. WASI P1 completion is typed affine
-`Pending<K>::complete(...)`; there is no public `Guest::complete`, root
+The private VM boundary is `HibanaWasiGuestStorage`, caller-owned
+`GuestMemory`, and `HibanaWasiGuest::resume_wasi_boundary(..., BudgetRun)`.
+WASI P1 completion is typed affine through consumed `WasiImportPending` and
+`WasiMemoryGrowPending` values; there is no public `Guest::complete`, root
 `complete_*`, VM profile selection, or handler-set constructor path.
 
 ## Build

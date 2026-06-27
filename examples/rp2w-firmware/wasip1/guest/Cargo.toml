@@ -6,9 +6,6 @@ publish = false
 
 [workspace]
 
-[dependencies]
-hibana-wasip1-guest = { path = "../../../../guest/hibana-wasip1-guest" }
-
 [[bin]]
 name = "rp2w-epf-policy-timer-guest"
 path = "src/bin/rp2w-epf-policy-timer-guest.rs"

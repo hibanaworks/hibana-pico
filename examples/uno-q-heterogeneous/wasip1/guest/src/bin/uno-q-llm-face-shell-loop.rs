@@ -1,6 +1,8 @@
-use hibana_wasip1_guest::{Result, choreofs};
+use std::{
+    fs::{File, OpenOptions},
+    io::{self, Read, Write},
+};
 
-const PREOPEN_FD: u32 = 9;
 const SHELL_PROMPT: &[u8] = b"$ ";
 const SHELL_CATALOG: &[u8] = b"w /face/frame FaceFrame\n$ ";
 const SHELL_INVALID_COMMAND: &[u8] = b"err /face/frame h,a,s,u,mw\n$ ";
@@ -56,34 +58,34 @@ macro_rules! is_catalog_discovery_command {
     }};
 }
 
-fn main() -> Result<()> {
+fn main() -> io::Result<()> {
     run()
 }
 
-fn run() -> Result<()> {
-    let llm_stdin = choreofs::open_read(PREOPEN_FD, "/llm/stdin")?;
-    let llm_stdout = choreofs::open_write(PREOPEN_FD, "/llm/stdout")?;
-    let face = choreofs::open_write(PREOPEN_FD, "/face/frame")?;
+fn run() -> io::Result<()> {
+    let mut llm_stdin = OpenOptions::new().read(true).open("/llm/stdin")?;
+    let mut llm_stdout = OpenOptions::new().write(true).open("/llm/stdout")?;
+    let mut face = OpenOptions::new().write(true).open("/face/frame")?;
     let mut ordinal = 0u8;
 
-    llm_stdout.write_once_exact(SHELL_PROMPT)?;
+    write_exact_flush(&mut llm_stdout, SHELL_PROMPT)?;
     loop {
-        match read_command(&llm_stdin)? {
-            ShellCommand::Catalog => llm_stdout.write_once_exact(SHELL_CATALOG)?,
-            ShellCommand::Invalid => llm_stdout.write_once_exact(SHELL_INVALID_COMMAND)?,
+        match read_command(&mut llm_stdin)? {
+            ShellCommand::Catalog => write_exact_flush(&mut llm_stdout, SHELL_CATALOG)?,
+            ShellCommand::Invalid => write_exact_flush(&mut llm_stdout, SHELL_INVALID_COMMAND)?,
             ShellCommand::Face(face_kind) => {
                 let frame = [face_kind, ordinal];
-                face.write_once_exact(&frame)?;
+                write_exact_flush(&mut face, &frame)?;
                 ordinal = ordinal.wrapping_add(1);
-                llm_stdout.write_once_exact(SHELL_PROMPT)?;
+                write_exact_flush(&mut llm_stdout, SHELL_PROMPT)?;
             }
         }
     }
 }
 
-fn read_command(stdin: &choreofs::ReadFile) -> Result<ShellCommand> {
+fn read_command(stdin: &mut File) -> io::Result<ShellCommand> {
     let mut buffer = [0u8; 30];
-    let len = stdin.read_once(&mut buffer)?;
+    let len = stdin.read(&mut buffer)?;
     let mut end = len;
     if end != 0 && buffer[end - 1] == b'\n' {
         end -= 1;
@@ -95,6 +97,11 @@ fn read_command(stdin: &choreofs::ReadFile) -> Result<ShellCommand> {
     Ok(decode_echo_face_command(command)
         .map(ShellCommand::Face)
         .unwrap_or(ShellCommand::Invalid))
+}
+
+fn write_exact_flush(file: &mut File, bytes: &[u8]) -> io::Result<()> {
+    file.write_all(bytes)?;
+    file.flush()
 }
 
 #[inline(always)]
@@ -123,9 +130,6 @@ fn decode_face_code(face: &[u8]) -> Option<u8> {
             return Some(3);
         }
         if face[0] == b'u' {
-            return Some(4);
-        }
-        if face[0] == b'v' {
             return Some(4);
         }
     }
@@ -175,9 +179,9 @@ mod tests {
     }
 
     #[test]
-    fn surprised_accepts_model_alias_v() {
+    fn surprised_accepts_only_declared_code() {
         assert_eq!(decode_face_code(b"u"), Some(4));
-        assert_eq!(decode_face_code(b"v"), Some(4));
+        assert_eq!(decode_face_code(b"v"), None);
     }
 
     #[test]

@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-hibana = { version = "0.9.0", default-features = false }
+hibana = { version = "0.9.4", default-features = false }
 hibana-epf = { path = "../../../hibana-epf", default-features = false }
 hibana-pico = { path = "../.." }
 hibana-wifi = { path = "../../../hibana-wifi", default-features = false, optional = true }
@@ -17,7 +17,7 @@ default = []
 wasm-engine-core = ["hibana-pico/wasm-engine-core"]
 embed-wasip1-artifacts = []
 embed-cyw43-artifacts = ["sensor-panel"]
-sensor-panel = ["dep:hibana-wifi", "dep:uno-q-heterogeneous"]
+sensor-panel = ["wasm-engine-core", "dep:hibana-wifi", "dep:uno-q-heterogeneous"]
 
 [[bin]]
 name = "rp2w-epf-policy-timer"

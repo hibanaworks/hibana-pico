@@ -7,7 +7,7 @@ cd "$ROOT"
 target="${HIBANA_PICO_TARGET:-thumbv6m-none-eabi}"
 package_name="baker-firmware"
 baker_features="wasm-engine-core embed-wasip1-artifacts"
-bins="baker-traffic baker-choreofs-traffic baker-choreofs-traffic-loop baker-fail-safe baker-recovery baker-many-reentry baker-panic-marker baker-endpoint-fault baker-endpoint-poison baker-preview-probe baker-deadline-fault baker-timer-route baker-capacity-fault baker-epf-policy-timer"
+bins="baker-traffic baker-choreofs-traffic baker-choreofs-traffic-loop baker-fail-safe baker-recovery baker-many-reentry baker-panic-marker baker-endpoint-fault baker-endpoint-poison baker-preview-probe baker-deadline-fault baker-timer-route baker-session-mismatch baker-capacity-fault baker-epf-policy-timer"
 
 sysroot="$(rustc --print sysroot)"
 host="$(rustc -vV | sed -n 's/^host: //p')"
@@ -19,7 +19,7 @@ fi
 
 budget_for_bin() {
   case "$1" in
-    baker-choreofs-traffic | baker-choreofs-traffic-loop)
+    baker-choreofs-traffic | baker-choreofs-traffic-loop | baker-session-mismatch)
       echo "1000000 260000 4096 240000 1000000"
       ;;
     baker-panic-marker)

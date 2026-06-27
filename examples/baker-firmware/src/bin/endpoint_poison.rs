@@ -18,7 +18,7 @@ fn record_endpoint_error(error: &hibana::EndpointError) {
 
 impl appkit::Capsule for EndpointPoison {
     type Placement = BakerPlacement;
-    type Local = EndpointPoisonLocal;
+    type Localside = EndpointPoisonLocal;
 
     fn choreography() -> impl hibana::runtime::program::Projectable {
         g::send::<1, 0, EngineAbortBegin>()
@@ -34,17 +34,17 @@ impl BakerCapsuleFacts for EndpointPoison {
 impl appkit::Localside<EndpointPoison> for EndpointPoisonLocal {
     type Error = hibana::EndpointError;
 
-    fn engine<'endpoint, 'guest, const ROLE: u8>(
-        mut ctx: appkit::EngineCtx<'endpoint, 'guest, EndpointPoison, ROLE>,
+    fn engine<'endpoint, const ROLE: u8>(
+        mut ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 1 {
-                match ctx.endpoint().offer().await {
+                match ctx.offer().await {
                     Ok(_) => panic!("offer at send-only phase must not produce continuation"),
                     Err(error) => record_endpoint_error(&error),
                 }
 
-                match ctx.endpoint().send::<EngineAbortBegin>(&()).await {
+                match ctx.send::<EngineAbortBegin>(&()).await {
                     Ok(_) => panic!("poisoned generation must not send"),
                     Err(error) => {
                         record_endpoint_error(&error);
@@ -52,20 +52,20 @@ impl appkit::Localside<EndpointPoison> for EndpointPoisonLocal {
                     }
                 }
             }
-            ctx.pending().await
+            appkit::pending(ctx).await
         }
     }
 
-    fn driver<'a, const ROLE: u8>(
-        ctx: appkit::DriverCtx<'a, EndpointPoison, ROLE>,
+    fn driver<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
+        appkit::pending(ctx)
     }
 
-    fn boundary<'a, const ROLE: u8>(
-        ctx: appkit::BoundaryCtx<'a, EndpointPoison, ROLE>,
+    fn boundary<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
+        appkit::pending(ctx)
     }
 }
 
@@ -83,7 +83,7 @@ pub extern "C" fn baker_selected_run() -> ! {
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
 fn main() {
-    baker_firmware::run::<EndpointPoison>()
+    panic!("baker-firmware examples are RP2040 hardware artifacts; build for thumbv6m-none-eabi")
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]

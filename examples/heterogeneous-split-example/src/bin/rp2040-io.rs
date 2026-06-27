@@ -14,11 +14,11 @@ fn panic_handler(info: &core::panic::PanicInfo<'_>) -> ! {
 
 #[cfg(not(target_os = "none"))]
 fn main() {
-    type Image = appkit::Local<heterogeneous_split_example::image::Rp2040Io>;
+    type Image = heterogeneous_split_example::image::Rp2040Io;
 
-    appkit::run::<Image, heterogeneous_split_example::Control>(appkit::NoWasi);
+    appkit::run::<Image>(appkit::NoWasi);
     assert_eq!(
-        <Image as appkit::LogicalImage<heterogeneous_split_example::Control>>::REQUESTED_ROLES,
+        <Image as appkit::LogicalImage>::REQUESTED_ROLES,
         appkit::RoleSet::single(2)
     );
 }
@@ -26,11 +26,11 @@ fn main() {
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn main() -> ! {
-    type Image = appkit::Local<heterogeneous_split_example::image::Rp2040Io>;
+    type Image = heterogeneous_split_example::image::Rp2040Io;
 
-    appkit::run::<Image, heterogeneous_split_example::Control>(appkit::NoWasi);
+    appkit::run::<Image>(appkit::NoWasi);
     assert_eq!(
-        <Image as appkit::LogicalImage<heterogeneous_split_example::Control>>::REQUESTED_ROLES,
+        <Image as appkit::LogicalImage>::REQUESTED_ROLES,
         appkit::RoleSet::single(2)
     );
     loop {

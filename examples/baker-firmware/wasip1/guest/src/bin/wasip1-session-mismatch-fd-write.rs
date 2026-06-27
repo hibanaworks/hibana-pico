@@ -1,7 +1,9 @@
-use hibana_wasip1_guest::choreofs;
+use std::{
+    fs::OpenOptions,
+    io::{self, Write},
+};
 
-const DEVICE_PREOPEN_FD: u32 = 9;
-const SESSION_MISMATCH_PATH: &str = "device/session-mismatch";
+const SESSION_MISMATCH_PATH: &str = "/device/session-mismatch";
 const SESSION_MISMATCH_PAYLOAD: &[u8] = b"session mismatch\n";
 
 fn main() {
@@ -10,9 +12,10 @@ fn main() {
     }
 }
 
-fn run() -> hibana_wasip1_guest::Result<()> {
-    let file = choreofs::open_write(DEVICE_PREOPEN_FD, SESSION_MISMATCH_PATH)?;
-    file.write_once_exact(SESSION_MISMATCH_PAYLOAD)
+fn run() -> io::Result<()> {
+    let mut file = OpenOptions::new().write(true).open(SESSION_MISMATCH_PATH)?;
+    file.write_all(SESSION_MISMATCH_PAYLOAD)?;
+    file.flush()
 }
 
 #[cold]

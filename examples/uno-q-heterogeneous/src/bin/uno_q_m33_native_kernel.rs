@@ -444,9 +444,9 @@ mod firmware {
         renderer_show_face(protocol::FACE_NEUTRAL);
         mark_stage(7);
 
-        type Image = appkit::Local<image::M33LedKernelImage>;
+        type Image = image::M33LedKernelImage;
         mark_stage(8);
-        appkit::run::<Image, UnoQCapsule>(appkit::NoWasi);
+        appkit::run::<Image>(appkit::NoWasi);
         mark_stage(9);
         loop {
             spin_loop();

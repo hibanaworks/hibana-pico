@@ -6,9 +6,6 @@ publish = false
 
 [workspace]
 
-[dependencies]
-hibana-wasip1-guest = { path = "../../../../guest/hibana-wasip1-guest" }
-
 [[bin]]
 name = "wasip1-led-choreofs-traffic-cycle"
 path = "src/bin/wasip1-led-choreofs-traffic-cycle.rs"

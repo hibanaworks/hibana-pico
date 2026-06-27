@@ -33,7 +33,7 @@ impl From<hibana::EndpointError> for PreviewProbeError {
 
 impl appkit::Capsule for PreviewProbe {
     type Placement = BakerPlacement;
-    type Local = PreviewProbeLocal;
+    type Localside = PreviewProbeLocal;
 
     fn choreography() -> impl hibana::runtime::program::Projectable {
         g::seq(
@@ -60,56 +60,56 @@ impl BakerCapsuleFacts for PreviewProbe {
 impl appkit::Localside<PreviewProbe> for PreviewProbeLocal {
     type Error = PreviewProbeError;
 
-    fn engine<'endpoint, 'guest, const ROLE: u8>(
-        mut ctx: appkit::EngineCtx<'endpoint, 'guest, PreviewProbe, ROLE>,
+    fn engine<'endpoint, const ROLE: u8>(
+        mut ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 1 {
-                let preview = ctx.endpoint().send::<EngineAbortBegin>(&());
+                let preview = ctx.send::<EngineAbortBegin>(&());
                 core::mem::drop(preview);
 
-                ctx.endpoint().send::<EngineAbortBegin>(&()).await?;
+                ctx.send::<EngineAbortBegin>(&()).await?;
 
-                ctx.endpoint().send::<EngineAbortMsg>(&()).await?;
+                ctx.send::<EngineAbortMsg>(&()).await?;
 
-                ctx.endpoint().recv::<EngineAbortFence>().await?;
+                ctx.recv::<EngineAbortFence>().await?;
 
-                ctx.endpoint().send::<EngineAbortAck>(&()).await?;
+                ctx.send::<EngineAbortAck>(&()).await?;
 
                 baker_firmware::mark_runtime_ready();
-                return ctx.pending().await;
+                return appkit::pending(ctx).await;
             }
-            ctx.pending().await
+            appkit::pending(ctx).await
         }
     }
 
-    fn driver<'a, const ROLE: u8>(
-        mut ctx: appkit::DriverCtx<'a, PreviewProbe, ROLE>,
+    fn driver<'endpoint, const ROLE: u8>(
+        mut ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 0 {
-                ctx.endpoint().recv::<EngineAbortBegin>().await?;
+                ctx.recv::<EngineAbortBegin>().await?;
 
-                ctx.endpoint().recv::<EngineAbortMsg>().await?;
+                ctx.recv::<EngineAbortMsg>().await?;
 
                 baker_firmware::mark_safe_state();
 
-                ctx.endpoint().send::<EngineAbortFence>(&()).await?;
+                ctx.send::<EngineAbortFence>(&()).await?;
 
-                ctx.endpoint().recv::<EngineAbortAck>().await?;
+                ctx.recv::<EngineAbortAck>().await?;
 
                 baker_firmware::mark_runtime_ready();
                 baker_firmware::mark_success(<PreviewProbe as BakerCapsuleFacts>::SUCCESS_RESULT);
-                return ctx.pending().await;
+                return appkit::pending(ctx).await;
             }
-            ctx.pending().await
+            appkit::pending(ctx).await
         }
     }
 
-    fn boundary<'a, const ROLE: u8>(
-        ctx: appkit::BoundaryCtx<'a, PreviewProbe, ROLE>,
+    fn boundary<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
+        appkit::pending(ctx)
     }
 }
 
@@ -127,7 +127,7 @@ pub extern "C" fn baker_selected_run() -> ! {
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
 fn main() {
-    baker_firmware::run::<PreviewProbe>()
+    panic!("baker-firmware examples are RP2040 hardware artifacts; build for thumbv6m-none-eabi")
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]

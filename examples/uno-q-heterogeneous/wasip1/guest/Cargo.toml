@@ -6,9 +6,6 @@ publish = false
 
 [workspace]
 
-[dependencies]
-hibana-wasip1-guest = { path = "../../../../guest/hibana-wasip1-guest" }
-
 [[bin]]
 name = "uno-q-llm-face-shell"
 path = "src/bin/uno-q-llm-face-shell.rs"

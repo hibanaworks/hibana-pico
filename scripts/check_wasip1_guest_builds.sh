@@ -13,41 +13,17 @@ target_dir="$ROOT/target/wasip1-apps"
 artifact_dir="$target_dir/wasm32-wasip1/release"
 wasip1_rustflags="${RUSTFLAGS:-} -C link-arg=--initial-memory=65536 -C link-arg=--max-memory=65536 -C link-arg=-zstack-size=4096"
 expected_wasms=(
-  wasip1-clock.wasm
-  wasip1-exit.wasm
-  wasip1-infinite-loop.wasm
   wasip1-led-choreofs-traffic-cycle.wasm
   wasip1-led-choreofs-traffic-once.wasm
   wasip1-session-mismatch-fd-write.wasm
   rp2w-epf-policy-timer-guest.wasm
   rp2w-sensor-panel-guest.wasm
-  wasip1-memory-grow-ok.wasm
-  wasip1-memory-grow-stale-lease.wasm
-  wasip1-random.wasm
-  wasip1-std-bad-path.wasm
-  wasip1-std-choreofs-append.wasm
-  wasip1-std-choreofs-read.wasm
-  wasip1-std-choreofs-static-write.wasm
-  wasip1-std-core-coverage.wasm
-  wasip1-stderr.wasm
-  wasip1-stdin.wasm
-  wasip1-stdout.wasm
-  wasip1-timer.wasm
   uno-q-llm-face-shell-loop.wasm
   uno-q-llm-face-shell.wasm
-  wasip1-trap.wasm
 )
 
 rm -rf "$target_dir"
 mkdir -p "$target_dir"
-
-RUSTFLAGS="$wasip1_rustflags" \
-CARGO_TARGET_DIR="$target_dir" \
-  cargo build \
-    --manifest-path guest/wasip1-programs/Cargo.toml \
-    --target wasm32-wasip1 \
-    --release \
-    --bins
 
 RUSTFLAGS="$wasip1_rustflags" \
 CARGO_TARGET_DIR="$target_dir" \
@@ -100,4 +76,4 @@ while IFS= read -r artifact; do
   fi
 done < "$expected_list"
 
-echo "wasip1 guest artifacts ok"
+echo "example wasip1 guest artifacts ok"

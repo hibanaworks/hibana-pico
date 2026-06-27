@@ -21,7 +21,7 @@ struct HostRx;
 
 impl appkit::Capsule for HostCapsule {
     type Placement = HostPlacement;
-    type Local = HostLocal;
+    type Localside = HostLocal;
 
     fn choreography() -> impl Projectable {
         g::send::<0, 1, Msg<TEST_LABEL, ()>>()
@@ -29,11 +29,11 @@ impl appkit::Capsule for HostCapsule {
 }
 
 impl appkit::Placement<HostCapsule> for HostPlacement {
-    fn role_kind(role: u8) -> appkit::RoleKind {
-        match role {
+    fn role_kind<const ROLE: u8>() -> appkit::RoleKind {
+        match ROLE {
             0 => appkit::RoleKind::Driver,
             1 => appkit::RoleKind::Boundary,
-            other => panic!("host placement has no role {other}"),
+            _ => panic!("host placement has no role {ROLE}"),
         }
     }
 }
@@ -41,26 +41,28 @@ impl appkit::Placement<HostCapsule> for HostPlacement {
 impl appkit::Localside<HostCapsule> for HostLocal {
     type Error = Infallible;
 
-    fn engine<'endpoint, 'guest, const ROLE: u8>(
-        ctx: appkit::EngineCtx<'endpoint, 'guest, HostCapsule, ROLE>,
+    fn engine<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
+        appkit::pending(ctx)
     }
 
-    fn driver<'a, const ROLE: u8>(
-        ctx: appkit::DriverCtx<'a, HostCapsule, ROLE>,
+    fn driver<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
+        appkit::pending(ctx)
     }
 
-    fn boundary<'a, const ROLE: u8>(
-        ctx: appkit::BoundaryCtx<'a, HostCapsule, ROLE>,
+    fn boundary<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
+        appkit::pending(ctx)
     }
 }
 
-impl appkit::LogicalImage<HostCapsule> for HostImage {
+impl appkit::LogicalImage for HostImage {
+    type Capsule = HostCapsule;
+
     type Carrier<'a> = HostCarrier;
     const REQUESTED_ROLES: appkit::RoleSet = appkit::RoleSet::single(0);
 
@@ -121,10 +123,10 @@ impl Transport for HostCarrier {
 
 #[test]
 fn host_capsule_uses_current_hibana_surface() {
-    appkit::run::<HostImage, HostCapsule>(appkit::NoWasi);
+    appkit::run::<HostImage>(appkit::NoWasi);
 
     assert_eq!(
-        <HostImage as appkit::LogicalImage<HostCapsule>>::REQUESTED_ROLES,
+        <HostImage as appkit::LogicalImage>::REQUESTED_ROLES,
         appkit::RoleSet::single(0)
     );
 }

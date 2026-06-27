@@ -44,7 +44,7 @@ impl WirePayload for CapacityPayload {
 
 impl appkit::Capsule for CapacityFault {
     type Placement = BakerPlacement;
-    type Local = CapacityFaultLocal;
+    type Localside = CapacityFaultLocal;
 
     fn choreography() -> impl hibana::runtime::program::Projectable {
         g::send::<1, 0, g::Msg<LABEL_CAPACITY_PAYLOAD, CapacityPayload>>()
@@ -66,32 +66,31 @@ impl BakerCapsuleFacts for CapacityFault {
 impl appkit::Localside<CapacityFault> for CapacityFaultLocal {
     type Error = core::convert::Infallible;
 
-    fn engine<'endpoint, 'guest, const ROLE: u8>(
-        mut ctx: appkit::EngineCtx<'endpoint, 'guest, CapacityFault, ROLE>,
+    fn engine<'endpoint, const ROLE: u8>(
+        mut ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
         async move {
             if ROLE == 1 {
                 let payload = CapacityPayload([0xa5; CAPACITY_PAYLOAD_BYTES]);
                 let result = ctx
-                    .endpoint()
                     .send::<g::Msg<LABEL_CAPACITY_PAYLOAD, CapacityPayload>>(&payload)
                     .await;
                 core::hint::black_box(&result);
             }
-            ctx.pending().await
+            appkit::pending(ctx).await
         }
     }
 
-    fn driver<'a, const ROLE: u8>(
-        ctx: appkit::DriverCtx<'a, CapacityFault, ROLE>,
+    fn driver<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
+        appkit::pending(ctx)
     }
 
-    fn boundary<'a, const ROLE: u8>(
-        ctx: appkit::BoundaryCtx<'a, CapacityFault, ROLE>,
+    fn boundary<'endpoint, const ROLE: u8>(
+        ctx: hibana::Endpoint<'endpoint, ROLE>,
     ) -> impl core::future::Future<Output = appkit::RoleResult<Self::Error>> {
-        ctx.pending()
+        appkit::pending(ctx)
     }
 }
 
@@ -109,7 +108,7 @@ pub extern "C" fn baker_selected_run() -> ! {
 
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
 fn main() {
-    baker_firmware::run::<CapacityFault>()
+    panic!("baker-firmware examples are RP2040 hardware artifacts; build for thumbv6m-none-eabi")
 }
 
 #[cfg(all(target_arch = "arm", target_os = "none"))]

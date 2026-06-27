@@ -1,8 +1,10 @@
-use hibana_wasip1_guest::choreofs;
+use std::{
+    fs::OpenOptions,
+    io::{self, Read, Write},
+};
 
-const DEVICE_PREOPEN_FD: u32 = 9;
-const SENSOR_SAMPLE_PATH: &str = "device/rp2w/sample";
-const DISPLAY_PATH: &str = "device/rp2w/display";
+const SENSOR_SAMPLE_PATH: &str = "/device/rp2w/sample";
+const DISPLAY_PATH: &str = "/device/rp2w/display";
 
 fn main() {
     if run().is_err() {
@@ -10,13 +12,14 @@ fn main() {
     }
 }
 
-fn run() -> hibana_wasip1_guest::Result<()> {
+fn run() -> io::Result<()> {
     let mut buffer = [0u8; 30];
     loop {
-        let sample = choreofs::open_read(DEVICE_PREOPEN_FD, SENSOR_SAMPLE_PATH)?;
-        let display = choreofs::open_write(DEVICE_PREOPEN_FD, DISPLAY_PATH)?;
-        let len = sample.read_once(&mut buffer)?;
-        display.write_once_exact(&buffer[..len])?;
+        let mut sample = OpenOptions::new().read(true).open(SENSOR_SAMPLE_PATH)?;
+        let mut display = OpenOptions::new().write(true).open(DISPLAY_PATH)?;
+        let len = sample.read(&mut buffer)?;
+        display.write_all(&buffer[..len])?;
+        display.flush()?;
     }
 }
 

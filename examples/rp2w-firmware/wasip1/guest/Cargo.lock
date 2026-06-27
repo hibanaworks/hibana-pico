@@ -3,12 +3,5 @@
 version = 4
 
 [[package]]
-name = "hibana-wasip1-guest"
-version = "0.1.0"
-
-[[package]]
 name = "rp2w-wasip1-guest"
 version = "0.1.0"
-dependencies = [
- "hibana-wasip1-guest",
-]

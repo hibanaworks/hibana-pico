@@ -39,9 +39,9 @@ Runtime shape:
 - core0 runs the hibana driver role, owns Debug Probe UART ingress, and handles
   ChoreoFS requests from the guest.
 - core1 runs the hibana engine role and drives a `std` `wasm32-wasip1` guest.
-- the WASI P1 guest uses `hibana-wasip1-guest::choreofs` to issue
-  `path_open` and `fd_write`; these imports are carried by hibana choreography
-  over the RP2350 SIO transport.
+- the WASI P1 guest uses ordinary Rust `std::fs` / `std::io`; those WASI
+  imports are carried by hibana choreography over the RP2350 SIO transport and
+  materialized by host-side ChoreoFS facts.
 - Debug Probe UART carries an EPF policy image into the choreography.
 - both cores load the same EPF image through the hibana-selected image delivery
   branch.

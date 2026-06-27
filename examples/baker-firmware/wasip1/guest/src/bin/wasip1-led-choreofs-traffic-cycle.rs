@@ -1,6 +1,17 @@
-use baker_wasip1_guest::{Led, sleep_ms};
+use std::{
+    fs::OpenOptions,
+    io::{self, Write},
+    thread,
+    time::Duration,
+};
 
-const STEP_MS: u32 = 80;
+const COLOR_STEP: Duration = Duration::from_millis(40);
+const YELLOW_BLINK_STEP: Duration = Duration::from_millis(20);
+const TRAFFIC_STATE_PATH: &str = "/device/traffic/state";
+const TRAFFIC_GREEN: &[u8] = b"G";
+const TRAFFIC_YELLOW: &[u8] = b"Y";
+const TRAFFIC_DARK: &[u8] = b"0";
+const TRAFFIC_RED: &[u8] = b"R";
 
 fn main() {
     if run().is_err() {
@@ -8,34 +19,37 @@ fn main() {
     }
 }
 
-fn run() -> hibana_wasip1_guest::Result<()> {
-    let green = Led::open("/device/led/green")?;
-    let yellow = Led::open("/device/led/yellow")?;
-    let red = Led::open("/device/led/red")?;
+fn run() -> io::Result<()> {
+    let mut traffic = open_traffic_state()?;
 
     loop {
-        set_and_wait(&green, true)?;
-        set_and_wait(&yellow, false)?;
-        set_and_wait(&red, false)?;
+        set_state(&mut traffic, TRAFFIC_GREEN, COLOR_STEP)?;
+        set_state(&mut traffic, TRAFFIC_YELLOW, COLOR_STEP)?;
 
-        set_and_wait(&green, false)?;
-        set_and_wait(&yellow, true)?;
-        set_and_wait(&red, false)?;
+        set_state(&mut traffic, TRAFFIC_DARK, YELLOW_BLINK_STEP)?;
+        set_state(&mut traffic, TRAFFIC_YELLOW, YELLOW_BLINK_STEP)?;
+        set_state(&mut traffic, TRAFFIC_DARK, YELLOW_BLINK_STEP)?;
+        set_state(&mut traffic, TRAFFIC_YELLOW, YELLOW_BLINK_STEP)?;
 
-        set_and_wait(&yellow, false)?;
-        set_and_wait(&yellow, true)?;
-        set_and_wait(&yellow, false)?;
-        set_and_wait(&yellow, true)?;
-
-        set_and_wait(&green, false)?;
-        set_and_wait(&yellow, false)?;
-        set_and_wait(&red, true)?;
+        set_state(&mut traffic, TRAFFIC_RED, COLOR_STEP)?;
     }
 }
 
-fn set_and_wait(led: &Led, on: bool) -> hibana_wasip1_guest::Result<()> {
-    led.set(on)?;
-    sleep_ms(STEP_MS)
+fn open_traffic_state() -> io::Result<std::fs::File> {
+    OpenOptions::new().write(true).open(TRAFFIC_STATE_PATH)
+}
+
+fn set_state(traffic: &mut std::fs::File, state: &[u8], delay: Duration) -> io::Result<()> {
+    let written = traffic.write(state)?;
+    if written != state.len() {
+        return Err(io::Error::from(io::ErrorKind::WriteZero));
+    }
+    wait(delay);
+    Ok(())
+}
+
+fn wait(delay: Duration) {
+    thread::sleep(delay);
 }
 
 #[cold]
